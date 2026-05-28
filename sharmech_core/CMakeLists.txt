@@ -9,24 +9,28 @@ find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
 ament_auto_add_library(${PROJECT_NAME} SHARED
+  src/vr_interface_node.cpp
+  src/state_manager_node.cpp
+  src/trajectory_generator_node.cpp
   src/kinematics_node.cpp
-  src/arm_controller_node.cpp
-  src/gripper_node.cpp
-  src/task_manager_node.cpp
+  src/hardware_bridge_node.cpp
 )
 
+rclcpp_components_register_node(${PROJECT_NAME}
+  PLUGIN "sharmech_core::VrInterfaceNode"
+  EXECUTABLE vr_interface_node)
+rclcpp_components_register_node(${PROJECT_NAME}
+  PLUGIN "sharmech_core::StateManagerNode"
+  EXECUTABLE state_manager_node)
+rclcpp_components_register_node(${PROJECT_NAME}
+  PLUGIN "sharmech_core::TrajectoryGeneratorNode"
+  EXECUTABLE trajectory_generator_node)
 rclcpp_components_register_node(${PROJECT_NAME}
   PLUGIN "sharmech_core::KinematicsNode"
   EXECUTABLE kinematics_node)
 rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN "sharmech_core::ArmControllerNode"
-  EXECUTABLE arm_controller_node)
-rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN "sharmech_core::GripperNode"
-  EXECUTABLE gripper_node)
-rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN "sharmech_core::TaskManagerNode"
-  EXECUTABLE task_manager_node)
+  PLUGIN "sharmech_core::HardwareBridgeNode"
+  EXECUTABLE hardware_bridge_node)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

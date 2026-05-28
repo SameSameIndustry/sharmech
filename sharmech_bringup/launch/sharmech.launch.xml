@@ -10,25 +10,35 @@
     <param name="robot_description" value="$(command 'xacro $(var urdf_file)')"/>
   </node>
 
-  <!-- core nodes (component container: 全ノードを同一プロセスで実行) -->
+  <!-- sharmech_container: 全ノードを同一プロセスで実行 -->
   <node_container pkg="rclcpp_components" exec="component_container"
                   name="sharmech_container" namespace="" output="screen">
+
+    <composable_node pkg="sharmech_core" plugin="sharmech_core::VrInterfaceNode"
+                     name="vr_interface_node">
+      <param from="$(var config)"/>
+    </composable_node>
+
+    <composable_node pkg="sharmech_core" plugin="sharmech_core::StateManagerNode"
+                     name="state_manager_node">
+      <param from="$(var config)"/>
+    </composable_node>
+
+    <composable_node pkg="sharmech_core" plugin="sharmech_core::TrajectoryGeneratorNode"
+                     name="trajectory_generator_node">
+      <param from="$(var config)"/>
+    </composable_node>
+
     <composable_node pkg="sharmech_core" plugin="sharmech_core::KinematicsNode"
                      name="kinematics_node">
       <param from="$(var config)"/>
     </composable_node>
-    <composable_node pkg="sharmech_core" plugin="sharmech_core::ArmControllerNode"
-                     name="arm_controller_node">
+
+    <composable_node pkg="sharmech_core" plugin="sharmech_core::HardwareBridgeNode"
+                     name="hardware_bridge_node">
       <param from="$(var config)"/>
     </composable_node>
-    <composable_node pkg="sharmech_core" plugin="sharmech_core::GripperNode"
-                     name="gripper_node">
-      <param from="$(var config)"/>
-    </composable_node>
-    <composable_node pkg="sharmech_core" plugin="sharmech_core::TaskManagerNode"
-                     name="task_manager_node">
-      <param from="$(var config)"/>
-    </composable_node>
+
   </node_container>
 
   <!-- rviz2 -->

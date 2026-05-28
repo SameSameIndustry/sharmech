@@ -2,44 +2,31 @@
 #define SHARMECH_CORE__KINEMATICS_NODE_HPP_
 
 #include <rclcpp/rclcpp.hpp>
-#include <geometry_msgs/msg/point.hpp>
-#include <sensor_msgs/msg/joint_state.hpp>
-#include <cmath>
+#include <nav_msgs/msg/path.hpp>
+#include <trajectory_msgs/msg/joint_trajectory.hpp>
+#include "sharmech_core/utility/five_bar_kinematics.hpp"
 
 namespace sharmech_core
 {
 
-// 5節リンク(5-bar linkage)の逆運動学・順運動学ノード
-// 構成: 2つのモータ(joint1, joint2)がリンクを介してエンドエフェクタを駆動
+// 5節リンク逆運動学ノード
+// カルテシアン軌道の各ウェイポイントに対してIKを解き
+// 関節角度の時系列 (JointTrajectory) を生成する
 //
-//   motor1(-d/2, 0) ---l1--- elbow_L ---l2---+
-//                                            | EE (x, y)
-//   motor2(+d/2, 0) ---l1--- elbow_R ---l2---+
-//
-// Subscribe: /target_pose  (geometry_msgs/Point)  - 目標位置 (x, y)
-// Publish  : /joint_command (sensor_msgs/JointState) - 関節角度指令 (θ1, θ2)
+// Sub: /cartesian_trajectory (trajectory_generator_node から)
+// Pub: /joint_trajectory     (hardware_bridge_node, state_manager_node へ)
 class KinematicsNode : public rclcpp::Node
 {
 public:
   explicit KinematicsNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
 
 private:
-  void onTargetPose(const geometry_msgs::msg::Point::SharedPtr msg);
+  void onCartesianTrajectory(const nav_msgs::msg::Path::SharedPtr msg);
 
-  // 逆運動学: 目標位置 (x, y) → 関節角度 (θ1, θ2)
-  // 戻り値: 解が存在すれば true
-  bool inverseKinematics(double x, double y, double & theta1, double & theta2);
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr              cartesian_traj_sub_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr joint_traj_pub_;
 
-  // 順運動学: 関節角度 (θ1, θ2) → エンドエフェクタ位置 (x, y)
-  void forwardKinematics(double theta1, double theta2, double & x, double & y);
-
-  rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr target_pose_sub_;
-  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_pub_;
-
-  // 機構パラメータ (config.yaml から読み込み)
-  double l1_;          // 第1リンク長 [m]
-  double l2_;          // 第2リンク長 [m]
-  double base_width_;  // 2モータ間の距離 [m]
+  FiveBarParams params_;
 };
 
 }  // namespace sharmech_core
