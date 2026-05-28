@@ -1,0 +1,26 @@
+kinematics_node:
+  ros__parameters:
+    # 5節リンク機構パラメータ (m)
+    l1: 0.15          # 第1リンク長 (モータ側)
+    l2: 0.15          # 第2リンク長 (エンドエフェクタ側)
+    base_width: 0.10  # 2モータ間の距離
+
+arm_controller_node:
+  ros__parameters:
+    # TODO: ハードウェアインターフェースの設定を追加
+    # serial_port: /dev/ttyUSB0
+    # baud_rate: 115200
+
+gripper_node:
+  ros__parameters:
+    # TODO: グリッパハードウェアの設定を追加
+
+task_manager_node:
+  ros__parameters:
+    pick_x:  0.0    # ピック位置 X [m]
+    pick_y:  0.15   # ピック位置 Y [m]
+    place_x: 0.10   # プレース位置 X [m]
+    place_y: 0.15   # プレース位置 Y [m]
+    home_x:  0.0    # ホーム位置 X [m]
+    home_y:  0.20   # ホーム位置 Y [m]
+    position_tolerance: 0.005  # 到達判定閾値 [m]

@@ -1,0 +1,37 @@
+<?xml version='1.0' ?>
+<launch>
+  <arg name="rviz" default="false"/>
+
+  <let name="urdf_file" value="$(find-pkg-share sharmech_description)/urdf/sharmech.urdf.xacro"/>
+  <let name="config"    value="$(find-pkg-share sharmech_bringup)/config/config.yaml"/>
+
+  <!-- robot_state_publisher -->
+  <node pkg="robot_state_publisher" exec="robot_state_publisher">
+    <param name="robot_description" value="$(command 'xacro $(var urdf_file)')"/>
+  </node>
+
+  <!-- core nodes -->
+  <node pkg="sharmech_core" exec="kinematics_node" name="kinematics_node" output="screen">
+    <param from="$(var config)"/>
+  </node>
+
+  <node pkg="sharmech_core" exec="arm_controller_node" name="arm_controller_node" output="screen">
+    <param from="$(var config)"/>
+  </node>
+
+  <node pkg="sharmech_core" exec="gripper_node" name="gripper_node" output="screen">
+    <param from="$(var config)"/>
+  </node>
+
+  <node pkg="sharmech_core" exec="task_manager_node" name="task_manager_node" output="screen">
+    <param from="$(var config)"/>
+  </node>
+
+  <!-- rviz2 -->
+  <group if="$(var rviz)">
+    <node pkg="rviz2" exec="rviz2" name="rviz2" output="screen">
+      <param name="config_file"
+             value="$(find-pkg-share sharmech_description)/rviz/sharmech.rviz"/>
+    </node>
+  </group>
+</launch>
