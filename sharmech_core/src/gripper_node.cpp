@@ -1,4 +1,5 @@
 #include "sharmech_core/gripper_node.hpp"
+#include <rclcpp_components/register_node_macro.hpp>
 
 namespace sharmech_core
 {
@@ -51,10 +52,4 @@ void GripperNode::release()
 
 }  // namespace sharmech_core
 
-int main(int argc, char ** argv)
-{
-  rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<sharmech_core::GripperNode>());
-  rclcpp::shutdown();
-  return 0;
-}
+RCLCPP_COMPONENTS_REGISTER_NODE(sharmech_core::GripperNode)

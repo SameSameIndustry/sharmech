@@ -1,4 +1,5 @@
 #include "sharmech_core/arm_controller_node.hpp"
+#include <rclcpp_components/register_node_macro.hpp>
 
 namespace sharmech_core
 {
@@ -66,10 +67,4 @@ void ArmControllerNode::readFromHardware(double & theta1, double & theta2)
 
 }  // namespace sharmech_core
 
-int main(int argc, char ** argv)
-{
-  rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<sharmech_core::ArmControllerNode>());
-  rclcpp::shutdown();
-  return 0;
-}
+RCLCPP_COMPONENTS_REGISTER_NODE(sharmech_core::ArmControllerNode)

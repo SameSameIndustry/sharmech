@@ -1,4 +1,5 @@
 #include "sharmech_core/kinematics_node.hpp"
+#include <rclcpp_components/register_node_macro.hpp>
 
 namespace sharmech_core
 {
@@ -91,10 +92,4 @@ void KinematicsNode::forwardKinematics(
 
 }  // namespace sharmech_core
 
-int main(int argc, char ** argv)
-{
-  rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<sharmech_core::KinematicsNode>());
-  rclcpp::shutdown();
-  return 0;
-}
+RCLCPP_COMPONENTS_REGISTER_NODE(sharmech_core::KinematicsNode)
