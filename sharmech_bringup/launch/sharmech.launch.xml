@@ -29,10 +29,8 @@
       <param from="$(var config)"/>
     </composable_node>
 
-    <composable_node pkg="sharmech_core" plugin="sharmech_core::KinematicsNode"
-                     name="kinematics_node">
-      <param from="$(var config)"/>
-    </composable_node>
+    <!-- kinematics_node (5節リンクIK) はMCU側でIKを行うため現行パイプラインでは未使用。
+         sharmech_core::KinematicsNode としてソースは残置 -->
 
     <composable_node pkg="sharmech_core" plugin="sharmech_core::HardwareBridgeNode"
                      name="hardware_bridge_node">

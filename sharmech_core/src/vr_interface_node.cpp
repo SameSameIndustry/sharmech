@@ -11,6 +11,8 @@ VrInterfaceNode::VrInterfaceNode(const rclcpp::NodeOptions & options)
   workspace_x_max_ = declare_parameter("workspace_x_max",  0.20);
   workspace_y_min_ = declare_parameter("workspace_y_min",  0.05);
   workspace_y_max_ = declare_parameter("workspace_y_max",  0.30);
+  workspace_z_min_ = declare_parameter("workspace_z_min",  0.00);
+  workspace_z_max_ = declare_parameter("workspace_z_max",  0.30);
 
   vr_target_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
     "/vr/target_pose", 10,
@@ -33,8 +35,8 @@ void VrInterfaceNode::onVrTargetPose(
   const auto ros_pose = CoordinateConverter::unityToRos(*msg);
 
   if (!isValidTarget(ros_pose)) {
-    RCLCPP_WARN(get_logger(), "Target out of workspace: (%.3f, %.3f)",
-      ros_pose.pose.position.x, ros_pose.pose.position.y);
+    RCLCPP_WARN(get_logger(), "Target out of workspace: (%.3f, %.3f, %.3f)",
+      ros_pose.pose.position.x, ros_pose.pose.position.y, ros_pose.pose.position.z);
     return;
   }
 
@@ -53,8 +55,10 @@ bool VrInterfaceNode::isValidTarget(
 {
   const double x = ros_pose.pose.position.x;
   const double y = ros_pose.pose.position.y;
+  const double z = ros_pose.pose.position.z;
   return x >= workspace_x_min_ && x <= workspace_x_max_ &&
-         y >= workspace_y_min_ && y <= workspace_y_max_;
+         y >= workspace_y_min_ && y <= workspace_y_max_ &&
+         z >= workspace_z_min_ && z <= workspace_z_max_;
 }
 
 }  // namespace sharmech_core

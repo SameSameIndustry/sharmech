@@ -4,13 +4,13 @@ vr_interface_node:
     workspace_x_max:  0.20   # 作業領域 X 上限 [m]
     workspace_y_min:  0.05   # 作業領域 Y 下限 [m]
     workspace_y_max:  0.30   # 作業領域 Y 上限 [m]
+    workspace_z_min:  0.00   # 作業領域 Z 下限 [m]
+    workspace_z_max:  0.30   # 作業領域 Z 上限 [m]
 
 state_manager_node:
   ros__parameters:
-    l1: 0.15           # 第1リンク長 [m]
-    l2: 0.15           # 第2リンク長 [m]
-    base_width: 0.10   # 2モータ間距離 [m]
-    joint_tolerance: 0.05  # 到達判定閾値 [rad]
+    pos_tolerance: 0.005  # 到達判定閾値 (位置) [m]
+    rot_tolerance: 0.05   # 到達判定閾値 (pitch/yaw) [rad]
 
 trajectory_generator_node:
   ros__parameters:
@@ -18,15 +18,17 @@ trajectory_generator_node:
     v_max: 0.10        # 最大速度 [m/s]
     a_max: 0.20        # 最大加速度 [m/s^2]
 
-kinematics_node:
-  ros__parameters:
-    l1: 0.15
-    l2: 0.15
-    base_width: 0.10
+# kinematics_node (5節リンクIK) はMCU側でIKを行うため現行パイプラインでは未使用。
+# ソースは残置しているため、単体テストや将来のシミュレーション用途で使う場合は
+# 以下のパラメータを復活させ、launch側でcomposable_nodeを追加すること。
+# kinematics_node:
+#   ros__parameters:
+#     l1: 0.15
+#     l2: 0.15
+#     base_width: 0.10
 
 hardware_bridge_node:
   ros__parameters:
-    control_rate: 100.0  # 制御周期 [Hz]
-    # TODO: ハードウェア接続設定を追加
-    # serial_port: /dev/ttyUSB0
-    # baud_rate: 115200
+    control_rate: 100.0        # 制御周期 [Hz]
+    mcu_ip: "192.168.1.50"     # MCUのIPアドレス
+    mcu_port: 8888              # MCUのUDP受信ポート

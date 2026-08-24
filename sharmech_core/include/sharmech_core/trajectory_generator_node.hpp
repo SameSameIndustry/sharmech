@@ -10,9 +10,11 @@ namespace sharmech_core
 {
 
 // カルテシアン空間での軌道生成ノード
+// 位置(x,y,z)は線形補間、姿勢(orientation)はSlerpで補間する
 //
 // Sub: /goal_pose           (state_manager_node から)
-// Pub: /cartesian_trajectory (kinematics_node へ)
+// Sub: /robot/current_pose  (hardware_bridge_node から、始点として使用)
+// Pub: /cartesian_trajectory (hardware_bridge_node へ)
 //      nav_msgs/Path の各ポーズの header.stamp に到達時刻を格納
 class TrajectoryGeneratorNode : public rclcpp::Node
 {
@@ -23,15 +25,15 @@ private:
   void onGoalPose(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
 
   nav_msgs::msg::Path generateTrajectory(
-    const geometry_msgs::msg::Point & start,
-    const geometry_msgs::msg::Point & goal) const;
+    const geometry_msgs::msg::Pose & start,
+    const geometry_msgs::msg::Pose & goal) const;
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr                trajectory_pub_;
 
-  // 現在のEE位置 (state_manager から /robot/current_pose を購読)
+  // 現在のEE姿勢 (hardware_bridge_node から /robot/current_pose を購読)
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr current_pose_sub_;
-  geometry_msgs::msg::Point current_pos_;
+  geometry_msgs::msg::Pose current_pose_;
 
   int    num_waypoints_;  // 補間点数
   double v_max_;          // 最大速度 [m/s]

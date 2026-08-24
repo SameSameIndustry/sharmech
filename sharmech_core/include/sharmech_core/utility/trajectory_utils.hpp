@@ -33,7 +33,7 @@ public:
       geometry_msgs::msg::Point p;
       p.x = start.x + t * (end.x - start.x);
       p.y = start.y + t * (end.y - start.y);
-      p.z = 0.0;
+      p.z = start.z + t * (end.z - start.z);
       path.push_back(p);
     }
     return path;
@@ -56,7 +56,8 @@ public:
     for (size_t i = 1; i < waypoints.size(); ++i) {
       const double dx = waypoints[i].x - waypoints[i - 1].x;
       const double dy = waypoints[i].y - waypoints[i - 1].y;
-      const double len = std::hypot(dx, dy);
+      const double dz = waypoints[i].z - waypoints[i - 1].z;
+      const double len = std::hypot(dx, dy, dz);
       seg_lengths.push_back(len);
       total_length += len;
     }
@@ -94,7 +95,7 @@ public:
     const geometry_msgs::msg::Point & a,
     const geometry_msgs::msg::Point & b)
   {
-    return std::hypot(a.x - b.x, a.y - b.y);
+    return std::hypot(a.x - b.x, a.y - b.y, a.z - b.z);
   }
 };
 

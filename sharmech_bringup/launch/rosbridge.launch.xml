@@ -1,0 +1,10 @@
+<?xml version='1.0' ?>
+<launch>
+  <!-- rosbridge WebSocket サーバー (port 9090) -->
+  <!-- WebXR コントローラー (catchrobo_webxr_controller) と通信する -->
+  <node pkg="rosbridge_server" exec="rosbridge_websocket" output="screen">
+    <param name="port" value="9090"/>
+    <param name="address" value=""/>
+    <!-- HTTPS (wss://) を使う場合は ssl:=true と証明書パスを指定する -->
+  </node>
+</launch>

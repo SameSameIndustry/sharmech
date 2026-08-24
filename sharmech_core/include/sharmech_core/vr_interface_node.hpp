@@ -37,6 +37,7 @@ private:
   // 作業領域制限 [m]
   double workspace_x_min_, workspace_x_max_;
   double workspace_y_min_, workspace_y_max_;
+  double workspace_z_min_, workspace_z_max_;
 };
 
 }  // namespace sharmech_core
