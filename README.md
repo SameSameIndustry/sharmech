@@ -3,9 +3,8 @@
 5節リンク機構を用いたピックアンドプレースロボットの ROS2 パッケージ群。
 VR (WebXR / Meta Quest 3) と PS4 コントローラで操縦する。
 
-> **このドキュメントは「決定した設計」を記述しています。**
-> 現在のコードはこの設計より前の旧構成のままです。実装状況は
-> [実装状況](#実装状況) を参照してください。
+> このドキュメントは設計の正本であり、ROS2 層のコードはこの設計どおりに**実装済み**です。
+> 残作業 (MCU 側対応・実機合わせ) は[実装状況](#実装状況)を参照してください。
 
 ## 目次
 
@@ -440,26 +439,25 @@ ROS2 グラフへの直接の窓なので、クライアントを「ROS2 ノー�
 
 ## 実装状況
 
-**現在のコードは旧設計のまま。** 上記アーキテクチャは設計段階であり未実装。
+上記アーキテクチャの ROS2 層は**実装済み**。ノード詳細は `sharmech_core/docs/` を参照。
 
-| 設計上のノード | 現在のコード | 状態 |
-|---|---|---|
-| (なし) | `vr_interface_node` | **削除する。** VR は rosbridge で直接繋ぐため中継ノードが不要 |
-| `joy_teleop_node` | なし | **新規** |
-| `motion_generator_node` | `state_manager_node` + `trajectory_generator_node` | 要統合・速度積分/調停/ウォッチドッグ追加 |
-| `hardware_bridge_node` | `hardware_bridge_node` | 要改修(ヘッダ追加、速度併送、エンコーダ抽象化、受信実装) |
-| `kinematics_node` | `kinematics_node` (未使用) | パターンB まで保留 |
-| `sharmech_msgs` | なし | **新規パッケージ** |
+| ノード | 状態 |
+|---|---|
+| `motion_generator_node` | 実装済み。旧 `state_manager_node` + `trajectory_generator_node` を置き換え |
+| `joy_teleop_node` | 実装済み (新規) |
+| `hardware_bridge_node` | 実装済み (プロトコル v1・送受信対応) |
+| `kinematics_node` | パターンB。ロボット仕様確定まで未実装 |
+| `sharmech_msgs` | 実装済み (`CartesianCommand` / `MotionStatus`) |
 
-既知の相違点:
+旧構成のノード (`vr_interface_node` / `state_manager_node` / `trajectory_generator_node` /
+旧 `kinematics_node`) と `coordinate_converter.hpp` / `trajectory_utils.hpp` は削除済み。
+`five_bar_kinematics.hpp` はパターンB 用に残置 (forwardKinematics は近似実装のまま)。
 
-- `coordinate_converter.hpp` は Unity(左手系)前提で誤っているが、**そもそも ROS2 側で座標変換をしないので不要。`vr_interface_node` ごと削除する**
-- トピック名が旧構成のまま。WebXR クライアント側の実装 (`/catchrobo/arm/*`) に合わせる必要がある
-- ゴール指定が Action / ステートマシン (`state_manager_node`) 前提。トピック + 状態トピックへ要変更
-- `hardware_bridge_node` が軌道のタイムスタンプを無視し、配列インデックスを1つずつ進めている。距離に関係なく一定時間で走り切ってしまうため要修正
-- UDP パケットにヘッダ(`protocol_version` / `packet_type`)と速度が無い
-- MCU からの受信が未実装。`/catchrobo/arm/current_pose` は送信した目標のエコー
-- `five_bar_kinematics.hpp` の `forwardKinematics` は近似実装(中点)のまま
+残作業:
+
+- MCU 側ファームウェアの対応 (別担当者)。それまで `/catchrobo/arm/current_pose` は流れない
+- `home_pose` と PS4 の軸・ボタン番号の実機合わせ (config.yaml)
+- パターンB (`kinematics_node` + `packet_type=2`) はロボット仕様確定後
 
 ## ビルドと起動
 

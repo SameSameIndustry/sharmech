@@ -1,0 +1,360 @@
+#include "sharmech_core/motion_generator_node.hpp"
+#include "sharmech_core/utility/orientation_utils.hpp"
+
+#include <rclcpp_components/register_node_macro.hpp>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+
+#include <algorithm>
+#include <cmath>
+
+namespace sharmech_core
+{
+
+namespace
+{
+
+constexpr double kTwistEpsilon = 1e-6;
+
+// 5成分のいずれかが非ゼロか (ゼロ Twist は「ジョグ入力なし」を意味する)
+bool isActive(const CartesianState & twist)
+{
+  return std::abs(twist.x) > kTwistEpsilon ||
+         std::abs(twist.y) > kTwistEpsilon ||
+         std::abs(twist.z) > kTwistEpsilon ||
+         std::abs(twist.pitch) > kTwistEpsilon ||
+         std::abs(twist.yaw) > kTwistEpsilon;
+}
+
+// value を target へ、1周期あたり max_step を上限に近づける (レート制限)
+double approach(double value, double target, double max_step)
+{
+  const double diff = target - value;
+  return value + std::clamp(diff, -max_step, max_step);
+}
+
+geometry_msgs::msg::Pose toPoseMsg(const CartesianState & s)
+{
+  geometry_msgs::msg::Pose pose;
+  pose.position.x = s.x;
+  pose.position.y = s.y;
+  pose.position.z = s.z;
+  tf2::Quaternion q;
+  q.setRPY(0.0, s.pitch, s.yaw);
+  pose.orientation = tf2::toMsg(q);
+  return pose;
+}
+
+}  // namespace
+
+MotionGeneratorNode::MotionGeneratorNode(const rclcpp::NodeOptions & options)
+: Node("motion_generator_node", options),
+  trajectory_start_time_(0, 0, RCL_ROS_TIME)
+{
+  control_rate_ = declare_parameter("control_rate", 100.0);
+  status_rate_  = declare_parameter("status_rate", 10.0);
+  v_max_        = declare_parameter("v_max", 0.10);
+  a_max_        = declare_parameter("a_max", 0.20);
+  w_max_        = declare_parameter("w_max", 1.0);
+  alpha_max_    = declare_parameter("alpha_max", 2.0);
+  workspace_x_min_ = declare_parameter("workspace_x_min", -0.20);
+  workspace_x_max_ = declare_parameter("workspace_x_max",  0.20);
+  workspace_y_min_ = declare_parameter("workspace_y_min",  0.05);
+  workspace_y_max_ = declare_parameter("workspace_y_max",  0.30);
+  workspace_z_min_ = declare_parameter("workspace_z_min",  0.00);
+  workspace_z_max_ = declare_parameter("workspace_z_max",  0.30);
+  twist_timeout_ = declare_parameter("twist_timeout", 0.4);
+  goal_mode_     = declare_parameter("goal_mode", std::string("twist_priority"));
+
+  if (goal_mode_ != "twist_priority" && goal_mode_ != "exclusive") {
+    RCLCPP_FATAL(get_logger(), "Unknown goal_mode: %s", goal_mode_.c_str());
+    throw std::invalid_argument("unknown goal_mode");
+  }
+
+  // 起動直後の目標姿勢は作業領域内に収めておく (MCU フィードバックが届けば同期される)
+  target_ = clampToWorkspace(target_);
+
+  target_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
+    "/catchrobo/arm/target_pose", 10,
+    std::bind(&MotionGeneratorNode::onTargetPose, this, std::placeholders::_1));
+  cmd_twist_sub_ = create_subscription<geometry_msgs::msg::Twist>(
+    "/catchrobo/arm/cmd_twist", 10,
+    std::bind(&MotionGeneratorNode::onCmdTwist, this, std::placeholders::_1));
+  gripper_sub_ = create_subscription<std_msgs::msg::Bool>(
+    "/catchrobo/arm/gripper", 10,
+    std::bind(&MotionGeneratorNode::onGripper, this, std::placeholders::_1));
+  cancel_sub_ = create_subscription<std_msgs::msg::Empty>(
+    "/catchrobo/arm/cancel", 10,
+    std::bind(&MotionGeneratorNode::onCancel, this, std::placeholders::_1));
+  current_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
+    "/catchrobo/arm/current_pose", 10,
+    std::bind(&MotionGeneratorNode::onCurrentPose, this, std::placeholders::_1));
+
+  cartesian_pub_ = create_publisher<sharmech_msgs::msg::CartesianCommand>(
+    "/catchrobo/command/cartesian", 10);
+  gripper_pub_ = create_publisher<std_msgs::msg::Bool>(
+    "/catchrobo/command/gripper", 10);
+
+  // latched: 後から接続した VR クライアントにも現在状態が即座に届く
+  status_pub_ = create_publisher<sharmech_msgs::msg::MotionStatus>(
+    "/catchrobo/arm/status",
+    rclcpp::QoS(1).transient_local());
+
+  const auto control_period = std::chrono::duration<double>(1.0 / control_rate_);
+  control_timer_ = create_wall_timer(
+    std::chrono::duration_cast<std::chrono::nanoseconds>(control_period),
+    std::bind(&MotionGeneratorNode::onControlTimer, this));
+  const auto status_period = std::chrono::duration<double>(1.0 / status_rate_);
+  status_timer_ = create_wall_timer(
+    std::chrono::duration_cast<std::chrono::nanoseconds>(status_period),
+    std::bind(&MotionGeneratorNode::onStatusTimer, this));
+
+  RCLCPP_INFO(get_logger(), "motion_generator_node started (%.0f Hz, goal_mode=%s)",
+    control_rate_, goal_mode_.c_str());
+}
+
+void MotionGeneratorNode::onTargetPose(
+  const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+{
+  const auto pitch_yaw = OrientationUtils::toPitchYaw(msg->pose.orientation);
+  CartesianState goal;
+  goal.x     = msg->pose.position.x;
+  goal.y     = msg->pose.position.y;
+  goal.z     = msg->pose.position.z;
+  goal.pitch = pitch_yaw.pitch;
+  goal.yaw   = pitch_yaw.yaw;
+
+  // 作業領域外のゴールはクランプせず却下する (黙って別の場所へ動くより安全)
+  if (!isInsideWorkspace(goal.x, goal.y, goal.z)) {
+    rejectGoal("goal outside workspace");
+    return;
+  }
+  if (mode_ == Mode::kJog) {
+    rejectGoal("jog active");
+    return;
+  }
+
+  // 新しいゴールは実行中のゴールを上書きする。
+  // 軌道の始点は現在指令中の目標姿勢 (このノードが唯一の所有者)
+  trajectory_ = TrapezoidalTrajectory(
+    target_, goal, v_max_, a_max_, w_max_, alpha_max_);
+  trajectory_start_time_ = now();
+  goal_ = goal;
+  mode_ = Mode::kGoal;
+  last_result_    = sharmech_msgs::msg::MotionStatus::RESULT_NONE;
+  status_message_ = "executing";
+
+  RCLCPP_INFO(get_logger(),
+    "Goal accepted: (%.3f, %.3f, %.3f) pitch=%.2f yaw=%.2f, duration=%.2f s",
+    goal.x, goal.y, goal.z, goal.pitch, goal.yaw, trajectory_.duration());
+}
+
+void MotionGeneratorNode::onCmdTwist(const geometry_msgs::msg::Twist::SharedPtr msg)
+{
+  CartesianState twist;
+  twist.x     = msg->linear.x;
+  twist.y     = msg->linear.y;
+  twist.z     = msg->linear.z;
+  twist.pitch = msg->angular.y;
+  twist.yaw   = msg->angular.z;
+
+  // ゼロでない Twist のみがゴールに干渉する。
+  // joy_teleop_node はニュートラルでもゼロ Twist を送り続けるため、
+  // 「受信したら abort」と実装するとゴール指定が一切使えなくなる
+  const bool active = isActive(twist);
+
+  if (goal_mode_ == "exclusive" && mode_ == Mode::kGoal) {
+    return;  // ゴール実行中は Twist を無視 (記録もしない)
+  }
+
+  commanded_twist_ = twist;
+  last_twist_time_ = now();
+
+  if (active) {
+    if (mode_ == Mode::kGoal) {
+      last_result_    = sharmech_msgs::msg::MotionStatus::RESULT_ABORTED;
+      status_message_ = "preempted by jog";
+      RCLCPP_INFO(get_logger(), "Goal aborted: preempted by jog");
+    }
+    if (mode_ != Mode::kJog) {
+      mode_ = Mode::kJog;
+    }
+  }
+}
+
+void MotionGeneratorNode::onGripper(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  gripper_state_ = msg->data;  // publish はタイマー内で行う
+}
+
+void MotionGeneratorNode::onCancel(const std_msgs::msg::Empty::SharedPtr)
+{
+  if (mode_ == Mode::kGoal) {
+    mode_ = Mode::kIdle;  // target_ はその場で保持される
+    last_result_    = sharmech_msgs::msg::MotionStatus::RESULT_ABORTED;
+    status_message_ = "cancelled";
+    RCLCPP_INFO(get_logger(), "Goal cancelled");
+  }
+}
+
+void MotionGeneratorNode::onCurrentPose(
+  const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+{
+  latest_feedback_ = *msg;
+
+  // 起動後、まだ何も動かしていなければ目標姿勢を実姿勢に同期する。
+  // これが無いと最初の指令で「初期値 (原点付近)」へ実機が飛ぶ
+  if (!synced_with_feedback_ && mode_ == Mode::kIdle) {
+    const auto pitch_yaw = OrientationUtils::toPitchYaw(msg->pose.orientation);
+    CartesianState fb;
+    fb.x     = msg->pose.position.x;
+    fb.y     = msg->pose.position.y;
+    fb.z     = msg->pose.position.z;
+    fb.pitch = pitch_yaw.pitch;
+    fb.yaw   = pitch_yaw.yaw;
+    target_ = clampToWorkspace(fb);
+    synced_with_feedback_ = true;
+    RCLCPP_INFO(get_logger(),
+      "Target synced to MCU feedback: (%.3f, %.3f, %.3f)", fb.x, fb.y, fb.z);
+  }
+}
+
+void MotionGeneratorNode::onControlTimer()
+{
+  const double dt = 1.0 / control_rate_;
+  const auto current_time = now();
+
+  // 1. ウォッチドッグ: Twist が途絶したら速度指令を 0 とみなす
+  if (last_twist_time_ &&
+    (current_time - *last_twist_time_).seconds() > twist_timeout_)
+  {
+    if (isActive(commanded_twist_)) {
+      RCLCPP_WARN(get_logger(), "Twist watchdog fired; decelerating to stop");
+    }
+    commanded_twist_ = CartesianState{};
+  }
+
+  // 2. レート制限 (加速・減速の両方に適用)
+  current_twist_.x     = approach(current_twist_.x, commanded_twist_.x, a_max_ * dt);
+  current_twist_.y     = approach(current_twist_.y, commanded_twist_.y, a_max_ * dt);
+  current_twist_.z     = approach(current_twist_.z, commanded_twist_.z, a_max_ * dt);
+  current_twist_.pitch =
+    approach(current_twist_.pitch, commanded_twist_.pitch, alpha_max_ * dt);
+  current_twist_.yaw =
+    approach(current_twist_.yaw, commanded_twist_.yaw, alpha_max_ * dt);
+
+  // 3. モード別に target_ / target_vel_ を更新 (書き換えるのはここだけ)
+  switch (mode_) {
+    case Mode::kJog: {
+        target_.x     += current_twist_.x * dt;
+        target_.y     += current_twist_.y * dt;
+        target_.z     += current_twist_.z * dt;
+        target_.pitch += current_twist_.pitch * dt;
+        target_.yaw   += current_twist_.yaw * dt;
+        target_vel_ = current_twist_;
+
+        // 作業領域クランプ。クランプが効いた軸は速度も 0 にする。
+        // 位置は境界で止まっているのに速度を報告すると MCU が外挿して
+        // 領域外へはみ出すため、位置と速度は常に整合させる
+        const CartesianState clamped = clampToWorkspace(target_);
+        if (clamped.x != target_.x) {target_vel_.x = 0.0; current_twist_.x = 0.0;}
+        if (clamped.y != target_.y) {target_vel_.y = 0.0; current_twist_.y = 0.0;}
+        if (clamped.z != target_.z) {target_vel_.z = 0.0; current_twist_.z = 0.0;}
+        target_ = clamped;
+
+        if (!isActive(current_twist_) && !isActive(commanded_twist_)) {
+          mode_ = Mode::kIdle;
+        }
+        break;
+      }
+    case Mode::kGoal: {
+        // 軌道は経過時間で評価する (インデックスを進めてはならない)
+        const double t = (current_time - trajectory_start_time_).seconds();
+        trajectory_.sample(t, target_, target_vel_);
+        if (t >= trajectory_.duration()) {
+          mode_ = Mode::kIdle;
+          last_result_    = sharmech_msgs::msg::MotionStatus::RESULT_SUCCEEDED;
+          status_message_ = "reached";
+          RCLCPP_INFO(get_logger(), "Goal reached");
+        }
+        break;
+      }
+    case Mode::kIdle:
+      target_vel_ = CartesianState{};
+      break;
+  }
+
+  // 4. publish
+  sharmech_msgs::msg::CartesianCommand cmd;
+  cmd.header.stamp    = current_time;
+  cmd.header.frame_id = "field";
+  cmd.pose = toPoseMsg(target_);
+  cmd.twist.linear.x  = target_vel_.x;
+  cmd.twist.linear.y  = target_vel_.y;
+  cmd.twist.linear.z  = target_vel_.z;
+  cmd.twist.angular.y = target_vel_.pitch;
+  cmd.twist.angular.z = target_vel_.yaw;
+  cartesian_pub_->publish(cmd);
+
+  std_msgs::msg::Bool gripper_msg;
+  gripper_msg.data = gripper_state_;
+  gripper_pub_->publish(gripper_msg);
+}
+
+void MotionGeneratorNode::onStatusTimer()
+{
+  sharmech_msgs::msg::MotionStatus status;
+  status.header.stamp    = now();
+  status.header.frame_id = "field";
+  status.mode        = static_cast<uint8_t>(mode_);
+  status.last_result = last_result_;
+  status.message     = status_message_;
+
+  if (mode_ == Mode::kGoal) {
+    status.goal_pose = toPoseMsg(goal_);
+    // 残距離は実姿勢 (フィードバックがあれば) と目標の差。無ければ指令値基準
+    double from_x = target_.x, from_y = target_.y, from_z = target_.z;
+    if (latest_feedback_) {
+      from_x = latest_feedback_->pose.position.x;
+      from_y = latest_feedback_->pose.position.y;
+      from_z = latest_feedback_->pose.position.z;
+    }
+    status.distance_remaining = std::sqrt(
+      (goal_.x - from_x) * (goal_.x - from_x) +
+      (goal_.y - from_y) * (goal_.y - from_y) +
+      (goal_.z - from_z) * (goal_.z - from_z));
+    const double elapsed = (now() - trajectory_start_time_).seconds();
+    status.time_remaining = std::max(0.0, trajectory_.duration() - elapsed);
+  }
+
+  status_pub_->publish(status);
+}
+
+void MotionGeneratorNode::rejectGoal(const std::string & reason)
+{
+  // トピック経由のゴールは送信元に直接返せないため、
+  // 却下は /catchrobo/arm/status の last_result / message で伝える
+  last_result_    = sharmech_msgs::msg::MotionStatus::RESULT_REJECTED;
+  status_message_ = reason;
+  RCLCPP_WARN(get_logger(), "Goal rejected: %s", reason.c_str());
+}
+
+bool MotionGeneratorNode::isInsideWorkspace(double x, double y, double z) const
+{
+  return x >= workspace_x_min_ && x <= workspace_x_max_ &&
+         y >= workspace_y_min_ && y <= workspace_y_max_ &&
+         z >= workspace_z_min_ && z <= workspace_z_max_;
+}
+
+CartesianState MotionGeneratorNode::clampToWorkspace(const CartesianState & state) const
+{
+  CartesianState clamped = state;
+  clamped.x = std::clamp(state.x, workspace_x_min_, workspace_x_max_);
+  clamped.y = std::clamp(state.y, workspace_y_min_, workspace_y_max_);
+  clamped.z = std::clamp(state.z, workspace_z_min_, workspace_z_max_);
+  return clamped;
+}
+
+}  // namespace sharmech_core
+
+RCLCPP_COMPONENTS_REGISTER_NODE(sharmech_core::MotionGeneratorNode)

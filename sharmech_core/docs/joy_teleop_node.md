@@ -1,6 +1,6 @@
 # joy_teleop_node
 
-PS4 コントローラの入力を、操縦層の共通インターフェースへ変換するノード。**未実装**(設計のみ)。
+PS4 コントローラの入力を、操縦層の共通インターフェースへ変換するノード。**実装済み** (`src/joy_teleop_node.cpp`)。
 
 全体アーキテクチャは [`sharmech/README.md`](../../README.md) を参照。
 
@@ -123,7 +123,6 @@ ROS2 Humble の `joy` (SDL2 ベース) と `joy_linux` でも異なる。
 | `last_joy_time_` | `joy_timeout` 判定用 |
 | `gripper_state_` | トグルで反転する状態。**起動時は `false`(開)** |
 | `prev_buttons_` | 立ち上がりエッジ検出用の前回ボタン状態 |
-| `active_goal_handle_` | 実行中のホーム復帰ゴール |
 
 ## 処理フロー
 

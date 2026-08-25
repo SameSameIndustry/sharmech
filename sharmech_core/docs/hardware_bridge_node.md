@@ -1,6 +1,6 @@
 # hardware_bridge_node
 
-MCU へ流す UDP データを整形し、MCU からの状態を ROS2 へ戻すノード。**未実装**(設計のみ)。
+MCU へ流す UDP データを整形し、MCU からの状態を ROS2 へ戻すノード。**実装済み** (`src/hardware_bridge_node.cpp`)。
 
 全体アーキテクチャと UDP プロトコル仕様は [`sharmech/README.md`](../../README.md) を参照。
 

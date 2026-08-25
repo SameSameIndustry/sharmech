@@ -14,12 +14,12 @@
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
-  <depend>std_srvs</depend>
-  <depend>nav_msgs</depend>
-  <depend>trajectory_msgs</depend>
   <depend>tf2</depend>
-  <depend>tf2_ros</depend>
   <depend>tf2_geometry_msgs</depend>
+  <depend>sharmech_msgs</depend>
+
+  <!-- joy_teleop_node の入力元 (joy ノード) を実行時に使う -->
+  <exec_depend>joy</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

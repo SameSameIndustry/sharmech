@@ -1,34 +1,51 @@
-vr_interface_node:
+# sharmech ロボットパラメータ (一元管理)
+# 各パラメータの意味は sharmech_core/docs/<node>.md を参照
+
+motion_generator_node:
   ros__parameters:
+    control_rate: 100.0      # Cartesianストリーム出力周期 [Hz]
+    status_rate: 10.0        # /catchrobo/arm/status の配信周期 [Hz]
+    v_max: 0.10              # 最大並進速度 [m/s]。軌道生成とジョグで共用
+    a_max: 0.20              # 最大並進加速度 [m/s^2]。同上
+    w_max: 1.0               # 最大角速度 (pitch/yaw) [rad/s]
+    alpha_max: 2.0           # 最大角加速度 [rad/s^2]
     workspace_x_min: -0.20   # 作業領域 X 下限 [m]
     workspace_x_max:  0.20   # 作業領域 X 上限 [m]
     workspace_y_min:  0.05   # 作業領域 Y 下限 [m]
     workspace_y_max:  0.30   # 作業領域 Y 上限 [m]
     workspace_z_min:  0.00   # 作業領域 Z 下限 [m]
     workspace_z_max:  0.30   # 作業領域 Z 上限 [m]
+    twist_timeout: 0.4       # ジョグのウォッチドッグ [s]
+    goal_mode: "twist_priority"  # "twist_priority" / "exclusive"
 
-state_manager_node:
+joy_teleop_node:
   ros__parameters:
-    pos_tolerance: 0.005  # 到達判定閾値 (位置) [m]
-    rot_tolerance: 0.05   # 到達判定閾値 (pitch/yaw) [rad]
-
-trajectory_generator_node:
-  ros__parameters:
-    num_waypoints: 50  # 補間点数
-    v_max: 0.10        # 最大速度 [m/s]
-    a_max: 0.20        # 最大加速度 [m/s^2]
-
-# kinematics_node (5節リンクIK) はMCU側でIKを行うため現行パイプラインでは未使用。
-# ソースは残置しているため、単体テストや将来のシミュレーション用途で使う場合は
-# 以下のパラメータを復活させ、launch側でcomposable_nodeを追加すること。
-# kinematics_node:
-#   ros__parameters:
-#     l1: 0.15
-#     l2: 0.15
-#     base_width: 0.10
+    publish_rate: 50.0       # Twist/グリッパの送信周期 [Hz]
+    joy_timeout: 0.5         # /joy 途絶時に全入力をニュートラル扱いにする時間 [s]
+    deadzone: 0.15           # スティックのデッドゾーン
+    use_deadman: true        # デッドマンスイッチ (押している間だけジョグが効く)
+    # home_pose: [0.0, 0.15, 0.15, 0.0, 0.0]  # [x, y, z, pitch, yaw]。機構確定後に設定
+    # 軸・ボタン番号はドライバ依存。実機で `ros2 topic echo /joy` を見て合わせること
+    vx_axis: 1               # 左スティック縦 → 前後
+    vx_scale: 0.10
+    vy_axis: 0               # 左スティック横 → 左右
+    vy_scale: 0.10
+    vz_axis: 7               # 十字キー縦 → 上下
+    vz_scale: 0.10
+    pitch_axis: 4            # 右スティック縦
+    pitch_scale: 0.50
+    yaw_axis: 3              # 右スティック横
+    yaw_scale: 0.50
+    deadman_button: 4        # L1
+    gripper_toggle_button: 0 # ×
+    home_button: 2           # △
 
 hardware_bridge_node:
   ros__parameters:
-    control_rate: 100.0        # 制御周期 [Hz]
-    mcu_ip: "192.168.1.50"     # MCUのIPアドレス
-    mcu_port: 8888              # MCUのUDP受信ポート
+    command_mode: "cartesian"   # "cartesian" (パターンA) / "joint" (パターンB・未実装)
+    mcu_ip: "192.168.1.50"      # MCU の IP アドレス (有線 Ethernet)
+    mcu_port: 8888              # MCU の UDP 受信ポート
+    local_port: 8889            # フィードバック受信ポート
+    feedback_poll_rate: 200.0   # 受信ポーリング周期 [Hz]
+    feedback_timeout: 0.5       # フィードバック途絶の警告閾値 [s]
+    # joint_names: []           # /joint_states の関節名。関節構成の確定待ち

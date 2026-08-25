@@ -9,25 +9,17 @@ find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
 ament_auto_add_library(${PROJECT_NAME} SHARED
-  src/vr_interface_node.cpp
-  src/state_manager_node.cpp
-  src/trajectory_generator_node.cpp
-  src/kinematics_node.cpp
+  src/motion_generator_node.cpp
+  src/joy_teleop_node.cpp
   src/hardware_bridge_node.cpp
 )
 
 rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN "sharmech_core::VrInterfaceNode"
-  EXECUTABLE vr_interface_node)
+  PLUGIN "sharmech_core::MotionGeneratorNode"
+  EXECUTABLE motion_generator_node)
 rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN "sharmech_core::StateManagerNode"
-  EXECUTABLE state_manager_node)
-rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN "sharmech_core::TrajectoryGeneratorNode"
-  EXECUTABLE trajectory_generator_node)
-rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN "sharmech_core::KinematicsNode"
-  EXECUTABLE kinematics_node)
+  PLUGIN "sharmech_core::JoyTeleopNode"
+  EXECUTABLE joy_teleop_node)
 rclcpp_components_register_node(${PROJECT_NAME}
   PLUGIN "sharmech_core::HardwareBridgeNode"
   EXECUTABLE hardware_bridge_node)
