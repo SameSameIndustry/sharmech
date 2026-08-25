@@ -29,6 +29,20 @@ if(BUILD_TESTING)
   set(ament_cmake_copyright_FOUND TRUE)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+
+  # 純粋なロジック (ROS ノードを起動しない)
+  ament_add_gtest(test_trapezoidal_trajectory test/test_trapezoidal_trajectory.cpp)
+  target_include_directories(test_trapezoidal_trajectory PRIVATE include)
+
+  ament_add_gtest(test_udp_protocol test/test_udp_protocol.cpp)
+  target_include_directories(test_udp_protocol PRIVATE include)
+
+  # motion_generator_node のウォッチドッグ・クランプ・調停ロジック
+  # (rclcpp ノードとしてパブリッシュ/サブスクライブして検証する)
+  ament_add_gtest(test_motion_generator_node test/test_motion_generator_node.cpp)
+  target_link_libraries(test_motion_generator_node ${PROJECT_NAME})
 endif()
 
 ament_auto_package(INSTALL_TO_SHARE)
