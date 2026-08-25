@@ -2,11 +2,16 @@
 <launch>
   <arg name="rviz" default="false"/>
   <arg name="joy"  default="true"/>
+  <!-- シミュレータ (catchrobo_sim_threejs) が /catchrobo/arm/current_pose を
+       publish する場合は false にする。実機と二重publishすると衝突するため -->
+  <arg name="hardware_bridge" default="true"/>
 
   <let name="urdf_file" value="$(find-pkg-share sharmech_description)/urdf/sharmech.urdf.xacro"/>
   <let name="config"    value="$(find-pkg-share sharmech_bringup)/config/config.yaml"/>
 
-  <!-- robot_state_publisher (/joint_states は hardware_bridge_node が publish する) -->
+  <!-- robot_state_publisher (/joint_states は hardware_bridge_node が publish する。
+       hardware_bridge:=false 時は publish 元が無いため robot_state_publisher は
+       起動時姿勢のまま更新されない。current_pose の可視化はシミュレータのHUD/3D表示を見ること) -->
   <node pkg="robot_state_publisher" exec="robot_state_publisher">
     <!-- type="str" が無いと URDF が YAML として解釈されて起動に失敗する -->
     <param name="robot_description" value="$(command 'xacro $(var urdf_file)')" type="str"/>
@@ -31,7 +36,7 @@
     </composable_node>
 
     <composable_node pkg="sharmech_core" plugin="sharmech_core::HardwareBridgeNode"
-                     name="hardware_bridge_node">
+                     name="hardware_bridge_node" if="$(var hardware_bridge)">
       <param from="$(var config)"/>
     </composable_node>
 
