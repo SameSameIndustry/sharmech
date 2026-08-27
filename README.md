@@ -103,7 +103,7 @@ flowchart TB
 | `joy_teleop_node` | `sharmech_core` | `/joy` (PS4) を購読し、ゴール/速度指令に正規化 |
 | `motion_generator_node` | `sharmech_core` | **中核**。軌道生成・速度積分・両モードの合流と調停・作業領域クランプ・ウォッチドッグ |
 | `hardware_bridge_node` | `sharmech_core` | UDP 送受信、パケット組立 |
-| `kinematics_node` | `sharmech_core` | パターンB用。**現時点では実装しない** |
+| `kinematics_node` | `sharmech_core` | パターンB用。**実装済み**。詳細は [`sharmech_core/docs/kinematics_node.md`](sharmech_core/docs/kinematics_node.md) |
 | `cylinder_detector_node` | `catchrobo_perception` | フィールド上の物体位置を画像認識し `PoseArray` で配信 |
 
 ### 軌道生成と速度積分を1ノードにまとめた理由
@@ -128,7 +128,7 @@ flowchart TB
 | `/catchrobo/arm/status` | `sharmech_msgs/MotionStatus` | `motion_generator_node` → 操縦層 / WebXR。**latched** | ○ |
 | `/catchrobo/field/cylinders` | `geometry_msgs/PoseArray` | `cylinder_detector_node` → WebXR | ○ |
 | `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `motion_generator_node` → 下流 | |
-| `/catchrobo/command/joint` | 型未定 | `kinematics_node` → `hardware_bridge_node` (**将来**) | |
+| `/catchrobo/command/joint` | `sensor_msgs/JointState` (`name`=5モータ個別名) | `kinematics_node` → `hardware_bridge_node` (**hardware_bridge_node側`joint`モード未実装のため未接続**) | |
 | `/catchrobo/command/gripper` | `std_msgs/Bool` | `motion_generator_node` → `hardware_bridge_node` | |
 | `/joy` | `sensor_msgs/Joy` | joy ドライバ → `joy_teleop_node` | |
 | `/joint_states` | `sensor_msgs/JointState` | `hardware_bridge_node` → `robot_state_publisher` | |
@@ -408,17 +408,21 @@ ROS2 グラフへの直接の窓なので、クライアントを「ROS2 ノー�
 
 ### パターンB を将来追加するための備え
 
-追加時に**既存ノードの改造が不要**になるよう、以下を先に用意する。
+追加時に**既存ノードの改造が不要**になるよう、以下を先に用意した。
 
-| 備え | 理由 |
-|---|---|
-| Cartesian ストリームをトピックとして公開 | `kinematics_node` が後から購読するだけで繋がる |
-| `packet_type` をヘッダに持つ | プロトコル変更が追加的になる |
-| パケット組立をエンコーダとして抽象化 | 実装クラスを1つ足すだけで済む |
+| 備え | 理由 | 状態 |
+|---|---|---|
+| Cartesian ストリームをトピックとして公開 | `kinematics_node` が後から購読するだけで繋がる | 完了。`kinematics_node` が実際に購読している |
+| `packet_type` をヘッダに持つ | プロトコル変更が追加的になる | 定義済み (`packet_type = 0x02`) |
+| パケット組立をエンコーダとして抽象化 | 実装クラスを1つ足すだけで済む | 未着手 (`UdpProtocol::encodeJoint` がまだ無い) |
 
 `motion_generator_node` は**パターンA/Bのどちらでも変更不要**。両モードを1本のストリームに合流させた設計の副産物。
 
-パターンB追加時の作業は、`kinematics_node` の新規作成、`JointPacketEncoder` の追加、`packet_type = 2` の定義、Config と launch への追加のみ。
+2026-08-27、ロボット構成 (5軸パラレルリンク。座標のみ確定) がユーザーから確認され、
+`kinematics_node` を実装した (詳細は [`sharmech_core/docs/kinematics_node.md`](sharmech_core/docs/kinematics_node.md))。
+残る作業は `UdpProtocol::encodeJoint` の追加と `hardware_bridge_node` の `command_mode: "joint"`
+実装のみ。またロボットのリンク長等の実測値がまだ無いため、launch では `pattern_b` 引数で
+既定無効にしてある。
 
 ## 未決定事項
 
@@ -429,7 +433,6 @@ ROS2 グラフへの直接の窓なので、クライアントを「ROS2 ノー�
 | フィードバック途絶時の停止 | 現状は警告のみ。自動停止させるべきか | 安全 |
 | 動作許可の制御経路 | パケットにフィールドは確保済みだが、**現時点では常に 1 を入れる**。サーボ ON/OFF が必要になった時点でサービス等を追加 | プロトコル |
 | `/catchrobo/command/joint` の型 | 関節構成の確定待ち | パターンB |
-| 冗長性の解決方針 | 肩2 + Z軸1 + テーブルヨー1 + 手首2 = **6自由度**に対し指令は (x,y,z,pitch,yaw) の **5次元**。1自由度余る | 方針が無いと IK が毎回違う解を返して動作が飛ぶ。パターンA ではマイコン側の責務 |
 | `motion_generator_node` の作業領域パラメータ (`workspace_x/y/z_min/max`) | 現在の値は暫定の小さすぎる placeholder。実際のフィールド寸法は `~/Documents/catchrobo_docs/` の STEP CAD・ルールブックを正本として確認すること (詳細は `CLAUDE.md` 「競技ルール・フィールド情報」) | 安全・実用性。VR/PS4からの実際の指令がこの範囲外だと全て却下される |
 | 「相手チームエリア・進入禁止エリアへの侵入禁止」ルールへの対応 | ルールブック上、上空含め侵入すると違反・失格の対象。今の作業領域クランプ(軸並行の箱)だけで守れるかは要検討 | 「禁止区域」機能([主要な設計判断](#主要な設計判断とその理由)で検討済みの拡張)が実際に必要になる可能性がある |
 
@@ -448,18 +451,21 @@ ROS2 グラフへの直接の窓なので、クライアントを「ROS2 ノー�
 | `motion_generator_node` | 実装済み。旧 `state_manager_node` + `trajectory_generator_node` を置き換え |
 | `joy_teleop_node` | 実装済み (新規) |
 | `hardware_bridge_node` | 実装済み (プロトコル v1・送受信対応) |
-| `kinematics_node` | パターンB。ロボット仕様確定まで未実装 |
+| `kinematics_node` | パターンB。実装済み (IKのみ。`hardware_bridge_node`側`joint`モード未実装のため実機未接続) |
 | `sharmech_msgs` | 実装済み (`CartesianCommand` / `MotionStatus`) |
 
 旧構成のノード (`vr_interface_node` / `state_manager_node` / `trajectory_generator_node` /
 旧 `kinematics_node`) と `coordinate_converter.hpp` / `trajectory_utils.hpp` は削除済み。
 `five_bar_kinematics.hpp` はパターンB 用に残置 (forwardKinematics は近似実装のまま)。
+実際に `kinematics_node` が使う運動学は別ヘッダー `parallel_arm_kinematics.hpp`
+(2026-08-27 ロボット構成確認後に新規追加。厳密解)。
 
 残作業:
 
 - MCU 側ファームウェアの対応 (別担当者)。それまで `/catchrobo/arm/current_pose` は流れない
 - `home_pose` と PS4 の軸・ボタン番号の実機合わせ (config.yaml)
-- パターンB (`kinematics_node` + `packet_type=2`) はロボット仕様確定後
+- パターンB実機接続 (`UdpProtocol::encodeJoint` の追加、`hardware_bridge_node` の
+  `command_mode: "joint"` 実装) と、`kinematics_node` のリンク長等の実測
 
 ## ビルドと起動
 

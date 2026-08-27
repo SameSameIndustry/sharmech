@@ -5,6 +5,9 @@
   <!-- シミュレータ (catchrobo_sim_threejs) が /catchrobo/arm/current_pose を
        publish する場合は false にする。実機と二重publishすると衝突するため -->
   <arg name="hardware_bridge" default="true"/>
+  <!-- パターンB (ROS2側IK)。config.yaml の kinematics_node パラメータ (リンク長等) は
+       CAD/実測が無いため仮値 (0.0) のまま。実測するまで既定で無効にしておく -->
+  <arg name="pattern_b" default="false"/>
 
   <let name="urdf_file" value="$(find-pkg-share sharmech_description)/urdf/sharmech.urdf.xacro"/>
   <let name="config"    value="$(find-pkg-share sharmech_bringup)/config/config.yaml"/>
@@ -40,7 +43,10 @@
       <param from="$(var config)"/>
     </composable_node>
 
-    <!-- kinematics_node (パターンB) はロボット仕様確定後に追加する -->
+    <composable_node pkg="sharmech_core" plugin="sharmech_core::KinematicsNode"
+                     name="kinematics_node" if="$(var pattern_b)">
+      <param from="$(var config)"/>
+    </composable_node>
 
   </node_container>
 

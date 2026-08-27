@@ -49,3 +49,19 @@ hardware_bridge_node:
     feedback_poll_rate: 200.0   # 受信ポーリング周期 [Hz]
     feedback_timeout: 0.5       # フィードバック途絶の警告閾値 [s]
     # joint_names: []           # /joint_states の関節名。関節構成の確定待ち
+
+kinematics_node:
+  ros__parameters:
+    # パターンB用。5軸パラレルリンク (肩2+ターンテーブル1+肘/膝2) の順運動学は
+    # sharmech_core/include/sharmech_core/utility/parallel_arm_kinematics.hpp。
+    # ロボット構成自体は2026-08-27にユーザー確認済みだが、以下の寸法はCAD/実測が
+    # 無いため全て仮値 (0.0)。独断で数値を決め打ちしていない。実測のうえ上書きすること
+    shoulder_pivot_half_separation_m: 0.0  # TODO: 要実測 (肩の2ピボット間距離の半分)
+    shoulder_proximal_link_length_m: 0.0   # TODO: 要実測 (肩モータ側リンク長)
+    shoulder_distal_link_length_m: 0.0     # TODO: 要実測 (肩EE側リンク長)
+    knee_pivot_half_separation_m: 0.0      # TODO: 要実測 (肘/膝の2ピボット間距離の半分)
+    knee_proximal_link_length_m: 0.0       # TODO: 要実測 (肘/膝モータ側リンク長)
+    knee_distal_link_length_m: 0.0         # TODO: 要実測 (肘/膝EE側リンク長)
+    turntable_axis_x_m: 0.0                # TODO: 要確認 (ターンテーブル軸のbase座標系x)
+    turntable_axis_y_m: 0.0                # TODO: 要確認 (同上y)
+    knee_base_height_m: 0.0                # TODO: 要確認 (肘/膝機構のd=0が対応するz)
