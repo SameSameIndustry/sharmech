@@ -33,6 +33,10 @@ enum class PacketType : uint8_t
 
 // 動作許可フラグ (control_flags)。現時点では常に kEnable を立てる
 constexpr uint8_t kControlFlagEnable = 0x01;
+// 横倒しのワークを縦向きにしてから置け、という指示 (game_state_manager_node の
+// PLACING 状態でのみ立てる)。MCU側がどう実現するかは未定義で、ROS2 側はこの
+// フラグを不透明に渡すだけ (グリッパの0/1と同じ扱い)
+constexpr uint8_t kControlFlagOrientVertical = 0x02;
 
 #pragma pack(push, 1)
 
@@ -126,7 +130,7 @@ public:
   static std::vector<uint8_t> encodeCartesian(
     float x, float y, float z, float pitch, float yaw,
     float vx, float vy, float vz, float pitch_rate, float yaw_rate,
-    bool gripper_closed, uint32_t seq, uint64_t timestamp_us)
+    bool gripper_closed, bool orient_vertical, uint32_t seq, uint64_t timestamp_us)
   {
     udp_protocol::CartesianPacket packet{};
     packet.header.protocol_version = udp_protocol::kProtocolVersion;
@@ -147,7 +151,8 @@ public:
     packet.payload.pitch_rate = pitch_rate;
     packet.payload.yaw_rate   = yaw_rate;
     packet.payload.gripper       = gripper_closed ? 1 : 0;
-    packet.payload.control_flags = udp_protocol::kControlFlagEnable;
+    packet.payload.control_flags = udp_protocol::kControlFlagEnable |
+      (orient_vertical ? udp_protocol::kControlFlagOrientVertical : 0);
     packet.payload.reserved      = 0;
 
     std::vector<uint8_t> buffer(sizeof(packet));

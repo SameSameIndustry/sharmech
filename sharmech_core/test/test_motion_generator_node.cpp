@@ -22,6 +22,7 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <sharmech_msgs/msg/cartesian_command.hpp>
 #include <sharmech_msgs/msg/motion_status.hpp>
+#include <sharmech_msgs/msg/workspace_clamp.hpp>
 
 #include "sharmech_core/motion_generator_node.hpp"
 
@@ -55,6 +56,8 @@ public:
       "/catchrobo/arm/target_pose", 10);
     cmd_twist_pub_ = node_->create_publisher<geometry_msgs::msg::Twist>(
       "/catchrobo/arm/cmd_twist", 10);
+    workspace_clamp_pub_ = node_->create_publisher<sharmech_msgs::msg::WorkspaceClamp>(
+      "/catchrobo/game/workspace_clamp", 10);
 
     cartesian_sub_ = node_->create_subscription<sharmech_msgs::msg::CartesianCommand>(
       "/catchrobo/command/cartesian", 10,
@@ -86,6 +89,28 @@ public:
     cmd_twist_pub_->publish(msg);
   }
 
+  void publishWorkspaceClampOverride(
+    double x_min, double x_max, double y_min, double y_max,
+    double z_min, double z_max)
+  {
+    sharmech_msgs::msg::WorkspaceClamp msg;
+    msg.reset = false;
+    msg.x_min = x_min;
+    msg.x_max = x_max;
+    msg.y_min = y_min;
+    msg.y_max = y_max;
+    msg.z_min = z_min;
+    msg.z_max = z_max;
+    workspace_clamp_pub_->publish(msg);
+  }
+
+  void publishWorkspaceClampReset()
+  {
+    sharmech_msgs::msg::WorkspaceClamp msg;
+    msg.reset = true;
+    workspace_clamp_pub_->publish(msg);
+  }
+
   std::optional<sharmech_msgs::msg::MotionStatus> latestStatus()
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -102,6 +127,7 @@ private:
   rclcpp::Node::SharedPtr node_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_twist_pub_;
+  rclcpp::Publisher<sharmech_msgs::msg::WorkspaceClamp>::SharedPtr workspace_clamp_pub_;
   rclcpp::Subscription<sharmech_msgs::msg::CartesianCommand>::SharedPtr cartesian_sub_;
   rclcpp::Subscription<sharmech_msgs::msg::MotionStatus>::SharedPtr status_sub_;
 
@@ -308,6 +334,58 @@ TEST(MotionGeneratorNode, WorkspaceClampZeroesVelocityOnClampedAxis)
   auto status = harness.latestStatus();
   ASSERT_TRUE(status.has_value());
   EXPECT_EQ(status->mode, sharmech_msgs::msg::MotionStatus::MODE_JOG);
+}
+
+TEST(MotionGeneratorNode, WorkspaceClampOverrideRejectsGoalOutsideOverride)
+{
+  // config.yaml のデフォルトでは通る目標だが、game_state_manager_node が
+  // PLACING 用に絞ったクランプの外側にあるため却下されるはず
+  TestHarness harness("clampoverride");
+  auto motion_node = std::make_shared<sharmech_core::MotionGeneratorNode>(fastTestOptions());
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(harness.node());
+  executor.add_node(motion_node);
+
+  harness.publishWorkspaceClampOverride(-0.05, 0.05, 0.10, 0.15, 0.0, 0.05);
+  ASSERT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        // クランプ上書きが効いたことを、既定なら通る目標が却下されることで確認する
+        harness.publishTargetPose(0.15, 0.12, 0.02);
+        auto s = harness.latestStatus();
+        return s && s->last_result == sharmech_msgs::msg::MotionStatus::RESULT_REJECTED;
+      }, 2.0));
+}
+
+TEST(MotionGeneratorNode, WorkspaceClampResetRestoresDefaultBounds)
+{
+  TestHarness harness("clampreset");
+  auto motion_node = std::make_shared<sharmech_core::MotionGeneratorNode>(fastTestOptions());
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(harness.node());
+  executor.add_node(motion_node);
+
+  // まず狭いクランプを適用し、0.15 が却下されることを確認する
+  harness.publishWorkspaceClampOverride(-0.05, 0.05, 0.10, 0.15, 0.0, 0.05);
+  ASSERT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        harness.publishTargetPose(0.15, 0.12, 0.02);
+        auto s = harness.latestStatus();
+        return s && s->last_result == sharmech_msgs::msg::MotionStatus::RESULT_REJECTED;
+      }, 2.0));
+
+  // reset でデフォルト (workspace_x_max = 0.20) に戻り、同じ目標が通るようになる
+  harness.publishWorkspaceClampReset();
+  ASSERT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        harness.publishTargetPose(0.15, 0.12, 0.02);
+        auto s = harness.latestStatus();
+        return s && s->mode == sharmech_msgs::msg::MotionStatus::MODE_GOAL;
+      }, 2.0));
 }
 
 int main(int argc, char ** argv)

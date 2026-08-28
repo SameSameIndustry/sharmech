@@ -40,6 +40,7 @@ ROS2 トピックと UDP パケットの間の**変換と輸送のみ**を担う
 | `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `command_mode == cartesian` |
 | `/catchrobo/command/joint` | 型未定 | `command_mode == joint`(**将来**) |
 | `/catchrobo/command/gripper` | `std_msgs/Bool` | 常時 |
+| `/catchrobo/command/orient_vertical` | `std_msgs/Bool` | 常時。グリッパと同じくラッチして次の Cartesian パケットに詰める (`control_flags` bit1) |
 
 **購読するのはどちらか一方のみ。** メッセージ型が異なるため、起動時に config を見て
 対応する購読とエンコーダの組を生成する。
@@ -205,6 +206,14 @@ PacketEncoder (抽象)
 
 パケットにフィールドは確保するが、**現時点では制御経路を作らず常に 1 を入れる**。
 サーボ ON/OFF が必要になった時点で、サービスなり topic なりを追加する。
+
+### `control_flags` bit1 = 「縦にする」指示
+
+`game_state_manager_node` の PLACING 状態でのみ `/catchrobo/arm/orient_vertical` (`true`) が
+届き、`control_flags` の bit1 (`kControlFlagOrientVertical = 0x02`) として MCU に渡る。
+グリッパの 0/1 と同様、**MCU 側がこれをどう実現するか(機構・アクチュエータ)は ROS2 側では
+関知しない**。不透明な1ビットとして渡すだけであり、この点は MCU 側への要求事項として
+別途伝える必要がある (詳細は `sharmech/README.md` の「MCU側への要求事項」)。
 
 ### CRC は入れない
 

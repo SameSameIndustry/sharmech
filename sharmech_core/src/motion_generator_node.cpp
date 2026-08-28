@@ -71,6 +71,14 @@ MotionGeneratorNode::MotionGeneratorNode(const rclcpp::NodeOptions & options)
     throw std::invalid_argument("unknown goal_mode");
   }
 
+  // 起動直後は有効な作業領域 = config.yaml のデフォルト
+  active_workspace_x_min_ = workspace_x_min_;
+  active_workspace_x_max_ = workspace_x_max_;
+  active_workspace_y_min_ = workspace_y_min_;
+  active_workspace_y_max_ = workspace_y_max_;
+  active_workspace_z_min_ = workspace_z_min_;
+  active_workspace_z_max_ = workspace_z_max_;
+
   // 起動直後の目標姿勢は作業領域内に収めておく (MCU フィードバックが届けば同期される)
   target_ = clampToWorkspace(target_);
 
@@ -83,17 +91,25 @@ MotionGeneratorNode::MotionGeneratorNode(const rclcpp::NodeOptions & options)
   gripper_sub_ = create_subscription<std_msgs::msg::Bool>(
     "/catchrobo/arm/gripper", 10,
     std::bind(&MotionGeneratorNode::onGripper, this, std::placeholders::_1));
+  orient_vertical_sub_ = create_subscription<std_msgs::msg::Bool>(
+    "/catchrobo/arm/orient_vertical", 10,
+    std::bind(&MotionGeneratorNode::onOrientVertical, this, std::placeholders::_1));
   cancel_sub_ = create_subscription<std_msgs::msg::Empty>(
     "/catchrobo/arm/cancel", 10,
     std::bind(&MotionGeneratorNode::onCancel, this, std::placeholders::_1));
   current_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
     "/catchrobo/arm/current_pose", 10,
     std::bind(&MotionGeneratorNode::onCurrentPose, this, std::placeholders::_1));
+  workspace_clamp_sub_ = create_subscription<sharmech_msgs::msg::WorkspaceClamp>(
+    "/catchrobo/game/workspace_clamp", 10,
+    std::bind(&MotionGeneratorNode::onWorkspaceClamp, this, std::placeholders::_1));
 
   cartesian_pub_ = create_publisher<sharmech_msgs::msg::CartesianCommand>(
     "/catchrobo/command/cartesian", 10);
   gripper_pub_ = create_publisher<std_msgs::msg::Bool>(
     "/catchrobo/command/gripper", 10);
+  orient_vertical_pub_ = create_publisher<std_msgs::msg::Bool>(
+    "/catchrobo/command/orient_vertical", 10);
 
   // latched: 後から接続した VR クライアントにも現在状態が即座に届く
   status_pub_ = create_publisher<sharmech_msgs::msg::MotionStatus>(
@@ -187,6 +203,11 @@ void MotionGeneratorNode::onGripper(const std_msgs::msg::Bool::SharedPtr msg)
   gripper_state_ = msg->data;  // publish はタイマー内で行う
 }
 
+void MotionGeneratorNode::onOrientVertical(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  orient_vertical_state_ = msg->data;  // publish はタイマー内で行う (グリッパと同じ扱い)
+}
+
 void MotionGeneratorNode::onCancel(const std_msgs::msg::Empty::SharedPtr)
 {
   if (mode_ == Mode::kGoal) {
@@ -217,6 +238,35 @@ void MotionGeneratorNode::onCurrentPose(
     RCLCPP_INFO(get_logger(),
       "Target synced to MCU feedback: (%.3f, %.3f, %.3f)", fb.x, fb.y, fb.z);
   }
+}
+
+void MotionGeneratorNode::onWorkspaceClamp(
+  const sharmech_msgs::msg::WorkspaceClamp::SharedPtr msg)
+{
+  if (msg->reset) {
+    active_workspace_x_min_ = workspace_x_min_;
+    active_workspace_x_max_ = workspace_x_max_;
+    active_workspace_y_min_ = workspace_y_min_;
+    active_workspace_y_max_ = workspace_y_max_;
+    active_workspace_z_min_ = workspace_z_min_;
+    active_workspace_z_max_ = workspace_z_max_;
+    RCLCPP_INFO(get_logger(), "Workspace clamp reset to default");
+    return;
+  }
+
+  // 上書き値も config.yaml のデフォルト範囲を超えないようにする。
+  // game_state_manager_node のバグで安全域が丸ごと外れることを防ぐ
+  active_workspace_x_min_ = std::clamp(msg->x_min, workspace_x_min_, workspace_x_max_);
+  active_workspace_x_max_ = std::clamp(msg->x_max, workspace_x_min_, workspace_x_max_);
+  active_workspace_y_min_ = std::clamp(msg->y_min, workspace_y_min_, workspace_y_max_);
+  active_workspace_y_max_ = std::clamp(msg->y_max, workspace_y_min_, workspace_y_max_);
+  active_workspace_z_min_ = std::clamp(msg->z_min, workspace_z_min_, workspace_z_max_);
+  active_workspace_z_max_ = std::clamp(msg->z_max, workspace_z_min_, workspace_z_max_);
+  RCLCPP_INFO(get_logger(),
+    "Workspace clamp overridden: x=[%.3f, %.3f] y=[%.3f, %.3f] z=[%.3f, %.3f]",
+    active_workspace_x_min_, active_workspace_x_max_,
+    active_workspace_y_min_, active_workspace_y_max_,
+    active_workspace_z_min_, active_workspace_z_max_);
 }
 
 void MotionGeneratorNode::onControlTimer()
@@ -299,6 +349,10 @@ void MotionGeneratorNode::onControlTimer()
   std_msgs::msg::Bool gripper_msg;
   gripper_msg.data = gripper_state_;
   gripper_pub_->publish(gripper_msg);
+
+  std_msgs::msg::Bool orient_vertical_msg;
+  orient_vertical_msg.data = orient_vertical_state_;
+  orient_vertical_pub_->publish(orient_vertical_msg);
 }
 
 void MotionGeneratorNode::onStatusTimer()
@@ -341,17 +395,17 @@ void MotionGeneratorNode::rejectGoal(const std::string & reason)
 
 bool MotionGeneratorNode::isInsideWorkspace(double x, double y, double z) const
 {
-  return x >= workspace_x_min_ && x <= workspace_x_max_ &&
-         y >= workspace_y_min_ && y <= workspace_y_max_ &&
-         z >= workspace_z_min_ && z <= workspace_z_max_;
+  return x >= active_workspace_x_min_ && x <= active_workspace_x_max_ &&
+         y >= active_workspace_y_min_ && y <= active_workspace_y_max_ &&
+         z >= active_workspace_z_min_ && z <= active_workspace_z_max_;
 }
 
 CartesianState MotionGeneratorNode::clampToWorkspace(const CartesianState & state) const
 {
   CartesianState clamped = state;
-  clamped.x = std::clamp(state.x, workspace_x_min_, workspace_x_max_);
-  clamped.y = std::clamp(state.y, workspace_y_min_, workspace_y_max_);
-  clamped.z = std::clamp(state.z, workspace_z_min_, workspace_z_max_);
+  clamped.x = std::clamp(state.x, active_workspace_x_min_, active_workspace_x_max_);
+  clamped.y = std::clamp(state.y, active_workspace_y_min_, active_workspace_y_max_);
+  clamped.z = std::clamp(state.z, active_workspace_z_min_, active_workspace_z_max_);
   return clamped;
 }
 

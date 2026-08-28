@@ -13,6 +13,7 @@ ament_auto_add_library(${PROJECT_NAME} SHARED
   src/joy_teleop_node.cpp
   src/hardware_bridge_node.cpp
   src/kinematics_node.cpp
+  src/game_state_manager_node.cpp
 )
 
 rclcpp_components_register_node(${PROJECT_NAME}
@@ -27,6 +28,9 @@ rclcpp_components_register_node(${PROJECT_NAME}
 rclcpp_components_register_node(${PROJECT_NAME}
   PLUGIN "sharmech_core::KinematicsNode"
   EXECUTABLE kinematics_node)
+rclcpp_components_register_node(${PROJECT_NAME}
+  PLUGIN "sharmech_core::GameStateManagerNode"
+  EXECUTABLE game_state_manager_node)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -45,6 +49,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_parallel_arm_kinematics test/test_parallel_arm_kinematics.cpp)
   target_include_directories(test_parallel_arm_kinematics PRIVATE include)
+
+  ament_add_gtest(test_game_state_machine test/test_game_state_machine.cpp)
+  target_include_directories(test_game_state_machine PRIVATE include)
 
   # motion_generator_node のウォッチドッグ・クランプ・調停ロジック
   # (rclcpp ノードとしてパブリッシュ/サブスクライブして検証する)

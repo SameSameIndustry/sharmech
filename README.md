@@ -96,6 +96,11 @@ flowchart TB
                                                 UDP → マイコン
 ```
 
+`game_state_manager_node` の自動配置シーケンスは、この図の「ゴール指定」の発生源が
+人間の操縦層から自動シーケンサに変わるだけで、それ以降(軌道生成→経過時間サンプリング→
+Cartesianストリーム)は既存経路をそのまま通る。詳細は
+[`sharmech_core/docs/game_state_manager_node.md`](sharmech_core/docs/game_state_manager_node.md)。
+
 ## ノード一覧
 
 | ノード | パッケージ | 役割 |
@@ -104,7 +109,8 @@ flowchart TB
 | `motion_generator_node` | `sharmech_core` | **中核**。軌道生成・速度積分・両モードの合流と調停・作業領域クランプ・ウォッチドッグ |
 | `hardware_bridge_node` | `sharmech_core` | UDP 送受信、パケット組立 |
 | `kinematics_node` | `sharmech_core` | パターンB用。**実装済み**。詳細は [`sharmech_core/docs/kinematics_node.md`](sharmech_core/docs/kinematics_node.md) |
-| `cylinder_detector_node` | `catchrobo_perception` | フィールド上の物体位置を画像認識し `PoseArray` で配信 |
+| `game_state_manager_node` | `sharmech_core` | **実装済み**。「掴む→運ぶ→置く→退避」の自動配置シーケンスとゲーム全体の状態を管理。詳細は [`sharmech_core/docs/game_state_manager_node.md`](sharmech_core/docs/game_state_manager_node.md) |
+| `cylinder_detector_node` | `catchrobo_perception` | フィールド上の物体位置を画像認識し `PoseArray` で配信。`scan_interval_sec` 周期の間欠スキャン + 手動トリガー |
 
 ### 軌道生成と速度積分を1ノードにまとめた理由
 
@@ -120,16 +126,23 @@ flowchart TB
 
 | トピック | 型 | 方向 | rosbridge |
 |---|---|---|---|
-| `/catchrobo/arm/target_pose` | `geometry_msgs/PoseStamped` | 操縦層 → `motion_generator_node` | ○ |
+| `/catchrobo/arm/target_pose` | `geometry_msgs/PoseStamped` | 操縦層 / `game_state_manager_node` → `motion_generator_node` | ○ |
 | `/catchrobo/arm/cmd_twist` | `geometry_msgs/Twist` | 操縦層 → `motion_generator_node` | ○ |
-| `/catchrobo/arm/gripper` | `std_msgs/Bool` | 操縦層 → `motion_generator_node` | ○ |
+| `/catchrobo/arm/gripper` | `std_msgs/Bool` | 操縦層 / `game_state_manager_node` → `motion_generator_node` | ○ |
+| `/catchrobo/arm/orient_vertical` | `std_msgs/Bool` | `game_state_manager_node` → `motion_generator_node`。PLACING中のみtrue | |
 | `/catchrobo/arm/current_pose` | `geometry_msgs/PoseStamped` | `hardware_bridge_node` → 各ノード / WebXR | ○ |
 | `/catchrobo/arm/cancel` | `std_msgs/Empty` | 操縦層 → `motion_generator_node` | ○ |
-| `/catchrobo/arm/status` | `sharmech_msgs/MotionStatus` | `motion_generator_node` → 操縦層 / WebXR。**latched** | ○ |
-| `/catchrobo/field/cylinders` | `geometry_msgs/PoseArray` | `cylinder_detector_node` → WebXR | ○ |
+| `/catchrobo/arm/status` | `sharmech_msgs/MotionStatus` | `motion_generator_node` → 操縦層 / WebXR / `game_state_manager_node`。**latched** | ○ |
+| `/catchrobo/field/cylinders` | `geometry_msgs/PoseArray` | `cylinder_detector_node` → WebXR。**latched**、`scan_interval_sec`毎+手動トリガー | ○ |
+| `/catchrobo/field/rescan_request` | `std_msgs/Empty` | WebXR → `cylinder_detector_node`。手動即時再スキャン | ○ |
+| `/catchrobo/game/pick_request` | `geometry_msgs/PoseStamped` | WebXR → `game_state_manager_node`。選択したワーク姿勢 | ○ |
+| `/catchrobo/game/place_request` | `std_msgs/Empty` | WebXR → `game_state_manager_node`。「置け」指示 | ○ |
+| `/catchrobo/game/state` | `std_msgs/String` | `game_state_manager_node` → WebXR。**latched** | ○ |
+| `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | `game_state_manager_node` → `motion_generator_node` | |
 | `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `motion_generator_node` → 下流 | |
 | `/catchrobo/command/joint` | `sensor_msgs/JointState` (`name`=5モータ個別名) | `kinematics_node` → `hardware_bridge_node` (**hardware_bridge_node側`joint`モード未実装のため未接続**) | |
 | `/catchrobo/command/gripper` | `std_msgs/Bool` | `motion_generator_node` → `hardware_bridge_node` | |
+| `/catchrobo/command/orient_vertical` | `std_msgs/Bool` | `motion_generator_node` → `hardware_bridge_node` | |
 | `/joy` | `sensor_msgs/Joy` | joy ドライバ → `joy_teleop_node` | |
 | `/joint_states` | `sensor_msgs/JointState` | `hardware_bridge_node` → `robot_state_publisher` | |
 
@@ -169,9 +182,13 @@ flowchart TB
 
 ブラウザ側に Action Client の実装を要求しないという当初の目的も、そのまま満たされる。
 
-**将来 Action が欲しくなる場面**は自律動作の順序制御(掴む→運ぶ→置くを上位ノードが順に実行し、
-各段の完了を待つ)。ただし**後から Action Server を足すのはトピック経路を壊さない追加的変更**
-なので、今は持たない。
+**将来 Action が欲しくなる場面**として想定していた自律動作の順序制御(掴む→運ぶ→置くを
+上位ノードが順に実行し、各段の完了を待つ)は、`game_state_manager_node` の追加で実際に
+到来した。しかしそのときも Action は導入しなかった。`/catchrobo/arm/status.last_result`
+の変化を購読して次のゴールを送るだけで、Action の feedback/result 相当の役割を既存の
+状態トピックがそのまま果たせている。詳細は
+[`sharmech_core/docs/game_state_manager_node.md`](sharmech_core/docs/game_state_manager_node.md)
+の「Action を使わない」を参照。
 
 ### グリッパの経路
 
@@ -262,7 +279,7 @@ geometry_msgs/Twist twist
 | 48 | `float32` | `pitch_rate` | rad/s |
 | 52 | `float32` | `yaw_rate` | rad/s |
 | 56 | `uint8` | `gripper` | 0=開, 1=閉 |
-| 57 | `uint8` | `control_flags` | bit0: 動作許可 |
+| 57 | `uint8` | `control_flags` | bit0: 動作許可, bit1: 縦にする指示 (`game_state_manager_node` のPLACING時のみ) |
 | 58 | `uint16` | `reserved` | 将来用・0埋め |
 
 **合計 60 バイト。**
@@ -313,6 +330,11 @@ gripper = 0          control_flags = 0x01
 4. **`seq` の逆転を検出したら古いパケットを破棄する**(UDP は順序保証がない)
 5. **受信値が作業領域外なら破棄する**(通信化けとバグの両方を防げる)
 6. ドライバごとの制御方式の差異(ODrive / DJI C610 / Feetech)は**すべてマイコン側で吸収する**。ROS2 側はハードウェア構成を知らない
+7. **`control_flags` bit1 が立っている間、横倒しのワークを縦向きにしてから置く動作を行う**
+   (`game_state_manager_node` が置く直前(PLACING)にのみ立てる)。ROS2 側はこれを
+   不透明な1ビットとして渡すだけで、**どんな機構・アクチュエータで実現するかは
+   MCU側の設計判断**(グリッパへの追加機構、手首の回転等)。現時点では機構自体が
+   未確定・未実装 (2026-08-29時点)
 
 ### 要求2(補間)が必要な理由
 
@@ -452,7 +474,8 @@ ROS2 グラフへの直接の窓なので、クライアントを「ROS2 ノー�
 | `joy_teleop_node` | 実装済み (新規) |
 | `hardware_bridge_node` | 実装済み (プロトコル v1・送受信対応) |
 | `kinematics_node` | パターンB。実装済み (IKのみ。`hardware_bridge_node`側`joint`モード未実装のため実機未接続) |
-| `sharmech_msgs` | 実装済み (`CartesianCommand` / `MotionStatus`) |
+| `game_state_manager_node` | 実装済み (新規)。自動配置シーケンス・ゲームステート管理。シューティングボックスのスロット座標は要CAD実測の仮値のまま |
+| `sharmech_msgs` | 実装済み (`CartesianCommand` / `MotionStatus` / `WorkspaceClamp`) |
 
 旧構成のノード (`vr_interface_node` / `state_manager_node` / `trajectory_generator_node` /
 旧 `kinematics_node`) と `coordinate_converter.hpp` / `trajectory_utils.hpp` は削除済み。
@@ -466,6 +489,14 @@ ROS2 グラフへの直接の窓なので、クライアントを「ROS2 ノー�
 - `home_pose` と PS4 の軸・ボタン番号の実機合わせ (config.yaml)
 - パターンB実機接続 (`UdpProtocol::encodeJoint` の追加、`hardware_bridge_node` の
   `command_mode: "joint"` 実装) と、`kinematics_node` のリンク長等の実測
+- `game_state_manager_node` のシューティングボックスのスロット座標 (赤/青とも仮値) の
+  CAD実測、およびグリッパの実フィードバック配線 (現状は grasp判定が時間待ちの暫定実装。
+  詳細は [`sharmech_core/docs/game_state_manager_node.md`](sharmech_core/docs/game_state_manager_node.md))
+- `control_flags` bit1 (「縦にする」指示) を実際に受けてワークを立てる機構自体が
+  MCU側で未確定・未実装
+- VR側 (`catchrobo_webxr_controller`) の仮想フィールド・掴む/置く操作・置き場フィールドUI、
+  および `/catchrobo/game/pick_request` `/catchrobo/game/place_request`
+  `/catchrobo/field/rescan_request` の送信ロジック実装 (本リポジトリのスコープ外)
 
 ## ビルドと起動
 
@@ -478,9 +509,12 @@ source install/setup.bash
 ```
 
 ```bash
-# 本体
-ros2 launch sharmech_bringup sharmech.launch.xml
-ros2 launch sharmech_bringup sharmech.launch.xml rviz:=true
+# 本体。field_color はデフォルト値を持たせていないため必須 (red/blue)。
+# シューティングボックスのスロット座標が赤/青で異なるため、指定を忘れると
+# ノードが起動時エラーになる (独断で選ばせない設計。詳細は
+# sharmech_core/docs/game_state_manager_node.md)
+ros2 launch sharmech_bringup sharmech.launch.xml field_color:=red
+ros2 launch sharmech_bringup sharmech.launch.xml field_color:=red rviz:=true
 
 # VR クライアントと通信する場合 (rosbridge, port 9090)
 ros2 launch sharmech_bringup rosbridge.launch.xml

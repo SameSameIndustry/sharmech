@@ -49,6 +49,9 @@ HardwareBridgeNode::HardwareBridgeNode(const rclcpp::NodeOptions & options)
   gripper_sub_ = create_subscription<std_msgs::msg::Bool>(
     "/catchrobo/command/gripper", 10,
     std::bind(&HardwareBridgeNode::onGripperCommand, this, std::placeholders::_1));
+  orient_vertical_sub_ = create_subscription<std_msgs::msg::Bool>(
+    "/catchrobo/command/orient_vertical", 10,
+    std::bind(&HardwareBridgeNode::onOrientVerticalCommand, this, std::placeholders::_1));
 
   current_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
     "/catchrobo/arm/current_pose", 10);
@@ -130,7 +133,7 @@ void HardwareBridgeNode::onCartesianCommand(
     static_cast<float>(msg->twist.linear.z),
     static_cast<float>(msg->twist.angular.y),   // pitch_rate
     static_cast<float>(msg->twist.angular.z),   // yaw_rate
-    gripper_state_, send_seq_++, timestamp_us);
+    gripper_state_, orient_vertical_state_, send_seq_++, timestamp_us);
 
   const auto sent = ::sendto(
     sockfd_, packet.data(), packet.size(), 0,
@@ -146,6 +149,12 @@ void HardwareBridgeNode::onGripperCommand(const std_msgs::msg::Bool::SharedPtr m
   // グリッパは Cartesian 指令とは別トピックで届くためラッチしておき、
   // 次の Cartesian 指令のパケットに詰める
   gripper_state_ = msg->data;
+}
+
+void HardwareBridgeNode::onOrientVerticalCommand(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  // グリッパと同様、別トピックで届くためラッチして次の Cartesian パケットに詰める
+  orient_vertical_state_ = msg->data;
 }
 
 void HardwareBridgeNode::onFeedbackTimer()

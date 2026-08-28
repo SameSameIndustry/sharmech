@@ -32,14 +32,18 @@
 
 | トピック | 型 | 説明 |
 |---|---|---|
-| `/catchrobo/arm/target_pose` | `geometry_msgs/PoseStamped` | 目標姿勢。**rosbridge 経由のブラウザ向けのゴール入力**(下記) |
+| `/catchrobo/arm/target_pose` | `geometry_msgs/PoseStamped` | 目標姿勢。**rosbridge 経由のブラウザ向けのゴール入力**(下記)。`game_state_manager_node` の自動配置シーケンスもここへ直接 publish する |
 | `/catchrobo/arm/cmd_twist` | `geometry_msgs/Twist` | 先端の目標速度。**ベース(ロボット固定)座標系基準** |
 | `/catchrobo/arm/gripper` | `std_msgs/Bool` | グリッパ指令 (`true`=閉, `false`=開) |
+| `/catchrobo/arm/orient_vertical` | `std_msgs/Bool` | 「横倒しのワークを縦にする」指令。グリッパと同じ扱いでラッチして中継する |
 | `/catchrobo/arm/cancel` | `std_msgs/Empty` | 実行中のゴールを中断する |
 | `/catchrobo/arm/current_pose` | `geometry_msgs/PoseStamped` | 実姿勢。**状態トピックへの転載にのみ使う** |
+| `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | 作業領域クランプの動的上書き。`game_state_manager_node` が PLACING/RETRACTING 前後に送る (詳細は下記) |
 
 `/catchrobo/arm/` 名前空間は「調停前の生の操縦入力」であることを示す。VR と PS4 の両方がここへ publish する。
 **VR クライアントは rosbridge 経由で直接ここへ publish する。中継ノードは無い。**
+`game_state_manager_node` も同じ `/catchrobo/arm/target_pose` へ直接 publish する
+(専用チャンネルを新設しない判断の経緯は [`game_state_manager_node.md`](game_state_manager_node.md) を参照)。
 
 ### Publish
 
@@ -47,6 +51,7 @@
 |---|---|---|
 | `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | 位置 + 速度。`control_rate` で定期送信 |
 | `/catchrobo/command/gripper` | `std_msgs/Bool` | 調停後のグリッパ指令 |
+| `/catchrobo/command/orient_vertical` | `std_msgs/Bool` | 調停後の「縦にする」指令。`hardware_bridge_node` が UDP の `control_flags` bit1 に詰める |
 | `/catchrobo/arm/status` | `sharmech_msgs/MotionStatus` | 現在のモードと進捗。**latched (transient_local)**、10Hz 程度 |
 
 **Action Server も Service も持たない。** ゴールは `/catchrobo/arm/target_pose`、
@@ -98,6 +103,29 @@ geometry_msgs/Twist  twist     # 目標速度(並進 + 角速度)
 姿勢 (pitch/yaw) のレート制限と純回転ゴールの所要時間計算に使えないため。
 
 `v_max` / `a_max` を両モードで共用するのは、**ゴール指定とジョグで動作感を揃えるため**。別々にすると同じロボットが操作方法によって違う挙動をする。
+
+### 作業領域クランプの動的上書き (`/catchrobo/game/workspace_clamp`)
+
+上記の `workspace_x/y/z_min/max` は**起動時のデフォルト**。実際にゴール判定・ジョグクランプに
+使われるのは内部の `active_workspace_*` で、通常はデフォルトと同じ値だが、
+`game_state_manager_node` が PLACING/RETRACTING 中だけシューティングボックスの
+スロット周辺に一時的に絞ることができる (`sharmech_msgs/WorkspaceClamp`)。
+
+```
+# sharmech_msgs/WorkspaceClamp
+bool    reset     # true: active_workspace_* をデフォルトへ戻す。false なら下記を採用
+float64 x_min
+float64 x_max
+float64 y_min
+float64 y_max
+float64 z_min
+float64 z_max
+```
+
+「PLACING 中に遠くの target_pose へ急に飛ばない」という安全性を、`motion_generator_node`
+自体は変更せず既存のクランプ機構の適用範囲を実行時に変えるだけで実現するための仕組み。
+上書き値は起動時のデフォルト範囲を超えないよう `motion_generator_node` 側で
+`std::clamp` される (`game_state_manager_node` 側のバグで安全域が丸ごと外れることを防ぐ)。
 
 ## 内部状態
 
@@ -290,9 +318,13 @@ gripper_state_ ← msg.data     (publish はタイマー内で行う)
 「実行中」は**イベントではなく状態**なので状態として流す。グリッパで `Empty` 2本ではなく
 `Bool` 1本を選んだのと同じ理由。
 
-**将来 Action が欲しくなる場面**は自律動作の順序制御(掴む→運ぶ→置くを上位ノードが順に実行し、
-各段の完了を待つ)。状態トピックをポーリングするより Action の方が書きやすい。ただし
-**後から Action Server を足すのはトピック経路を壊さない追加的変更**なので、今は持たない。
+**将来 Action が欲しくなる場面**として想定していた「自律動作の順序制御(掴む→運ぶ→置くを
+上位ノードが順に実行し、各段の完了を待つ)」は、`game_state_manager_node` の追加という形で
+実際に到来した。しかしそのときも Action は導入しなかった: `game_state_manager_node` は
+`/catchrobo/arm/status.last_result` の変化を購読して「ゴール到達」を検知し、次のゴールを
+`/catchrobo/arm/target_pose` へ直接 publish するだけで、Action の feedback/result に相当する
+役割を既存の状態トピックがそのまま果たせている。詳細は
+[`game_state_manager_node.md`](game_state_manager_node.md) を参照。
 
 ### VR / PS4 の入力調停は行わない
 

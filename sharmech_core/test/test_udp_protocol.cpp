@@ -13,7 +13,8 @@ TEST(UdpProtocol, EncodeCartesianProducesExpectedByteLayout)
   const auto buffer = UdpProtocol::encodeCartesian(
     0.1f, 0.2f, 0.3f, 0.4f, 0.5f,
     0.01f, 0.02f, 0.03f, 0.04f, 0.05f,
-    /*gripper_closed=*/ true, /*seq=*/ 42, /*timestamp_us=*/ 123456789ULL);
+    /*gripper_closed=*/ true, /*orient_vertical=*/ false,
+    /*seq=*/ 42, /*timestamp_us=*/ 123456789ULL);
 
   ASSERT_EQ(buffer.size(), sizeof(CartesianPacket));
 
@@ -43,10 +44,31 @@ TEST(UdpProtocol, EncodeCartesianProducesExpectedByteLayout)
 TEST(UdpProtocol, EncodeCartesianGripperOpenIsZero)
 {
   const auto buffer = UdpProtocol::encodeCartesian(
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, /*gripper_closed=*/ false, 0, 0);
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /*gripper_closed=*/ false, /*orient_vertical=*/ false, 0, 0);
   CartesianPacket packet;
   std::memcpy(&packet, buffer.data(), sizeof(packet));
   EXPECT_EQ(packet.payload.gripper, 0);
+}
+
+TEST(UdpProtocol, EncodeCartesianOrientVerticalSetsBit1)
+{
+  const auto buffer = UdpProtocol::encodeCartesian(
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /*gripper_closed=*/ false, /*orient_vertical=*/ true, 0, 0);
+  CartesianPacket packet;
+  std::memcpy(&packet, buffer.data(), sizeof(packet));
+  EXPECT_EQ(packet.payload.control_flags, kControlFlagEnable | kControlFlagOrientVertical);
+}
+
+TEST(UdpProtocol, EncodeCartesianOrientVerticalFalseLeavesBit1Clear)
+{
+  const auto buffer = UdpProtocol::encodeCartesian(
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /*gripper_closed=*/ false, /*orient_vertical=*/ false, 0, 0);
+  CartesianPacket packet;
+  std::memcpy(&packet, buffer.data(), sizeof(packet));
+  EXPECT_EQ(packet.payload.control_flags, kControlFlagEnable);
 }
 
 namespace
