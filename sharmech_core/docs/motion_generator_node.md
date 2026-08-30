@@ -90,9 +90,10 @@ geometry_msgs/Twist  twist     # 目標速度(並進 + 角速度)
 | `a_max` | 0.20 | 最大並進加速度 [m/s²]。**軌道生成とジョグのレート制限で共用** |
 | `w_max` | 1.0 | 最大角速度 (pitch/yaw) [rad/s] |
 | `alpha_max` | 2.0 | 最大角加速度 [rad/s²] |
-| `workspace_x_min` / `x_max` | -0.20 / 0.20 | 作業領域 X [m] |
-| `workspace_y_min` / `y_max` | 0.05 / 0.30 | 作業領域 Y [m] |
-| `workspace_z_min` / `z_max` | 0.00 / 0.30 | 作業領域 Z [m] |
+| `workspace_x_min` / `x_max` | -2.045 / 0.941 | 作業領域 X [m]。2026-08-30実測確定 (赤フィールド)。詳細は `sharmech/docs/field_dimensions.md` |
+| `workspace_y_min` / `y_max` | -0.675 / 0.675 | 作業領域 Y [m]。同上 |
+| `workspace_z_min` / `z_max` | 0.00 / 0.30 | 作業領域 Z [m]。**未確定のまま** (今回の実測は上面図のみでZ情報を含まない) |
+| `field_origin_offset_x_m` / `_y_m` | 0.0 / 0.0 | 本番設置での原点ズレ補正 [m]。上記 workspace_x/y_min/max 全体をこの分だけ平行移動する |
 | `twist_timeout` | 0.4 | ジョグのウォッチドッグ [s] (300〜500ms) |
 | `goal_mode` | `twist_priority` | 調停方式。`twist_priority` / `exclusive` |
 

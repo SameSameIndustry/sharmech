@@ -336,6 +336,40 @@ TEST(MotionGeneratorNode, WorkspaceClampZeroesVelocityOnClampedAxis)
   EXPECT_EQ(status->mode, sharmech_msgs::msg::MotionStatus::MODE_JOG);
 }
 
+TEST(MotionGeneratorNode, FieldOriginOffsetShiftsDefaultWorkspace)
+{
+  // workspace_x_max=0.20 に対し offset_x=+0.5 を与えると、実効上限は 0.70 になる。
+  // 0.20 を超えるがoffset込みの上限以下のゴールは受理され、それを超えるゴールは却下される
+  TestHarness harness("originoffset");
+  auto motion_node = std::make_shared<sharmech_core::MotionGeneratorNode>(
+    fastTestOptions(
+  {
+    rclcpp::Parameter("field_origin_offset_x_m", 0.5),
+  }));
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(harness.node());
+  executor.add_node(motion_node);
+
+  // offset無しなら却下されるはずの 0.30 が、offset込みなら受理される
+  harness.publishTargetPose(0.30, 0.1, 0.1);
+  ASSERT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        auto s = harness.latestStatus();
+        return s && s->mode == sharmech_msgs::msg::MotionStatus::MODE_GOAL;
+      }, 2.0));
+
+  // offset込みの上限(0.70)を超えるゴールは却下される
+  harness.publishTargetPose(0.71, 0.1, 0.1);
+  ASSERT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        auto s = harness.latestStatus();
+        return s && s->last_result == sharmech_msgs::msg::MotionStatus::RESULT_REJECTED;
+      }, 2.0));
+}
+
 TEST(MotionGeneratorNode, WorkspaceClampOverrideRejectsGoalOutsideOverride)
 {
   // config.yaml のデフォルトでは通る目標だが、game_state_manager_node が

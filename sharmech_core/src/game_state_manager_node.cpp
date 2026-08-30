@@ -47,8 +47,17 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
     declare_parameter("placement_order", std::vector<int64_t>{});
   std::vector<int> placement_order(placement_order_i64.begin(), placement_order_i64.end());
 
+  // 本番設置での原点ズレ補正 (sharmech/docs/field_dimensions.md 参照)。既定0.0。
+  // motion_generator_node と同じ意味・同じ値を使う想定 (現場合わせで両方に入れる)
+  const double origin_offset_x = declare_parameter("field_origin_offset_x_m", 0.0);
+  const double origin_offset_y = declare_parameter("field_origin_offset_y_m", 0.0);
+
   GameStateMachine::Config config;
   config.slots = loadSlots(field_color);
+  for (auto & slot : config.slots) {
+    slot.x += origin_offset_x;
+    slot.y += origin_offset_y;
+  }
   config.placement_order = placement_order;
   config.slot_clamp_margin_m = declare_parameter("slot_clamp_margin_m", 0.03);
   config.transport_clearance_z = declare_parameter("transport_clearance_z", 0.20);

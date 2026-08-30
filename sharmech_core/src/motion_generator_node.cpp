@@ -66,6 +66,15 @@ MotionGeneratorNode::MotionGeneratorNode(const rclcpp::NodeOptions & options)
   twist_timeout_ = declare_parameter("twist_timeout", 0.4);
   goal_mode_     = declare_parameter("goal_mode", std::string("twist_priority"));
 
+  // 本番設置での原点ズレ補正 (sharmech/docs/field_dimensions.md 参照)。
+  // 既定0.0。X/Yの作業領域全体をこの分だけ平行移動する (Zは対象外)
+  const double origin_offset_x = declare_parameter("field_origin_offset_x_m", 0.0);
+  const double origin_offset_y = declare_parameter("field_origin_offset_y_m", 0.0);
+  workspace_x_min_ += origin_offset_x;
+  workspace_x_max_ += origin_offset_x;
+  workspace_y_min_ += origin_offset_y;
+  workspace_y_max_ += origin_offset_y;
+
   if (goal_mode_ != "twist_priority" && goal_mode_ != "exclusive") {
     RCLCPP_FATAL(get_logger(), "Unknown goal_mode: %s", goal_mode_.c_str());
     throw std::invalid_argument("unknown goal_mode");
