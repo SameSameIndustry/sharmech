@@ -57,6 +57,9 @@ HardwareBridgeNode::HardwareBridgeNode(const rclcpp::NodeOptions & options)
     "/catchrobo/arm/current_pose", 10);
   joint_states_pub_ = create_publisher<sensor_msgs::msg::JointState>(
     "/joint_states", 10);
+  // latched: 後から接続した可視化クライアントにも現在のMCU状態が即座に届く
+  mcu_status_pub_ = create_publisher<sharmech_msgs::msg::McuStatus>(
+    "/catchrobo/arm/mcu_status", rclcpp::QoS(1).transient_local());
 
   const auto poll_period =
     std::chrono::duration<double>(1.0 / feedback_poll_rate_);
@@ -176,7 +179,10 @@ void HardwareBridgeNode::onFeedbackTimer()
       continue;
     }
     // UDP は順序を保証しない。古い seq のパケットは破棄する
-    if (last_recv_seq_ && fb->seq <= *last_recv_seq_) {continue;}
+    if (last_recv_seq_ && fb->seq <= *last_recv_seq_) {
+      ++out_of_order_count_;
+      continue;
+    }
     last_recv_seq_ = fb->seq;
     latest = std::move(fb);
   }
@@ -219,6 +225,12 @@ void HardwareBridgeNode::onFeedbackTimer()
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
         "MCU status_flags = 0x%04x", latest->status_flags);
     }
+
+    // ログに出すだけでは可視化クライアントから見えないので、トピックにも出す
+    last_status_flags_  = latest->status_flags;
+    last_gripper_state_ = latest->gripper_closed;
+    last_seq_echo_      = latest->seq_echo;
+    publishMcuStatus(true, 0.0);
   } else if (last_feedback_time_) {
     // 一度でも届いたことがあるのに途絶した場合のみ警告する。
     // MCU 側が未実装のうちからログを埋めないため
@@ -226,8 +238,27 @@ void HardwareBridgeNode::onFeedbackTimer()
     if (silence > feedback_timeout_) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
         "No MCU feedback for %.1f s", silence);
+      publishMcuStatus(false, silence);
     }
   }
+}
+
+// MCU の状態を可視化クライアントへ伝える。
+// connected=false のときは status_flags の内容は「最後に受け取った値」であり
+// 現在値ではない点に注意 (silence_sec を見て判断すること)
+void HardwareBridgeNode::publishMcuStatus(bool connected, double silence_sec)
+{
+  sharmech_msgs::msg::McuStatus msg;
+  msg.header.stamp    = now();
+  msg.header.frame_id = "field";
+  msg.connected           = connected;
+  msg.status_flags        = last_status_flags_;
+  msg.gripper_closed      = last_gripper_state_;
+  msg.seq                 = last_recv_seq_.value_or(0);
+  msg.seq_echo            = last_seq_echo_;
+  msg.silence_sec         = silence_sec;
+  msg.out_of_order_count  = out_of_order_count_;
+  mcu_status_pub_->publish(msg);
 }
 
 }  // namespace sharmech_core

@@ -10,6 +10,7 @@
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <sharmech_msgs/msg/cartesian_command.hpp>
+#include <sharmech_msgs/msg/mcu_status.hpp>
 
 #include <netinet/in.h>
 
@@ -28,6 +29,7 @@ namespace sharmech_core
 // Sub: /catchrobo/command/orient_vertical  (game_state_manager_node の PLACING 指示)
 // Pub: /catchrobo/arm/current_pose  (MCU が FK して返した実姿勢)
 // Pub: /joint_states                (実測の関節角)
+// Pub: /catchrobo/arm/mcu_status    (MCU の status_flags と疎通状態)
 class HardwareBridgeNode : public rclcpp::Node
 {
 public:
@@ -46,12 +48,15 @@ private:
 
   bool openUdpSocket();
   void publishFeedback();
+  // フィードバックの有無に関わらず定期的に疎通状態を配信する
+  void publishMcuStatus(bool connected, double silence_sec);
 
   rclcpp::Subscription<sharmech_msgs::msg::CartesianCommand>::SharedPtr cartesian_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr                  gripper_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr                  orient_vertical_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr         current_pose_pub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr            joint_states_pub_;
+  rclcpp::Publisher<sharmech_msgs::msg::McuStatus>::SharedPtr           mcu_status_pub_;
   rclcpp::TimerBase::SharedPtr                                          feedback_timer_;
 
   // パラメータ
@@ -72,6 +77,10 @@ private:
   std::optional<uint32_t>     last_recv_seq_;       // 順序逆転の検出用
   std::optional<rclcpp::Time> last_feedback_time_;  // 途絶の検出用
   bool        warned_joint_names_{false};
+  uint16_t    last_status_flags_{0};
+  bool        last_gripper_state_{false};
+  uint32_t    last_seq_echo_{0};
+  uint32_t    out_of_order_count_{0};
 };
 
 }  // namespace sharmech_core

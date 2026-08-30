@@ -42,6 +42,12 @@ PROTOCOL_VERSION = 1
 PACKET_TYPE_CARTESIAN = 0x01
 PACKET_TYPE_STATE_FEEDBACK = 0x81
 
+# status_flags のビット定義 (udp_protocol.hpp の kStatus* と一致させること)
+FLAG_TRACKING_ERROR = 1 << 0
+FLAG_DRIVER_FAULT = 1 << 1
+FLAG_WATCHDOG = 1 << 2
+FLAG_UNINITIALIZED = 1 << 3
+
 
 def decode_cartesian(data: bytes):
     if len(data) < HEADER_SIZE + CARTESIAN_PAYLOAD_SIZE:
@@ -90,6 +96,11 @@ def main():
                          help="feedback に載せるダミー関節角の数 (既定: 0。joint_names 未確定のため)")
     parser.add_argument("--status-flags", type=lambda v: int(v, 0), default=0,
                          help="常に載せる status_flags (異常系の手動試験用。例: 0x4 = watchdog)")
+    parser.add_argument("--tracking-error-limit", type=float, default=0.0,
+                         help="追従誤差[m]がこれを超えたら FLAG_TRACKING_ERROR を立てる "
+                              "(0 で無効。--lag と併用すると実機に近い立ち方をする)")
+    parser.add_argument("--watchdog-timeout", type=float, default=0.0,
+                         help="指令がこの秒数途絶したら FLAG_WATCHDOG を立てる (0 で無効)")
     parser.add_argument("--quiet", action="store_true", help="受信ログを抑制する")
     args = parser.parse_args()
 
@@ -133,7 +144,21 @@ def main():
                 alpha = 1.0 - math.exp(-dt / args.lag)
                 for key in ("x", "y", "z", "pitch", "yaw"):
                     current[key] += (cmd[key] - current[key]) * alpha
+            # 指令の途絶を検出するため、前回受信からの間隔を控えておく
+            silence = 0.0 if last_recv_time is None else now - last_recv_time
             last_recv_time = now
+
+            # status_flags を実際の状態から組み立てる。
+            # --status-flags で明示指定したビットは常に立てたままにする
+            status_flags = args.status_flags
+            if args.tracking_error_limit > 0.0:
+                error = math.dist(
+                    (current["x"], current["y"], current["z"]),
+                    (cmd["x"], cmd["y"], cmd["z"]))
+                if error > args.tracking_error_limit:
+                    status_flags |= FLAG_TRACKING_ERROR
+            if args.watchdog_timeout > 0.0 and silence > args.watchdog_timeout:
+                status_flags |= FLAG_WATCHDOG
 
             if not args.quiet:
                 print(f"[mock_mcu] recv seq={cmd['seq']:6d} "
@@ -148,7 +173,7 @@ def main():
                 feedback_seq, last_recv_seq, time.monotonic_ns() // 1000,
                 current["x"], current["y"], current["z"],
                 current["pitch"], current["yaw"],
-                args.status_flags, gripper_closed, joints)
+                status_flags, gripper_closed, joints)
             sock.sendto(packet, addr)
     except KeyboardInterrupt:
         print("\n[mock_mcu] stopped", file=sys.stderr)
