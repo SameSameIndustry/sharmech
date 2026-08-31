@@ -10,6 +10,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
+#include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <sharmech_msgs/msg/motion_status.hpp>
 #include <sharmech_msgs/msg/workspace_clamp.hpp>
@@ -32,13 +33,17 @@ namespace sharmech_core
 // 仕様の正本: sharmech_core/docs/game_state_manager_node.md
 //
 // Sub: /catchrobo/game/pick_request   (geometry_msgs/PoseStamped) VRで選択したワーク姿勢
-// Sub: /catchrobo/game/place_request  (std_msgs/Empty)            VRの「置け」指示
+// Sub: /catchrobo/game/box_count      (std_msgs/Int32) VRの指定箱にワークを離した通算個数。
+//      置きに行くべきスロット座標のキューになる (count-1 が最新スロットIDの正本)
 // Sub: /catchrobo/arm/status          (sharmech_msgs/MotionStatus) ゴール到達/却下の検知
 // Pub: /catchrobo/arm/target_pose     自動シーケンスのゴール
 // Pub: /catchrobo/arm/gripper         自動シーケンスのグリッパ指令
 // Pub: /catchrobo/arm/orient_vertical PLACING中のみ true
 // Pub: /catchrobo/game/workspace_clamp PLACING/RETRACTING前後の作業領域クランプ上書き
 // Pub: /catchrobo/game/state          現在のゲームステート (std_msgs/String, latched)
+// Sub: /catchrobo/debug/change_state  デバッグ用のステート強制遷移 (std_msgs/String)
+// Sub: /catchrobo/game/toggle_manual_control  DualSenseの特定ボタン同時押し
+//      (L1+R1+L3+R3) で joy_teleop_node が publish する、自由操作の入/切トグル
 class GameStateManagerNode : public rclcpp::Node
 {
 public:
@@ -46,8 +51,13 @@ public:
 
 private:
   void onPickRequest(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
-  void onPlaceRequest(const std_msgs::msg::Empty::SharedPtr msg);
+  void onBoxCount(const std_msgs::msg::Int32::SharedPtr msg);
   void onArmStatus(const sharmech_msgs::msg::MotionStatus::SharedPtr msg);
+  // デバッグ用。任意のステートへ強制遷移する (目標姿勢は配信しない)
+  void onChangeStateRequest(const std_msgs::msg::String::SharedPtr msg);
+  // VRが使えない場合の脱出ハッチ。どの状態からでも自由操作(手動ジョグのみ)へ
+  // トグルする。詳細は GameStateMachine::toggleManualControl() のコメント参照
+  void onToggleManualControl(const std_msgs::msg::Empty::SharedPtr msg);
   void onTimer();
 
   void publishPendingOutputs();
@@ -58,12 +68,14 @@ private:
   std::vector<CartesianState> loadSlots(const std::string & color_suffix);
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pick_sub_;
-  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr             place_sub_;
+  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr             box_count_sub_;
   rclcpp::Subscription<sharmech_msgs::msg::MotionStatus>::SharedPtr status_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr     target_pose_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr                 gripper_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr                 orient_vertical_pub_;
   rclcpp::Publisher<sharmech_msgs::msg::WorkspaceClamp>::SharedPtr  workspace_clamp_pub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr             change_state_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr              toggle_manual_control_sub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr               state_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
@@ -71,6 +83,9 @@ private:
   // /catchrobo/arm/status は status_rate で常時流れてくるため、
   // last_result が変化した瞬間だけをイベントとして扱うための直近値
   uint8_t prev_last_result_{sharmech_msgs::msg::MotionStatus::RESULT_NONE};
+  // 直近の box_count。+1 以外の変化 (飛び・減少・0リセット) を警告するためだけに持つ。
+  // 追従自体は GameStateMachine::onBoxCount が受け取った値をそのまま正本として行う
+  int prev_box_count_{0};
 };
 
 }  // namespace sharmech_core

@@ -122,6 +122,13 @@ joy_teleop_node:
     deadman_button: 4        # L1
     gripper_toggle_button: 0 # ×
     home_button: 2           # △
+    # VRが使えない場合の脱出ハッチ。4ボタン同時押しで自由操作(自動シーケンス停止・
+    # ジョグのみ)にトグルする。どのゲームステートからでも入れ、再度押すと戻る
+    # (詳細は sharmech_core/docs/game_state_manager_node.md)
+    manual_toggle_button_l1: 4        # L1 (deadman_buttonと同じでよい)
+    manual_toggle_button_r1: 5        # R1
+    manual_toggle_button_l_stick: 11  # L3 (左スティック押し込み)
+    manual_toggle_button_r_stick: 12  # R3 (右スティック押し込み)
 
 hardware_bridge_node:
   ros__parameters:

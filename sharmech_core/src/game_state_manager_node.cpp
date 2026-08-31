@@ -82,12 +82,25 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
   pick_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
     "/catchrobo/game/pick_request", 10,
     std::bind(&GameStateManagerNode::onPickRequest, this, std::placeholders::_1));
-  place_sub_ = create_subscription<std_msgs::msg::Empty>(
-    "/catchrobo/game/place_request", 10,
-    std::bind(&GameStateManagerNode::onPlaceRequest, this, std::placeholders::_1));
+  // VRが仮想フィールドの指定箱にワークを離すたびに届く通算個数 (1始まり)。
+  // 「置きに行くべきスロット座標のキュー」として扱う (下記 onBoxCount)
+  box_count_sub_ = create_subscription<std_msgs::msg::Int32>(
+    "/catchrobo/game/box_count", 10,
+    std::bind(&GameStateManagerNode::onBoxCount, this, std::placeholders::_1));
   status_sub_ = create_subscription<sharmech_msgs::msg::MotionStatus>(
     "/catchrobo/arm/status", rclcpp::QoS(1).transient_local(),
     std::bind(&GameStateManagerNode::onArmStatus, this, std::placeholders::_1));
+
+  // デバッグ用。任意のステートへ飛ばして、その状態の振る舞いだけを確認できる
+  change_state_sub_ = create_subscription<std_msgs::msg::String>(
+    "/catchrobo/debug/change_state", 10,
+    std::bind(&GameStateManagerNode::onChangeStateRequest, this, std::placeholders::_1));
+
+  // VRが使えない場合の脱出ハッチ。joy_teleop_node がDualSenseの特定ボタン
+  // 同時押し(L1+R1+L3+R3)を検知して publish する
+  toggle_manual_control_sub_ = create_subscription<std_msgs::msg::Empty>(
+    "/catchrobo/game/toggle_manual_control", 10,
+    std::bind(&GameStateManagerNode::onToggleManualControl, this, std::placeholders::_1));
 
   target_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
     "/catchrobo/arm/target_pose", 10);
@@ -149,10 +162,34 @@ void GameStateManagerNode::onPickRequest(const geometry_msgs::msg::PoseStamped::
   publishPendingOutputs();
 }
 
-void GameStateManagerNode::onPlaceRequest(const std_msgs::msg::Empty::SharedPtr)
+// VRの指定箱にワークを離した通算個数。box_count = N は
+// 「placement_order[N-1] のスロットへ置きに行く」ことを意味する
+// (0->1 なら placement_order[0])。**受け取った値が常に正本**なので、飛び・減少・
+// 0リセットも警告を出したうえでその値に追従する (詳細は GameStateMachine::onBoxCount)。
+//
+// このイベント自体は動き出しの契機ではなく、キューに積むだけ。実際に動くのは
+// GRASPING の dwell 経過後にキューが空でないときで、そこから TRANSPORTING →
+// PLACING → RETRACTING まで自動で進む (place_request 相当の指示も box_count が兼ねる)
+void GameStateManagerNode::onBoxCount(const std_msgs::msg::Int32::SharedPtr msg)
 {
-  machine_->onPlaceRequested();
+  const int count = msg->data;
+  const int capacity = static_cast<int>(machine_->placementCount());
+  if (count < 0 || count > capacity) {
+    RCLCPP_WARN(get_logger(),
+      "box_count %d is out of range [0, %d]; clamped", count, capacity);
+  } else if (count != prev_box_count_ + 1) {
+    RCLCPP_WARN(get_logger(),
+      "box_count changed %d -> %d (expected +1); following the received value as-is",
+      prev_box_count_, count);
+  }
+  prev_box_count_ = count;
+
+  machine_->onBoxCount(count);
+  // キュー投入で GRASPING → TRANSPORTING に進める場合があるので、
+  // 次のタイマー周期を待たずにここで一度評価する
+  machine_->tick(now().seconds());
   publishPendingOutputs();
+  publishState();
 }
 
 void GameStateManagerNode::onArmStatus(const sharmech_msgs::msg::MotionStatus::SharedPtr msg)
@@ -171,6 +208,41 @@ void GameStateManagerNode::onArmStatus(const sharmech_msgs::msg::MotionStatus::S
     machine_->onGoalRejectedOrAborted();
   }
   publishPendingOutputs();
+}
+
+// デバッグ用のステート強制遷移。
+// 状態だけを書き換え、その状態の目標姿勢は配信しない (GameStateMachine::forceState)。
+// 未知の状態名は無視して警告する
+void GameStateManagerNode::onChangeStateRequest(
+  const std_msgs::msg::String::SharedPtr msg)
+{
+  const auto requested = gameStateFromString(msg->data);
+  if (!requested) {
+    RCLCPP_WARN(get_logger(),
+      "Unknown state name for /catchrobo/debug/change_state: '%s'", msg->data.c_str());
+    return;
+  }
+
+  const auto previous = machine_->state();
+  machine_->forceState(*requested, now().seconds());
+  RCLCPP_WARN(get_logger(),
+    "Game state forced by debug topic: %s -> %s (no goal is published)",
+    toString(previous).c_str(), toString(*requested).c_str());
+  publishState();
+}
+
+// VRが使えない場合の脱出ハッチ。どの状態からでもトグルできる。
+// 副作用コマンドは出ないが、作業領域クランプだけは必ずデフォルトへ戻る
+// (GameStateMachine::toggleManualControl 参照)
+void GameStateManagerNode::onToggleManualControl(const std_msgs::msg::Empty::SharedPtr)
+{
+  const auto previous = machine_->state();
+  machine_->toggleManualControl(now().seconds());
+  RCLCPP_WARN(get_logger(),
+    "Manual control toggled: %s -> %s",
+    toString(previous).c_str(), toString(machine_->state()).c_str());
+  publishPendingOutputs();
+  publishState();
 }
 
 void GameStateManagerNode::onTimer()

@@ -136,7 +136,7 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 | `/catchrobo/field/cylinders` | `geometry_msgs/PoseArray` | `cylinder_detector_node` → WebXR。**latched**、`scan_interval_sec`毎+手動トリガー | ○ |
 | `/catchrobo/field/rescan_request` | `std_msgs/Empty` | WebXR → `cylinder_detector_node`。手動即時再スキャン | ○ |
 | `/catchrobo/game/pick_request` | `geometry_msgs/PoseStamped` | WebXR → `game_state_manager_node`。選択したワーク姿勢 | ○ |
-| `/catchrobo/game/place_request` | `std_msgs/Empty` | WebXR → `game_state_manager_node`。「置け」指示 | ○ |
+| `/catchrobo/game/box_count` | `std_msgs/Int32` | WebXR → `game_state_manager_node`。指定箱に置いた通算個数。`N` → `placement_order[N-1]` のスロットへ置きに行く | ○ |
 | `/catchrobo/game/state` | `std_msgs/String` | `game_state_manager_node` → WebXR。**latched** | ○ |
 | `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | `game_state_manager_node` → `motion_generator_node` | |
 | `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `motion_generator_node` → 下流 | |
@@ -494,9 +494,10 @@ ROS2 グラフへの直接の窓なので、クライアントを「ROS2 ノー�
   詳細は [`sharmech_core/docs/game_state_manager_node.md`](sharmech_core/docs/game_state_manager_node.md))
 - `control_flags` bit1 (「縦にする」指示) を実際に受けてワークを立てる機構自体が
   MCU側で未確定・未実装
-- VR側 (`catchrobo_webxr_controller`) の仮想フィールド・掴む/置く操作・置き場フィールドUI、
-  および `/catchrobo/game/pick_request` `/catchrobo/game/place_request`
-  `/catchrobo/field/rescan_request` の送信ロジック実装 (本リポジトリのスコープ外)
+- VR側 (`catchrobo_webxr_controller`) の `/catchrobo/game/pick_request`
+  `/catchrobo/field/rescan_request` の送信ロジック実装 (本リポジトリのスコープ外)。
+  `/catchrobo/game/box_count` はVR側実装済み。ただし `pick_request` が無いと
+  自動シーケンスが始まらないため、box_countだけでは実機は動かない
 
 ## ビルドと起動
 

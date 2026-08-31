@@ -14,6 +14,7 @@ PS4 コントローラの入力を、操縦層の共通インターフェース�
 | `/catchrobo/arm/gripper` | ボタン → グリッパ開閉(トグル) |
 | `/catchrobo/arm/target_pose` | ホームボタン → config で定義した待機姿勢へ復帰 |
 | `/catchrobo/arm/cancel` | デッドマンを離したとき → 実行中のゴールを中断 |
+| `/catchrobo/game/toggle_manual_control` | 4ボタン同時押し(既定 L1+R1+L3+R3) → 自由操作のトグル(下記) |
 
 PS4 は **VR が使えないときのバックアップと、テスト用**という位置づけ。VR と同じ
 `/catchrobo/arm/*` へ publish するので、下流から見ると VR と区別がつかない。
@@ -42,6 +43,7 @@ PS4 は **VR が使えないときのバックアップと、テスト用**と�
 | `/catchrobo/arm/gripper` | `std_msgs/Bool` | `publish_rate` で定期送信 |
 | `/catchrobo/arm/target_pose` | `geometry_msgs/PoseStamped` | ホームボタンの立ち上がりエッジ |
 | `/catchrobo/arm/cancel` | `std_msgs/Empty` | デッドマンの立ち下がり |
+| `/catchrobo/game/toggle_manual_control` | `std_msgs/Empty` | 4ボタン同時押しの立ち上がりエッジ(下記) |
 
 ### Subscribe (状態確認用・任意)
 
@@ -107,6 +109,10 @@ ROS2 Humble の `joy` (SDL2 ベース) と `joy_linux` でも異なる。
 | `deadman_button` | 4 | L1 |
 | `gripper_toggle_button` | 0 | × |
 | `home_button` | 2 | △ |
+| `manual_toggle_button_l1` | 4 | L1 (自由操作トグルの4ボタン同時押しの1つ。`deadman_button` と同じでよい) |
+| `manual_toggle_button_r1` | 5 | R1 |
+| `manual_toggle_button_l_stick` | 11 | L3 (左スティック押し込み) |
+| `manual_toggle_button_r_stick` | 12 | R3 (右スティック押し込み) |
 
 反転は `scale` を負値にすることで表現する(反転フラグは持たない)。
 
@@ -123,6 +129,7 @@ ROS2 Humble の `joy` (SDL2 ベース) と `joy_linux` でも異なる。
 | `last_joy_time_` | `joy_timeout` 判定用 |
 | `gripper_state_` | トグルで反転する状態。**起動時は `false`(開)** |
 | `prev_buttons_` | 立ち上がりエッジ検出用の前回ボタン状態 |
+| `manual_toggle_combo_was_active_` | 自由操作トグルの4ボタン同時押しが前回tickで揃っていたか。連打防止のエッジ検出用 |
 
 ## 処理フロー
 
@@ -194,6 +201,27 @@ PS4 を繋いだままでもゴール指定(ホーム復帰や VR からの指�
 
 最後の項目は、デッドマンが「操作者が能動的に指令している」ことを表すため。
 自動移動中にデッドマンを離したら止まる方が一貫する。
+
+## 自由操作トグル (VRが使えない場合の脱出ハッチ)
+
+**最悪VRが動かせない場合でも、DualSense(PS4互換)コントローラだけで最低限
+試合を進められるようにする**ための機能。4ボタン(既定: L1+R1+L3+R3)を
+**すべて同時に**押した瞬間(立ち上がりエッジ)に `/catchrobo/game/toggle_manual_control`
+(`std_msgs/Empty`) を1回だけ publish する。
+
+- 個々のボタンの立ち上がりエッジではなく、**4つ揃った状態そのもの**の立ち上がりで
+  判定する(`manual_toggle_combo_was_active_` で前回tickの状態を保持)。
+  誤って連打しないよう、離して押し直すまでは再送しない
+- 受け手は `game_state_manager_node`。どのゲームステートからでも
+  `GameState::kManualControl` にトグルし、再度同じコンボを押すと元の状態へ戻る
+  (詳細・状態遷移としての扱いは
+  [`game_state_manager_node.md`](game_state_manager_node.md#自由操作-vrが使えない場合の脱出ハッチ))
+- **このノード自身の動作(cmd_twist ジョグ)は自由操作かどうかに関わらず常に有効。**
+  自由操作状態は「自動シーケンスを止めて、ジョグ操作の邪魔をさせない」ためのもので、
+  ジョグ自体はこのトグルの前後で変わらない
+
+L1 は `deadman_button` と兼用してよい(コンボの一部として押されている間も、
+デッドマンとして同時に機能する)。
 
 ## 異常系
 

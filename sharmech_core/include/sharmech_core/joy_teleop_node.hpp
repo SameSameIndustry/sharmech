@@ -29,6 +29,9 @@ namespace sharmech_core
 // Pub: /catchrobo/arm/gripper     (同上)
 // Pub: /catchrobo/arm/target_pose (ホームボタンの立ち上がりエッジ)
 // Pub: /catchrobo/arm/cancel      (デッドマンの立ち下がり)
+// Pub: /catchrobo/game/toggle_manual_control (L1+R1+L3+R3 同時押しの立ち上がりエッジ。
+//      VRが使えない場合にDualSenseだけで最低限試合を進められるようにする脱出ハッチ。
+//      game_state_manager_node が受けて GameState::kManualControl をトグルする)
 class JoyTeleopNode : public rclcpp::Node
 {
 public:
@@ -62,6 +65,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr                  gripper_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr      target_pose_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr                 cancel_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr                 toggle_manual_control_pub_;
   rclcpp::TimerBase::SharedPtr publish_timer_;
 
   // パラメータ
@@ -74,12 +78,18 @@ private:
   int deadman_button_;
   int gripper_toggle_button_;
   int home_button_;
+  // 自由操作トグルの4ボタン同時押し (既定は DualSense/PS4 の L1・R1・L3・R3)
+  int manual_toggle_button_l1_;
+  int manual_toggle_button_r1_;
+  int manual_toggle_button_l_stick_;
+  int manual_toggle_button_r_stick_;
 
   // 内部状態
   std::optional<sensor_msgs::msg::Joy> last_joy_;
   std::optional<rclcpp::Time>          last_joy_time_;
   bool gripper_state_{false};   // トグルで反転。起動時は false (開)
   std::vector<int32_t> prev_buttons_;
+  bool manual_toggle_combo_was_active_{false};  // 4ボタン同時押しの立ち上がりエッジ検出用
   uint8_t last_seen_result_{sharmech_msgs::msg::MotionStatus::RESULT_NONE};
   bool warned_out_of_range_{false};
   bool warned_no_home_{false};

@@ -21,13 +21,17 @@ namespace sharmech_core
 //   kWaitingForPick 次に運ぶワークの選択待ち。VR からの pick_request を受理する
 //   kApproaching    選択したワークの姿勢へ直線1本で接近中 (グリッパは開)
 //   kGrasping       到達後グリッパを閉じ、grasp_dwell_sec だけ待つ
-//   kTransporting   現在のスロットのxy・transport_clearance_zまで運搬中。
-//                   VR の place_request (「置け」指示) を待つ
+//   kTransporting   キュー先頭のスロットのxy・transport_clearance_zまで運搬中。
+//                   到達したらそのまま kPlacing へ進む
 //   kPlacing        作業領域クランプをスロット周辺に一時的に絞り、スロット姿勢まで
 //                   直線1本で降下。orient_vertical を true にして MCU に伝える
 //   kRetracting     グリッパを開き、同じxyでretract_clearance_zまで直線1本で退避。
 //                   作業領域クランプはデフォルトに戻す
 //   kComplete       24箇所すべて配置完了
+//   kManualControl  VRが使えない場合の脱出ハッチ。DualSenseの特定ボタン同時押しで
+//                   どの状態からでも入れ、自動シーケンスを完全に止めて
+//                   ジョグ操作(cmd_twist)だけで試合を進められるようにする。
+//                   詳細は toggleManualControl() のコメント参照
 enum class GameState : uint8_t
 {
   kWaitingForPick = 0,
@@ -37,6 +41,7 @@ enum class GameState : uint8_t
   kPlacing = 4,
   kRetracting = 5,
   kComplete = 6,
+  kManualControl = 7,
 };
 
 inline std::string toString(GameState state)
@@ -49,8 +54,23 @@ inline std::string toString(GameState state)
     case GameState::kPlacing: return "PLACING";
     case GameState::kRetracting: return "RETRACTING";
     case GameState::kComplete: return "COMPLETE";
+    case GameState::kManualControl: return "MANUAL_CONTROL";
   }
   return "UNKNOWN";
+}
+
+// toString の逆変換。未知の名前なら nullopt。
+// デバッグ用の状態強制遷移 (/catchrobo/debug/change_state) で使う
+inline std::optional<GameState> gameStateFromString(const std::string & name)
+{
+  for (const auto state : {
+      GameState::kWaitingForPick, GameState::kApproaching, GameState::kGrasping,
+      GameState::kTransporting, GameState::kPlacing, GameState::kRetracting,
+      GameState::kComplete, GameState::kManualControl})
+  {
+    if (toString(state) == name) {return state;}
+  }
+  return std::nullopt;
 }
 
 // motion_generator_node へ送る作業領域クランプの上書き指令 (ROS 非依存。
@@ -70,6 +90,13 @@ struct WorkspaceClampCommand
 //
 // 経由点を持つ軌道は作らない、という既存方針 (sharmech/README.md) に合わせ、
 // 各状態のゴールは直線1本のみ (待避点や中間点を挟まない)。
+//
+// **どのスロットへ何個目を置くかは VR の box_count が決める。** VRクライアントは
+// 仮想フィールドの指定箱にワークを離すたびに「通算何個目か」を
+// /catchrobo/game/box_count で送ってくる。本クラスはそれを「置きに行くべき
+// スロット座標のキュー」として保持し (onBoxCount)、キューが空でない間だけ
+// 運搬→設置→退避を自動で進める。**count-1 が常に最新スロットIDの正本**
+// (キュー長 = box_count - 消化済み個数)。
 //
 // 仕様の正本: sharmech_core/docs/game_state_manager_node.md
 class GameStateMachine
@@ -111,11 +138,41 @@ public:
     pending_orient_vertical_ = false;
   }
 
-  void onPlaceRequested()
+  // VRクライアントが指定箱にワークを離すたびに送ってくる「通算何個目か」(1始まり)。
+  // 受け取った値そのものを正本として扱い、「置きに行くべきスロット」のキューを
+  // 更新する (キュー長 = count - 消化済み個数)。**このイベント自体は動き出しの
+  // 契機ではない**。実際に動くのは kGrasping の dwell 経過後、キューが空でない
+  // ときに kTransporting へ進むところから。
+  //
+  // 飛び・減少・0リセットも一律「その値が正本」として追従する
+  // (VRの再接続やフィールド再設置でカウントが0に戻る実装になっているため)。
+  // **ただし宛先を確定済みのサイクル (kTransporting/kPlacing/kRetracting) は
+  // 中断しない。** 途中でスロットが差し替わると、既に publish 済みのゴールと
+  // 退避先の xy がずれて、ワークを保持したまま別の箱の上へ動くことになるため。
+  // 減少がこの3状態中に届いた場合は、そのサイクルを最後まで終えてから効く
+  void onBoxCount(int count)
   {
-    if (state_ != GameState::kTransporting) {return;}
-    enterPlacing();
+    const std::size_t capacity = config_.placement_order.size();
+    authorized_count_ = count <= 0 ? 0 :
+      std::min(static_cast<std::size_t>(count), capacity);
+
+    const bool destination_committed =
+      state_ == GameState::kTransporting || state_ == GameState::kPlacing ||
+      state_ == GameState::kRetracting;
+    if (destination_committed) {return;}
+
+    if (order_index_ > authorized_count_) {order_index_ = authorized_count_;}
+    // 巻き戻しでスロットが復活したら、終了状態から待機へ戻す
+    if (state_ == GameState::kComplete && order_index_ < capacity) {
+      state_ = GameState::kWaitingForPick;
+    }
   }
+
+  // 置きに行くべきスロットがキューに残っているか (box_count が消化済み個数より先行しているか)
+  bool hasQueuedSlot() const {return order_index_ < authorized_count_;}
+
+  // placement_order の長さ。box_count の範囲チェック用にノードから読む
+  std::size_t placementCount() const {return config_.placement_order.size();}
 
   // motion_generator_node の /catchrobo/arm/status で現在のゴールが
   // 到達したことを検知したら呼ぶ
@@ -130,29 +187,38 @@ public:
       case GameState::kPlacing:
         enterRetracting();
         break;
+      case GameState::kTransporting:
+        // スロットの上空へ着いたので、そのまま降下に入る。
+        // 「置け」の指示は box_count が既に兼ねている (onBoxCount 参照)
+        enterPlacing();
+        break;
       case GameState::kRetracting:
         advanceSlot();
         break;
-      // kTransporting へのゴール到達自体は無視する。
-      // 次に進むのは VR の onPlaceRequested を待ってから
       default:
         break;
     }
   }
 
   // 却下・中断は安全側 (WAITING_FOR_PICK) に戻す。経由点なしの直線軌道である以上、
-  // 中断されたら掴み直しになるが、これが最も単純で安全
+  // 中断されたら掴み直しになるが、これが最も単純で安全。
+  // ただし kManualControl 中は対象外 (手動ジョグ中のゴール却下で自動シーケンスに
+  // 引き戻されると、脱出ハッチとして機能しなくなるため)
   void onGoalRejectedOrAborted()
   {
-    if (state_ != GameState::kWaitingForPick && state_ != GameState::kComplete) {
+    if (state_ != GameState::kWaitingForPick && state_ != GameState::kComplete &&
+      state_ != GameState::kManualControl)
+    {
       state_ = GameState::kWaitingForPick;
     }
   }
 
-  // 経過時間依存の遷移 (grasp dwell) を進める。定期的に (control loop相当で) 呼ぶ
+  // 経過時間 (grasp dwell) と box_count キューによる遷移を進める。
+  // 定期的に (control loop相当で) 呼ぶ。dwell が経過していても**キューが空の間は
+  // kGrasping のまま待つ** (掴んだ位置で宛先の指示待ちになる)
   void tick(double now_sec)
   {
-    if (state_ == GameState::kGrasping &&
+    if (state_ == GameState::kGrasping && hasQueuedSlot() &&
       now_sec - grasp_start_sec_ >= config_.grasp_dwell_sec)
     {
       state_ = GameState::kTransporting;
@@ -161,6 +227,57 @@ public:
       goal.z = config_.transport_clearance_z;
       pending_goal_ = goal;
     }
+  }
+
+  // デバッグ用に状態を直接書き換える (/catchrobo/debug/change_state)。
+  //
+  // 通常の遷移と違い、その状態の目標姿勢・グリッパ・作業領域クランプは
+  // 一切セットしない。状態だけを見たいのに実機/シムが勝手に動き出すのを
+  // 避けるため (保留中の指令が残っていれば破棄する)。
+  // 動かしたい場合は遷移後に通常のイベント (pick_request 等) を送ること
+  void forceState(GameState state, double now_sec)
+  {
+    state_ = state;
+    pending_goal_.reset();
+    pending_gripper_.reset();
+    pending_orient_vertical_.reset();
+    pending_clamp_.reset();
+    // GRASPING は経過時間で TRANSPORTING に進むので、基準時刻を入れ直す
+    if (state == GameState::kGrasping) {grasp_start_sec_ = now_sec;}
+  }
+
+  // VRが使えない場合の脱出ハッチ。DualSenseの特定ボタン同時押し(L1+R1+L3+R3)を
+  // game_state_manager_node が検知して呼ぶ。**どの状態からでも呼べる** (kComplete
+  // からも入れる。試合終了後の片付け等でも手動操作したいことがあるため)。
+  //
+  // kManualControl でなければ現在の状態を退避して kManualControl へ、
+  // 既に kManualControl ならば退避しておいた状態へ戻る (トグル)。
+  //
+  // forceState と同様、目標姿勢・グリッパ等の副作用コマンドは一切出さない
+  // (ジョグは cmd_twist 経由で常に効いており、このメソッドが動かす必要はない)。
+  // **ただし作業領域クランプだけは必ずデフォルトへリセットする。** PLACING中の
+  // 絞り込みが残ったままだと、脱出ハッチのはずがジョグ操作を妨げてしまうため。
+  //
+  // 既知の制限: 自由操作中に人間が手動で配置を進めても、スロットの消化
+  // (order_index_) はステートマシンには反映されない (センサでオブジェクトの
+  // 状態を検知していないため)。元の状態(kApproaching等)に戻ったとき、
+  // 直前に自動シーケンスが把握していたスロット割付のまま再開される
+  void toggleManualControl(double now_sec)
+  {
+    if (state_ == GameState::kManualControl) {
+      state_ = pre_manual_state_;
+    } else {
+      pre_manual_state_ = state_;
+      state_ = GameState::kManualControl;
+    }
+    pending_goal_.reset();
+    pending_gripper_.reset();
+    pending_orient_vertical_.reset();
+    WorkspaceClampCommand reset_clamp;
+    reset_clamp.reset = true;
+    pending_clamp_ = reset_clamp;
+    // GRASPING に戻った場合、経過時間で TRANSPORTING に進むので基準時刻を入れ直す
+    if (state_ == GameState::kGrasping) {grasp_start_sec_ = now_sec;}
   }
 
   // --- 保留中の指令。状態遷移直後にのみセットされる (edge-triggered) ---
@@ -245,7 +362,9 @@ private:
 
   Config config_;
   GameState state_{GameState::kWaitingForPick};
-  std::size_t order_index_{0};
+  GameState pre_manual_state_{GameState::kWaitingForPick};  // toggleManualControl の復帰先
+  std::size_t order_index_{0};       // 消化済み個数 = 次に置くスロットのキュー先頭
+  std::size_t authorized_count_{0};  // 直近の box_count (キュー末尾。count-1 が最新スロットID)
   CartesianState pick_pose_{};
   double grasp_start_sec_{0.0};
 

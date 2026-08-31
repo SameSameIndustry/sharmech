@@ -27,6 +27,12 @@ JoyTeleopNode::JoyTeleopNode(const rclcpp::NodeOptions & options)
   deadman_button_        = declare_parameter("deadman_button", 4);
   gripper_toggle_button_ = declare_parameter("gripper_toggle_button", 0);
   home_button_           = declare_parameter("home_button", 2);
+  // VRが使えない場合の脱出ハッチ。既定は一般的なLinux上のDualSense/PS4マッピング
+  // (L1=4, R1=5, L3=11, R3=12)。実機で `ros2 topic echo /joy` を見て合わせること
+  manual_toggle_button_l1_        = declare_parameter("manual_toggle_button_l1", 4);
+  manual_toggle_button_r1_        = declare_parameter("manual_toggle_button_r1", 5);
+  manual_toggle_button_l_stick_   = declare_parameter("manual_toggle_button_l_stick", 11);
+  manual_toggle_button_r_stick_   = declare_parameter("manual_toggle_button_r_stick", 12);
 
   if (!home_pose_.empty() && home_pose_.size() != 5) {
     RCLCPP_FATAL(get_logger(),
@@ -48,6 +54,8 @@ JoyTeleopNode::JoyTeleopNode(const rclcpp::NodeOptions & options)
     "/catchrobo/arm/target_pose", 10);
   cancel_pub_ = create_publisher<std_msgs::msg::Empty>(
     "/catchrobo/arm/cancel", 10);
+  toggle_manual_control_pub_ = create_publisher<std_msgs::msg::Empty>(
+    "/catchrobo/game/toggle_manual_control", 10);
 
   const auto period = std::chrono::duration<double>(1.0 / publish_rate_);
   publish_timer_ = create_wall_timer(
@@ -99,6 +107,20 @@ void JoyTeleopNode::onJoy(const sensor_msgs::msg::Joy::SharedPtr msg)
     // 自動移動中にデッドマンを離したら止まる (操作者の能動的指令が消えた)
     cancel_pub_->publish(std_msgs::msg::Empty());
   }
+
+  // 自由操作トグル: L1+R1+L3+R3 が「同時に」揃った瞬間(立ち上がりエッジ)のみ
+  // 1回 publish する。押しっぱなしの間に連打しないよう、combo自体の
+  // 立ち上がりで判定する (個々のボタンのpressed_edgeではない)
+  const bool combo_now =
+    readButton(manual_toggle_button_l1_, *msg) &&
+    readButton(manual_toggle_button_r1_, *msg) &&
+    readButton(manual_toggle_button_l_stick_, *msg) &&
+    readButton(manual_toggle_button_r_stick_, *msg);
+  if (combo_now && !manual_toggle_combo_was_active_) {
+    toggle_manual_control_pub_->publish(std_msgs::msg::Empty());
+    RCLCPP_INFO(get_logger(), "Manual control toggle combo detected (L1+R1+L3+R3)");
+  }
+  manual_toggle_combo_was_active_ = combo_now;
 
   prev_buttons_.assign(msg->buttons.begin(), msg->buttons.end());
   last_joy_      = *msg;
