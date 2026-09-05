@@ -1,8 +1,10 @@
 # kinematics_node
 
 パターンB (ROS2側でIK) 用のノード。**実装済み** (`src/kinematics_node.cpp`)。
-ただし `hardware_bridge_node` の `command_mode: "joint"` が未実装なので、
-このノードの出力はまだMCUまで届かない。詳細は
+`hardware_bridge_node` の `command_mode: "joint"` も 2026-09-01 に実装済みで、
+このノードの出力は `packet_type = 0x02` としてMCUまで届く経路が繋がった
+(mock_mcu でエンドツーエンド疎通確認済み。ただしリンク長は仮値のままなので
+実機で動かせる状態ではない)。詳細は
 [`sharmech/README.md`](../../README.md) の「パターンBを将来追加するための備え」、
 robot構成の確認内容は `CLAUDE.md` の「ロボット構成 (5軸パラレルリンク)」を参照。
 
@@ -95,6 +97,8 @@ MCU側から見えなくなり、`hardware_bridge_node`/`motion_generator_node` 
 - 各リンク長・ピボット間距離・ターンテーブル軸位置・肘/膝機構の基準高さ (要実測)
 - モータ角のゼロ点・回転方向が `parallel_arm_kinematics.hpp` の想定
   (「もう一方のピボットへ向かう方向を0、EE側へ回転するほど増加」) と一致するか (MCU側確認待ち)
-- `hardware_bridge_node` の `command_mode: "joint"` (`UdpProtocol::encodeJoint` の追加、
-  `packet_type = 0x02` の送信経路) はまだ無いため、このノードの出力は未接続
 - 姿勢 (pitch/yaw) をこの5軸でどう扱うか (現状は無視するのみ)
+
+~~`hardware_bridge_node` の `command_mode: "joint"` が無いため出力が未接続~~ は
+**2026-09-01 解消** (`UdpProtocol::encodeJoint` と `packet_type = 0x02` の送信経路を実装。
+並び順の契約は `udp_protocol.hpp` の `kJointOrder`)。

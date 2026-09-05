@@ -6,8 +6,11 @@
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstring>
+#include <iterator>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -37,10 +40,11 @@ HardwareBridgeNode::HardwareBridgeNode(const rclcpp::NodeOptions & options)
       "/catchrobo/command/cartesian", 10,
       std::bind(&HardwareBridgeNode::onCartesianCommand, this, std::placeholders::_1));
   } else if (command_mode_ == "joint") {
-    // パターンB。/catchrobo/command/joint の型が未確定のため未実装
-    RCLCPP_FATAL(get_logger(),
-      "command_mode 'joint' (pattern B) is not implemented yet");
-    throw std::invalid_argument("command_mode 'joint' not implemented");
+    // パターンB。kinematics_node の出力 (物理5モータの個別角+角速度) を
+    // packet_type = 0x02 で送る。並び順の契約は udp_protocol::kJointOrder
+    joint_sub_ = create_subscription<sensor_msgs::msg::JointState>(
+      "/catchrobo/command/joint", 10,
+      std::bind(&HardwareBridgeNode::onJointCommand, this, std::placeholders::_1));
   } else {
     RCLCPP_FATAL(get_logger(), "Unknown command_mode: %s", command_mode_.c_str());
     throw std::invalid_argument("unknown command_mode");
@@ -137,6 +141,57 @@ void HardwareBridgeNode::onCartesianCommand(
     static_cast<float>(msg->twist.angular.y),   // pitch_rate
     static_cast<float>(msg->twist.angular.z),   // yaw_rate
     gripper_state_, orient_vertical_state_, send_seq_++, timestamp_us);
+
+  const auto sent = ::sendto(
+    sockfd_, packet.data(), packet.size(), 0,
+    reinterpret_cast<const sockaddr *>(&mcu_addr_), sizeof(mcu_addr_));
+  if (sent < 0) {
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+      "UDP send failed: %s", std::strerror(errno));
+  }
+}
+
+void HardwareBridgeNode::onJointCommand(const sensor_msgs::msg::JointState::SharedPtr msg)
+{
+  if (sockfd_ < 0) {return;}
+
+  // 並び順は名前で照合する (kinematics_node は kJointOrder と同じ順で publish
+  // しているが、UDP側の契約が「配列位置」である以上、送信直前に名前で確定させて
+  // おけば上流の並び替えがワイヤフォーマットの破壊にならない)
+  std::array<float, udp_protocol::kJointCount> q{};
+  std::array<float, udp_protocol::kJointCount> qdot{};
+  const bool has_velocity = msg->velocity.size() == msg->name.size();
+  for (std::size_t i = 0; i < udp_protocol::kJointCount; ++i) {
+    const auto it = std::find(
+      msg->name.begin(), msg->name.end(), udp_protocol::kJointOrder[i]);
+    if (it == msg->name.end()) {
+      if (!warned_joint_cmd_names_) {
+        RCLCPP_WARN(get_logger(),
+          "/catchrobo/command/joint is missing joint '%s'; dropping packet "
+          "(expected names: shoulder_left, shoulder_right, turntable, knee_left, knee_right)",
+          udp_protocol::kJointOrder[i]);
+        warned_joint_cmd_names_ = true;
+      }
+      return;
+    }
+    const auto idx = static_cast<std::size_t>(std::distance(msg->name.begin(), it));
+    if (idx >= msg->position.size()) {return;}  // name と position の長さ不一致
+    q[i] = static_cast<float>(msg->position[idx]);
+    qdot[i] = has_velocity ? static_cast<float>(msg->velocity[idx]) : 0.0f;
+  }
+  // 「位置と速度は常に併送する」原則のため、velocity 欠落は設計違反として警告する
+  // (0埋めで送ること自体はできるが、MCU側補間がゼロ次ホールドに退化する)
+  if (!has_velocity && !warned_joint_cmd_velocity_) {
+    RCLCPP_WARN(get_logger(),
+      "/catchrobo/command/joint has no velocity array; sending qdot=0 "
+      "(MCU-side interpolation degrades to zero-order hold)");
+    warned_joint_cmd_velocity_ = true;
+  }
+
+  const uint64_t timestamp_us =
+    static_cast<uint64_t>(now().nanoseconds() / 1000);
+  const auto packet = UdpProtocol::encodeJoint(
+    q, qdot, gripper_state_, orient_vertical_state_, send_seq_++, timestamp_us);
 
   const auto sent = ::sendto(
     sockfd_, packet.data(), packet.size(), 0,

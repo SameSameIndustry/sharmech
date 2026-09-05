@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstring>
 #include <vector>
 
@@ -69,6 +70,63 @@ TEST(UdpProtocol, EncodeCartesianOrientVerticalFalseLeavesBit1Clear)
   CartesianPacket packet;
   std::memcpy(&packet, buffer.data(), sizeof(packet));
   EXPECT_EQ(packet.payload.control_flags, kControlFlagEnable);
+}
+
+TEST(UdpProtocol, EncodeJointProducesExpectedByteLayout)
+{
+  const std::array<float, kJointCount> q{0.1f, 0.2f, 0.3f, 0.4f, 0.5f};
+  const std::array<float, kJointCount> qdot{0.01f, 0.02f, 0.03f, 0.04f, 0.05f};
+  const auto buffer = UdpProtocol::encodeJoint(
+    q, qdot, /*gripper_closed=*/ true, /*orient_vertical=*/ false,
+    /*seq=*/ 42, /*timestamp_us=*/ 123456789ULL);
+
+  ASSERT_EQ(buffer.size(), sizeof(JointPacket));
+
+  JointPacket packet;
+  std::memcpy(&packet, buffer.data(), sizeof(packet));
+
+  EXPECT_EQ(packet.header.protocol_version, kProtocolVersion);
+  EXPECT_EQ(packet.header.packet_type, static_cast<uint8_t>(PacketType::kJointCommand));
+  EXPECT_EQ(packet.header.payload_length, sizeof(JointPayload));
+  EXPECT_EQ(packet.header.seq, 42u);
+  EXPECT_EQ(packet.header.timestamp_us, 123456789ULL);
+
+  for (std::size_t i = 0; i < kJointCount; ++i) {
+    EXPECT_FLOAT_EQ(packet.payload.q[i], q[i]);
+    EXPECT_FLOAT_EQ(packet.payload.qdot[i], qdot[i]);
+  }
+  EXPECT_EQ(packet.payload.gripper, 1);
+  EXPECT_EQ(packet.payload.control_flags, kControlFlagEnable);
+}
+
+TEST(UdpProtocol, EncodeJointHasSameSizeAndFlagSemanticsAsCartesian)
+{
+  // ワイヤフォーマットの回帰検出: 0x02 は 0x01 と同じ60バイト・同じフラグ位置。
+  // gripper (offset 56) / control_flags (offset 57) が両パケットで同一オフセット
+  // であることをバイト列レベルで確認する (MCU側が共通処理にできる根拠)
+  const std::array<float, kJointCount> zeros{};
+  const auto joint_buf = UdpProtocol::encodeJoint(
+    zeros, zeros, /*gripper_closed=*/ true, /*orient_vertical=*/ true, 0, 0);
+  const auto cart_buf = UdpProtocol::encodeCartesian(
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /*gripper_closed=*/ true, /*orient_vertical=*/ true, 0, 0);
+
+  ASSERT_EQ(joint_buf.size(), cart_buf.size());
+  EXPECT_EQ(joint_buf[56], cart_buf[56]);  // gripper
+  EXPECT_EQ(joint_buf[57], cart_buf[57]);  // control_flags
+  EXPECT_EQ(joint_buf[57], kControlFlagEnable | kControlFlagOrientVertical);
+}
+
+TEST(UdpProtocol, JointOrderContractIsFiveMotorsInKinematicsNodeOrder)
+{
+  // 並び順の契約の回帰検出。kinematics_node の JointState name 順・
+  // 0x81 フィードバックの joint_positions 順と同一であること (README参照)
+  ASSERT_EQ(kJointOrder.size(), 5u);
+  EXPECT_STREQ(kJointOrder[0], "shoulder_left");
+  EXPECT_STREQ(kJointOrder[1], "shoulder_right");
+  EXPECT_STREQ(kJointOrder[2], "turntable");
+  EXPECT_STREQ(kJointOrder[3], "knee_left");
+  EXPECT_STREQ(kJointOrder[4], "knee_right");
 }
 
 namespace

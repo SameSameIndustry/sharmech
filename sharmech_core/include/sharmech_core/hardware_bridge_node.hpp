@@ -25,6 +25,7 @@ namespace sharmech_core
 // 仕様の正本: sharmech_core/docs/hardware_bridge_node.md
 //
 // Sub: /catchrobo/command/cartesian (command_mode == cartesian)
+// Sub: /catchrobo/command/joint     (command_mode == joint。パターンB)
 // Sub: /catchrobo/command/gripper
 // Sub: /catchrobo/command/orient_vertical  (game_state_manager_node の PLACING 指示)
 // Pub: /catchrobo/arm/current_pose  (MCU が FK して返した実姿勢)
@@ -40,6 +41,7 @@ private:
   // 送信: サブスクリプション駆動 (タイマーではない)。
   // 上流が止まれば送信も止まり、MCU 側ウォッチドッグが作動して安全側に倒れる
   void onCartesianCommand(const sharmech_msgs::msg::CartesianCommand::SharedPtr msg);
+  void onJointCommand(const sensor_msgs::msg::JointState::SharedPtr msg);
   void onGripperCommand(const std_msgs::msg::Bool::SharedPtr msg);
   void onOrientVerticalCommand(const std_msgs::msg::Bool::SharedPtr msg);
 
@@ -52,6 +54,7 @@ private:
   void publishMcuStatus(bool connected, double silence_sec);
 
   rclcpp::Subscription<sharmech_msgs::msg::CartesianCommand>::SharedPtr cartesian_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr         joint_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr                  gripper_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr                  orient_vertical_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr         current_pose_pub_;
@@ -77,6 +80,8 @@ private:
   std::optional<uint32_t>     last_recv_seq_;       // 順序逆転の検出用
   std::optional<rclcpp::Time> last_feedback_time_;  // 途絶の検出用
   bool        warned_joint_names_{false};
+  bool        warned_joint_cmd_names_{false};   // 0x02送信側の名前不一致の警告 (1回のみ)
+  bool        warned_joint_cmd_velocity_{false};  // 同、velocity欠落の警告 (1回のみ)
   uint16_t    last_status_flags_{0};
   bool        last_gripper_state_{false};
   uint32_t    last_seq_echo_{0};

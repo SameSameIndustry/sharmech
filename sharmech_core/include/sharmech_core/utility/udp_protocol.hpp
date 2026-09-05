@@ -1,6 +1,7 @@
 #ifndef SHARMECH_CORE__UTILITY__UDP_PROTOCOL_HPP_
 #define SHARMECH_CORE__UTILITY__UDP_PROTOCOL_HPP_
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -11,9 +12,9 @@ namespace sharmech_core
 
 // ROS2 ⇄ MCU 間 UDP プロトコル定義
 //
-// 仕様の正本は sharmech/README.md「MCU通信仕様 (UDP)」。
-// リトルエンディアン・パディングなし。x86 も ESP32 もリトルエンディアンなので
-// バイトオーダ変換は行わない。
+// 仕様の正本は sharmech/docs/mcu_spec.md (MCU担当者に渡す仕様書)。
+// リトルエンディアン・パディングなし。x86 も STM32 (Cortex-M) もリトルエンディアン
+// なのでバイトオーダ変換は行わない。
 //
 // packet_type:
 //   0x01 = Cartesian 指令 (パターンA・現在)
@@ -27,8 +28,17 @@ constexpr uint8_t kProtocolVersion = 1;
 enum class PacketType : uint8_t
 {
   kCartesianCommand = 0x01,
-  kJointCommand     = 0x02,  // パターンB。未実装
+  kJointCommand     = 0x02,  // パターンB
   kStateFeedback    = 0x81,
+};
+
+// 関節の並び順の契約 (2026-09-01 ユーザー確定)。
+// 0x02 指令の q[]/qdot[] と、0x81 フィードバックの joint_positions[] の両方が
+// この順に従う。kinematics_node が publish する /catchrobo/command/joint の
+// name 順と同一 (ROSトピック・UDP指令・UDPフィードバックの3箇所で1つの順序)
+constexpr std::size_t kJointCount = 5;
+constexpr std::array<const char *, kJointCount> kJointOrder = {
+  "shoulder_left", "shoulder_right", "turntable", "knee_left", "knee_right",
 };
 
 // 動作許可フラグ (control_flags)。現時点では常に kEnable を立てる
@@ -74,6 +84,24 @@ struct CartesianPacket
   CartesianPayload payload;
 };
 
+// packet_type = 0x02 のペイロード (44 バイト)。パターンB (ROS2側IK)。
+// 0x01 と同じ「位置と速度の併送」原則。関節数は5固定 (このロボット専用の契約
+// なので可変長にしない)。並び順は kJointOrder を参照
+struct JointPayload
+{
+  float   q[kJointCount];       // 関節角 [rad]
+  float   qdot[kJointCount];    // 関節角速度 [rad/s]
+  uint8_t gripper;              // 0=開, 1=閉 (0x01 と同じ)
+  uint8_t control_flags;        // 0x01 と同じビット定義
+  uint16_t reserved;
+};
+
+struct JointPacket
+{
+  CommandHeader header;
+  JointPayload  payload;
+};
+
 // packet_type = 0x81 の固定部 (ヘッダ込み 44 バイト)。
 // 直後に float32 × joint_count の関節角配列が続く
 struct FeedbackFixedPart
@@ -95,13 +123,16 @@ struct FeedbackFixedPart
 static_assert(sizeof(CommandHeader) == 16, "CommandHeader must be 16 bytes");
 static_assert(sizeof(CartesianPayload) == 44, "CartesianPayload must be 44 bytes");
 static_assert(sizeof(CartesianPacket) == 60, "CartesianPacket must be 60 bytes");
+static_assert(sizeof(JointPayload) == 44, "JointPayload must be 44 bytes");
+static_assert(sizeof(JointPacket) == 60, "JointPacket must be 60 bytes");
 static_assert(sizeof(FeedbackFixedPart) == 44, "FeedbackFixedPart must be 44 bytes");
 
 // status_flags のビット定義
-constexpr uint16_t kStatusTrackingError = 1 << 0;  // 追従誤差過大
-constexpr uint16_t kStatusDriverFault   = 1 << 1;  // ドライバ異常
-constexpr uint16_t kStatusWatchdog      = 1 << 2;  // ウォッチドッグ作動中
-constexpr uint16_t kStatusUninitialized = 1 << 3;  // 未初期化・原点未確定
+constexpr uint16_t kStatusTrackingError    = 1 << 0;  // 追従誤差過大
+constexpr uint16_t kStatusDriverFault      = 1 << 1;  // ドライバ異常
+constexpr uint16_t kStatusWatchdog         = 1 << 2;  // ウォッチドッグ作動中
+constexpr uint16_t kStatusUninitialized    = 1 << 3;  // 未初期化・原点未確定
+constexpr uint16_t kStatusCommandRejected  = 1 << 4;  // 直近の指令を破棄した (作業領域外・seq逆転等)
 
 // デコード済みフィードバック
 struct Feedback
@@ -118,9 +149,6 @@ struct Feedback
 }  // namespace udp_protocol
 
 // パケットの組立と解釈 (Static・ヘッダーオンリー)
-//
-// パターンB 追加時は encodeJoint() を足し、hardware_bridge_node の
-// command_mode 分岐に1行加えるだけでよい。
 class UdpProtocol
 {
 public:
@@ -150,6 +178,35 @@ public:
     packet.payload.vz         = vz;
     packet.payload.pitch_rate = pitch_rate;
     packet.payload.yaw_rate   = yaw_rate;
+    packet.payload.gripper       = gripper_closed ? 1 : 0;
+    packet.payload.control_flags = udp_protocol::kControlFlagEnable |
+      (orient_vertical ? udp_protocol::kControlFlagOrientVertical : 0);
+    packet.payload.reserved      = 0;
+
+    std::vector<uint8_t> buffer(sizeof(packet));
+    std::memcpy(buffer.data(), &packet, sizeof(packet));
+    return buffer;
+  }
+
+  // 関節指令パケット (packet_type = 0x02、パターンB) を組み立てる。
+  // q / qdot の並び順は udp_protocol::kJointOrder に従うこと (呼び出し側の責務)
+  static std::vector<uint8_t> encodeJoint(
+    const std::array<float, udp_protocol::kJointCount> & q,
+    const std::array<float, udp_protocol::kJointCount> & qdot,
+    bool gripper_closed, bool orient_vertical, uint32_t seq, uint64_t timestamp_us)
+  {
+    udp_protocol::JointPacket packet{};
+    packet.header.protocol_version = udp_protocol::kProtocolVersion;
+    packet.header.packet_type =
+      static_cast<uint8_t>(udp_protocol::PacketType::kJointCommand);
+    packet.header.payload_length = sizeof(udp_protocol::JointPayload);
+    packet.header.seq            = seq;
+    packet.header.timestamp_us   = timestamp_us;
+
+    for (std::size_t i = 0; i < udp_protocol::kJointCount; ++i) {
+      packet.payload.q[i]    = q[i];
+      packet.payload.qdot[i] = qdot[i];
+    }
     packet.payload.gripper       = gripper_closed ? 1 : 0;
     packet.payload.control_flags = udp_protocol::kControlFlagEnable |
       (orient_vertical ? udp_protocol::kControlFlagOrientVertical : 0);

@@ -17,8 +17,8 @@ ROS2 トピックと UDP パケットの間の**変換と輸送のみ**を担う
 
 | `command_mode` | 購読するトピック | `packet_type` | 状態 |
 |---|---|---|---|
-| `cartesian` | `/catchrobo/command/cartesian` | 1 | パターンA(現在) |
-| `joint` | `/catchrobo/command/joint` | 2 | パターンB(将来) |
+| `cartesian` | `/catchrobo/command/cartesian` | 1 | パターンA(既定) |
+| `joint` | `/catchrobo/command/joint` | 2 | パターンB。**実装済み** (2026-09-01)。`kinematics_node` の出力をそのまま 0x02 で送る |
 
 ### やらないこと
 
@@ -38,9 +38,9 @@ ROS2 トピックと UDP パケットの間の**変換と輸送のみ**を担う
 | トピック | 型 | 条件 |
 |---|---|---|
 | `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `command_mode == cartesian` |
-| `/catchrobo/command/joint` | 型未定 | `command_mode == joint`(**将来**) |
+| `/catchrobo/command/joint` | `sensor_msgs/JointState` | `command_mode == joint` (パターンB)。`name` に5モータ名が揃っていることを要求し、**名前で照合して**ワイヤ上の並び順 (`udp_protocol.hpp` の `kJointOrder`) に詰め替える。欠けていればパケットを破棄して警告 (初回のみ)。`velocity` が無い場合は qdot=0 で送り、警告する (「位置と速度の併送」原則の違反として) |
 | `/catchrobo/command/gripper` | `std_msgs/Bool` | 常時 |
-| `/catchrobo/command/orient_vertical` | `std_msgs/Bool` | 常時。グリッパと同じくラッチして次の Cartesian パケットに詰める (`control_flags` bit1) |
+| `/catchrobo/command/orient_vertical` | `std_msgs/Bool` | 常時。グリッパと同じくラッチして次の指令パケットに詰める (`control_flags` bit1。cartesian/joint 両モード共通) |
 
 **購読するのはどちらか一方のみ。** メッセージ型が異なるため、起動時に config を見て
 対応する購読とエンコーダの組を生成する。
@@ -143,9 +143,17 @@ onFeedbackTimer():
 |---|---|
 | 0 | 追従誤差過大 |
 | 1 | ドライバ異常 |
-| 2 | ウォッチドッグ作動中(指令途絶により停止した) |
+| 2 | ウォッチドッグ作動中(指令途絶により最後の目標位置をホールド中) |
 | 3 | 未初期化 / 原点未確定 |
-| 4-15 | 予約 |
+| 4 | 直近の指令を破棄した (作業領域外・seq逆転等。破棄後しばらく立てておく) |
+| 5-15 | 予約 |
+
+### フィードバックの送信条件 (2026-09-01 確定)
+
+**指令の受信と無関係に、MCU起動直後から100Hzで自発送信する** (エコー型にしない)。
+ウォッチドッグの停止方法(最後の目標位置ホールド)・乖離時のスルーレート制限追従などの
+MCU側の要求事項一覧を含め、**契約の正本は `sharmech/docs/mcu_spec.md`**
+(MCU担当者に渡す仕様書)。
 
 ### MCU 側が FK を行う
 
@@ -235,7 +243,11 @@ TCP は再送とヘッドオブラインブロッキングがあり、**古い�
 
 | 項目 | 内容 |
 |---|---|
-| `joint_names` の具体値と順序 | 関節構成の確定待ち。MCU が返す `joint_positions` の並びと一致させる必要がある |
-| `/catchrobo/command/joint` の型 | パターンB 実装時に決める |
 | フィードバック途絶時の停止 | 現状は警告のみ。自動で停止させるべきかは要検討 |
 | 動作許可の制御経路 | サーボ ON/OFF が必要になった時点で追加 |
+
+~~`joint_names` の具体値と順序~~・~~`/catchrobo/command/joint` の型~~ は
+**2026-09-01 に確定**: 型は `sensor_msgs/JointState`、並び順は
+`[shoulder_left, shoulder_right, turntable, knee_left, knee_right]`
+(`udp_protocol.hpp` の `kJointOrder` が正本。0x02 指令・0x81 フィードバックの
+`joint_positions[]`・`joint_names` パラメータのすべてでこの順序を使う)。

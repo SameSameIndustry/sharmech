@@ -132,13 +132,15 @@ joy_teleop_node:
 
 hardware_bridge_node:
   ros__parameters:
-    command_mode: "cartesian"   # "cartesian" (パターンA) / "joint" (パターンB・未実装)
+    command_mode: "cartesian"   # "cartesian" (パターンA) / "joint" (パターンB。packet_type=0x02)
     mcu_ip: "192.168.1.50"      # MCU の IP アドレス (有線 Ethernet)
     mcu_port: 8888              # MCU の UDP 受信ポート
     local_port: 8889            # フィードバック受信ポート
     feedback_poll_rate: 200.0   # 受信ポーリング周期 [Hz]
     feedback_timeout: 0.5       # フィードバック途絶の警告閾値 [s]
-    # joint_names: []           # /joint_states の関節名。関節構成の確定待ち
+    # /joint_states に載せる関節名。0x02指令・0x81フィードバックの並び順の契約
+    # (udp_protocol.hpp の kJointOrder) と同一。2026-09-01確定
+    joint_names: ["shoulder_left", "shoulder_right", "turntable", "knee_left", "knee_right"]
 
 game_state_manager_node:
   ros__parameters:
