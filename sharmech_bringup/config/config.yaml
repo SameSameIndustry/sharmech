@@ -211,6 +211,11 @@ game_state_manager_node:
     transport_clearance_z: 0.20   # TRANSPORTING中に上げる高さ [m]。要CAD実測で箱の高さに合わせる
     retract_clearance_z: 0.20     # 設置後に上げる高さ [m]。箱に当たらない値にすること
     grasp_dwell_sec: 0.3          # GRASPING状態でグリッパを閉じてから待つ時間 [s]
+    # ORIENTING状態(スロット上空で静止したままワークを縦にする)の待機時間 [s]。
+    # ピッチ機構が横→縦を回し切るのに要する時間に合わせること。短すぎると
+    # 缶が斜めのまま箱へ降下して干渉する。**実機のピッチ機構の速度が未実測なので
+    # 0.5は仮値** (実測後に詰めること。1サイクルあたりこの分だけ試合時間を消費する)
+    orient_dwell_sec: 0.5
     state_publish_rate: 10.0      # /catchrobo/game/state の配信周期 [Hz]
 
 kinematics_node:

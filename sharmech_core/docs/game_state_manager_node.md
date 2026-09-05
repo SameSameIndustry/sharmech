@@ -80,10 +80,11 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 | `slot_x_red` / `slot_y_red` / `slot_z_red` | 2026-08-30実測 (X/Yのみ確定) | 赤フィールドのスロット座標。等長配列、インデックス=スロットID。詳細は `sharmech/docs/field_dimensions.md` |
 | `slot_x_blue` / `slot_y_blue` / `slot_z_blue` | 2026-08-30確定 (X/Yのみ) | 青フィールドのスロット座標。`field`がロボット自身のベース座標系であることと「赤の線対称」という前提から、redと同じローカル数値になっている(下記) |
 | `placement_order` | `[0..23]` (箱単位で埋める順) | 配置する順番のスロットID列。「ちょうど6個」ボーナスを狙うなら箱単位が既定として妥当 |
-| `slot_clamp_margin_m` | 0.03 | PLACING/RETRACTING中の作業領域クランプの片側マージン [m] |
+| `slot_clamp_margin_m` | 0.03 | ORIENTING〜RETRACTING中の作業領域クランプの片側マージン [m] |
 | `transport_clearance_z` | 0.20 | TRANSPORTING中に上げる高さ [m] |
 | `retract_clearance_z` | 0.20 | 設置後に上げる高さ [m]。箱に当たらない値にすること |
 | `grasp_dwell_sec` | 0.3 | GRASPING状態でグリッパを閉じてから待つ時間 [s] (グリッパの実フィードバックが無いための暫定措置。下記) |
+| `orient_dwell_sec` | 0.5 | ORIENTING状態でワークを縦にし切るまで待つ時間 [s]。**ピッチ機構の速度が未実測なので0.5は仮値**。短すぎると缶が斜めのまま箱へ降下する (下記「縦にするタイミング」) |
 | `state_publish_rate` | 10.0 | `/catchrobo/game/state` の配信周期 [Hz] |
 | `field_origin_offset_x_m` / `_y_m` | 0.0 / 0.0 | 本番設置での原点ズレ補正 [m]。読み込んだスロット座標全体をこの分だけ平行移動する。`motion_generator_node` と同じ値を使う想定 |
 
@@ -112,8 +113,9 @@ stateDiagram-v2
   [*] --> WAITING_FOR_PICK
   WAITING_FOR_PICK --> APPROACHING: pick_request 受信
   APPROACHING --> GRASPING: ゴール到達
-  GRASPING --> TRANSPORTING: dwell 経過 (既定0.3s) かつ box_count のキューあり
-  TRANSPORTING --> PLACING: ゴール到達 (スロット上空)
+  GRASPING --> TRANSPORTING: grasp dwell 経過 (既定0.3s) かつ box_count のキューあり
+  TRANSPORTING --> ORIENTING: ゴール到達 (スロット上空)
+  ORIENTING --> PLACING: orient dwell 経過 (既定0.5s)
   PLACING --> RETRACTING: ゴール到達
   RETRACTING --> WAITING_FOR_PICK: 次のスロットへ
   RETRACTING --> COMPLETE: 24箇所すべて完了
@@ -132,13 +134,14 @@ stateDiagram-v2
 | 1 | `kWaitingForPick` → `kApproaching` | `pick_request` (PoseStamped) 受信 | 他の状態で受信しても無視 |
 | 2 | `kApproaching` → `kGrasping` | `arm/status` の `last_result = SUCCEEDED` | グリッパ close を同時発行 |
 | 3 | `kGrasping` → `kTransporting` | 経過時間 ≥ `grasp_dwell_sec` (既定0.3s) **かつ** `box_count` のキューが空でない | grasp成功の実フィードバックは無い (下記「grasp判定が時間待ちである理由」)。キューが空の間は掴んだ位置で待つ |
-| 4 | `kTransporting` → `kPlacing` | `last_result = SUCCEEDED` (スロット上空に到達) | 「置け」の指示は `box_count` が既に兼ねている (下記「box_count とスロットのキュー」) |
-| 5 | `kPlacing` → `kRetracting` | `last_result = SUCCEEDED` | グリッパ open・クランプ解除を同時発行 |
-| 6 | `kRetracting` → `kWaitingForPick` | `last_result = SUCCEEDED` かつ 未処理のスロットが残っている | 次のスロットへ進む |
-| 7 | `kRetracting` → `kComplete` | `last_result = SUCCEEDED` かつ `placement_order` を使い切った | 全24箇所完了 |
-| 8 | `kApproaching`/`kGrasping`/`kTransporting`/`kPlacing`/`kRetracting` → `kWaitingForPick` | `last_result = REJECTED`/`ABORTED` | 安全側フォールバック。`kWaitingForPick`/`kComplete`/`kManualControl` 中は対象外。グリッパを開き直す処理は無い (「既知の未対応」参照) |
-| 9 | 任意の状態 ⇄ `kManualControl` | `/catchrobo/game/toggle_manual_control` | `kComplete` からも可。復帰時は退避先の状態へ。クランプは必ずデフォルトへ |
-| 10 | 任意の状態 → 任意の状態 (デバッグ専用) | `/catchrobo/debug/change_state` | ゴール/グリッパ/クランプは一切publishしない。未知の状態名は無視+警告 |
+| 4 | `kTransporting` → `kOrienting` | `last_result = SUCCEEDED` (スロット上空に到達) | 「置け」の指示は `box_count` が既に兼ねている (下記「box_count とスロットのキュー」)。`orient_vertical=true` とクランプ絞りをここで発行 |
+| 5 | `kOrienting` → `kPlacing` | 経過時間 ≥ `orient_dwell_sec` (既定0.5s) | ピッチ機構の実フィードバックは無い (下記「縦にするタイミング」) |
+| 6 | `kPlacing` → `kRetracting` | `last_result = SUCCEEDED` | グリッパ open・クランプ解除を同時発行 |
+| 7 | `kRetracting` → `kWaitingForPick` | `last_result = SUCCEEDED` かつ 未処理のスロットが残っている | 次のスロットへ進む |
+| 8 | `kRetracting` → `kComplete` | `last_result = SUCCEEDED` かつ `placement_order` を使い切った | 全24箇所完了 |
+| 9 | `kApproaching`/`kGrasping`/`kTransporting`/`kOrienting`/`kPlacing`/`kRetracting` → `kWaitingForPick` | `last_result = REJECTED`/`ABORTED` | 安全側フォールバック。`kWaitingForPick`/`kComplete`/`kManualControl` 中は対象外。グリッパを開き直す処理・ピッチを横へ戻す処理は無い (「既知の未対応」参照) |
+| 10 | 任意の状態 ⇄ `kManualControl` | `/catchrobo/game/toggle_manual_control` | `kComplete` からも可。復帰時は退避先の状態へ。クランプは必ずデフォルトへ |
+| 11 | 任意の状態 → 任意の状態 (デバッグ専用) | `/catchrobo/debug/change_state` | ゴール/グリッパ/クランプは一切publishしない。未知の状態名は無視+警告 |
 
 **状態遷移の条件が変わったら、上の図と表を書き直すこと。** 正本は
 [`game_state_machine.hpp`](../include/sharmech_core/utility/game_state_machine.hpp) と
@@ -149,9 +152,10 @@ stateDiagram-v2
 | `kWaitingForPick` | 次に運ぶワークの選択待ち。`pick_request` を受理する |
 | `kApproaching` | グリッパを開いたまま、選択されたワークの姿勢へ直線1本で接近中 |
 | `kGrasping` | 到達直後にグリッパを閉じ、`grasp_dwell_sec` だけ待つ(下記「grasp判定が時間待ちである理由」)。**`box_count` のキューが空ならここで宛先の指示待ちになる** |
-| `kTransporting` | キュー先頭のスロットのxy・`transport_clearance_z` の高さまで運搬中。到達したらそのまま `kPlacing` へ |
-| `kPlacing` | 作業領域クランプをスロット周辺 (`slot_clamp_margin_m`) に一時的に絞り、スロット姿勢まで直線で降下。`orient_vertical` を `true` にする |
-| `kRetracting` | グリッパを開き、同じ xy で `retract_clearance_z` まで直線で退避。作業領域クランプをデフォルトに戻す |
+| `kTransporting` | キュー先頭のスロットのxy・`transport_clearance_z` の高さまで運搬中。到達したら `kOrienting` へ |
+| `kOrienting` | **スロット上空で静止したまま**、`orient_vertical` を `true` にして横倒しのワークを縦にする。作業領域クランプもここでスロット周辺 (`slot_clamp_margin_m`) に絞る。**ゴールは発行しない** (下記「縦にするタイミング」) |
+| `kPlacing` | スロット姿勢まで直線で降下する。既に縦になっているのでまっすぐ降ろすだけ |
+| `kRetracting` | グリッパを開き、同じ xy で `retract_clearance_z` まで直線で退避。作業領域クランプをデフォルトに戻す。**縦のまま抜く** (横へ戻すのは次の `kApproaching`) |
 | `kComplete` | `placement_order` を使い切った。以降 `pick_request` は無視される(実質的な終了状態)。ただし `box_count` が巻き戻ると `kWaitingForPick` へ復帰する |
 | `kManualControl` | 自動シーケンス停止。**どの状態からでもトグルで入り、再度トグルで元の状態に戻る**(下記「自由操作」節) |
 
@@ -204,6 +208,41 @@ xy がずれ、ワークを保持したまま別の箱の上へ動くことに�
 `transport_clearance_z`」にすることで、実質的に「持ち上げながら目的地の上空へ運ぶ」
 という1本の直線になる。`kPlacing` はその状態から同じ xy のままスロット姿勢まで
 まっすぐ降下するだけでよい。
+
+### 縦にするタイミング (`kOrienting` を独立した状態にした理由)
+
+ワークはフィールドに**横倒し**で置かれており、シューティングボックスには
+**蓋を上にして縦**に入れる必要がある (「ちょうど6個・蓋が上向き」でボーナス)。
+つまりピッチ機構で横→縦の90°回転をどこかで行う。
+
+**以前は `kPlacing` に入る瞬間に `orient_vertical = true` を出していたが、これは
+降下開始と回転開始が完全に同時になるため、回転が終わる前に缶が箱へ入る。**
+箱は 255×510mm に6スロットと狭く、斜めのまま突っ込めばほぼ確実に干渉する
+(2026-09-05 に判明し、`kOrienting` を新設して解消)。
+
+タイミングの候補と判定:
+
+| タイミング | 判定 |
+|---|---|
+| `kGrasping` 直後 (掴んだ直後) | ✗ 低い位置で142mmの缶を立てるため、隣の缶・治具に干渉する |
+| `kTransporting` 開始時 (移動しながら回す) | △ 時間は十分だが、縦になった缶は下端が下がる。箱・設置済みの缶との干渉が**Z方向未実測のため検証できない** |
+| **スロット上空で静止して回す (採用)** | ◎ 移動しないので干渉しない。時間も確保できる |
+| `kPlacing` と同時 (以前の実装) | ✗ 回転が間に合わず斜めのまま突入 |
+
+`kOrienting` は**ゴールを発行しない**ので、アームは `kTransporting` の到達点
+(スロット上空・`transport_clearance_z`) で静止したまま回転だけを行う。
+構造としては `kGrasping` と同じ「静止したまま dwell を待つ」状態であり、
+実フィードバックが無いため固定時間待ちにしている点も同じ。
+
+Z方向の寸法が実測できたら、`kTransporting` 中に回して dwell を省く最適化が
+可能になる (1サイクルあたり `orient_dwell_sec` ぶんの短縮)。現状は安全側に倒している。
+
+### 戻り (縦→横) を `kRetracting` で行わない理由
+
+`kRetracting` は箱から真上へ抜く動作なので、ここで横に戻すと**箱の中でグリッパを
+回す**ことになり壁に当たりうる。縦のまま抜き、横へ戻すのは次の `kApproaching`
+(空中の長い移動なので回転する時間も余裕もある) にしてある。
+`onPickPoseReceived()` が `orient_vertical = false` を出す形で実現している。
 
 ## 自由操作 (VRが使えない場合の脱出ハッチ)
 
@@ -336,6 +375,8 @@ ROS トピックとの薄い橋渡し層に徹する。
 (1スロットの完全なサイクル、pick の状態ガード、`box_count` のキュー動作
 (キューが空の間は `kGrasping` で待つ・0リセット/飛び/クランプへの追従・
 確定済みサイクルを中断しないこと・`kComplete` からの復帰)、却下時の復帰、完了判定、
+`kOrienting` の待機動作 (dwell 未経過では降下ゴールを出さずその場に留まること・
+`kRetracting` では縦のまま抜き次の `kApproaching` で横へ戻すこと)、
 `kManualControl` のトグル・任意の状態からの出入り・クランプの強制リセット・
 却下イベントの無視) を検証する。`test_motion_generator_node.cpp` には
 `/catchrobo/game/workspace_clamp` の上書き・reset の回帰テストがある。
@@ -352,6 +393,8 @@ ROS トピックとの薄い橋渡し層に徹する。
 | シューティングボックスの箱内6スロットの正確な位置 | 箱の外形(赤フィールド)は実測確定。箱内の割付は均等分割の計算値 (`field_dimensions.md` 参照) |
 | ロボット本体が左右対称に組まれているかの確認 | 「赤=青の線対称」という前提はロボット本体(左右関節配置等)が両チームで同じ組み方であることを仮定している。もし個体差・組み方の違いがあれば別途確認が必要 |
 | グリッパの実フィードバック | `hardware_bridge_node` が UDP の `gripper_state` を publish していないため、grasp判定が時間待ちの暫定実装のまま |
-| 却下・中断時の復帰処理 | グリッパを開き直す等、状態ごとのリカバリが未実装 (上記「既知の未対応」) |
+| **ピッチ機構の回転速度** | `orient_dwell_sec` の 0.5 は仮値。実機のピッチ機構が横→縦を回し切る時間を実測して詰めること。短すぎると缶が斜めのまま箱へ降下し、長すぎると1サイクルあたりそのぶん試合時間を失う (24箇所×0.5s = 12s) |
+| ピッチの実フィードバック | 0x81 にピッチの実状態を返すフィールドが無いため、`kOrienting` も grasp と同じ固定時間待ち。将来 MCU が返せるようになったら、グリッパとまとめて実確認へ置き換える |
+| 却下・中断時の復帰処理 | グリッパを開き直す・ピッチを横へ戻す等、状態ごとのリカバリが未実装 (上記「既知の未対応」) |
 | VR側の `pick_request` 送信ロジック | **`box_count` は実装済み**だが、`pick_request` はまだ WebXR クライアントが送っていない。現状は掴む/離すたびに `/catchrobo/arm/target_pose` を直接送る実装のため、**自動シーケンスが `kApproaching` に入る契機が無く、`box_count` を送っても動き出さない**。本ドキュメントのトピック契約を満たす形で VR 側の実装が必要 |
 | VR が指定箱に離したときの `target_pose` の二重送信 | VR は指定箱に離した瞬間にも `/catchrobo/arm/target_pose` (仮想指定箱の位置) を publish する。本ノードが送る実スロット座標と競合しうるので、VR 側で指定箱へ離したときは `target_pose` を送らないようにするのが望ましい (別リポジトリ) |

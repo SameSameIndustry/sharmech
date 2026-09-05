@@ -63,6 +63,7 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
   config.transport_clearance_z = declare_parameter("transport_clearance_z", 0.20);
   config.retract_clearance_z = declare_parameter("retract_clearance_z", 0.20);
   config.grasp_dwell_sec = declare_parameter("grasp_dwell_sec", 0.3);
+  config.orient_dwell_sec = declare_parameter("orient_dwell_sec", 0.5);
 
   if (config.placement_order.empty()) {
     RCLCPP_FATAL(get_logger(), "placement_order is empty; check config.yaml");

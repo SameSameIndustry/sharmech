@@ -23,6 +23,7 @@ GameStateMachine::Config makeConfig()
   config.transport_clearance_z = 0.20;
   config.retract_clearance_z = 0.20;
   config.grasp_dwell_sec = 0.3;
+  config.orient_dwell_sec = 0.5;
   return config;
 }
 
@@ -45,7 +46,9 @@ void runOneCycle(GameStateMachine & machine, int box_count)
   machine.onBoxCount(box_count);
   machine.tick(1.0);            // → TRANSPORTING
   machine.consumePendingGoal();
-  machine.onGoalReached(2.0);   // → PLACING
+  machine.onGoalReached(2.0);   // スロット上空に到達 → ORIENTING (ゴールは出ない)
+  machine.consumePendingOrientVertical();  // 縦にする指示
+  machine.tick(2.6);            // orient dwell (0.5s) 経過 → PLACING
   machine.consumePendingGoal();
   machine.onGoalReached(3.0);   // → RETRACTING
   machine.consumePendingGoal();
@@ -216,23 +219,32 @@ TEST(GameStateMachine, FullCycleAdvancesToNextSlot)
   ASSERT_EQ(machine.state(), GameState::kTransporting);
   machine.consumePendingGoal();
 
-  machine.onGoalReached(1.5);   // スロット上空に到達 → PLACING
-  ASSERT_EQ(machine.state(), GameState::kPlacing);
+  // スロット上空に到達 → ORIENTING。ここでは縦にする指示とクランプ絞りだけを行い、
+  // **ゴールは出さない** (アームは静止したまま回転し切るのを待つ)
+  machine.onGoalReached(1.5);
+  ASSERT_EQ(machine.state(), GameState::kOrienting);
+  ASSERT_TRUE(machine.hasPendingOrientVertical());
+  EXPECT_TRUE(machine.consumePendingOrientVertical());
+  EXPECT_FALSE(machine.hasPendingGoal());
   ASSERT_TRUE(machine.hasPendingWorkspaceClamp());
   const auto clamp = machine.consumePendingWorkspaceClamp();
   EXPECT_FALSE(clamp.reset);
   EXPECT_NEAR(clamp.x_min, 0.0 - 0.03, 1e-9);
   EXPECT_NEAR(clamp.x_max, 0.0 + 0.03, 1e-9);
+
+  // orient dwell 経過 → PLACING。ここで初めて降下ゴールが出る
+  machine.tick(2.1);
+  ASSERT_EQ(machine.state(), GameState::kPlacing);
   ASSERT_TRUE(machine.hasPendingGoal());
   const auto place_goal = machine.consumePendingGoal();
   EXPECT_DOUBLE_EQ(place_goal.z, 0.05);  // スロット0のz
-  ASSERT_TRUE(machine.hasPendingOrientVertical());
-  EXPECT_TRUE(machine.consumePendingOrientVertical());
 
-  machine.onGoalReached(2.0);   // → RETRACTING
+  machine.onGoalReached(2.5);   // → RETRACTING
   ASSERT_EQ(machine.state(), GameState::kRetracting);
   ASSERT_TRUE(machine.hasPendingGripper());
   EXPECT_FALSE(machine.consumePendingGripper());  // 置いたので開く
+  // **縦のまま抜く**ので orient_vertical の指令は出ない (箱の中で回さないため)
+  EXPECT_FALSE(machine.hasPendingOrientVertical());
   ASSERT_TRUE(machine.hasPendingWorkspaceClamp());
   EXPECT_TRUE(machine.consumePendingWorkspaceClamp().reset);
   ASSERT_TRUE(machine.hasPendingGoal());
@@ -385,11 +397,13 @@ TEST(GameStateMachine, ToggleManualControlFromPlacingResetsNarrowedClamp)
   machine.tick(1.0);
   machine.consumePendingGoal();
   machine.onGoalReached(1.5);
-  ASSERT_EQ(machine.state(), GameState::kPlacing);
+  ASSERT_EQ(machine.state(), GameState::kOrienting);
   ASSERT_TRUE(machine.hasPendingWorkspaceClamp());
   EXPECT_FALSE(machine.consumePendingWorkspaceClamp().reset);  // 絞られている
+  machine.tick(2.1);                                           // → PLACING (絞りは継続中)
+  ASSERT_EQ(machine.state(), GameState::kPlacing);
 
-  machine.toggleManualControl(2.0);
+  machine.toggleManualControl(2.5);
 
   EXPECT_EQ(machine.state(), GameState::kManualControl);
   ASSERT_TRUE(machine.hasPendingWorkspaceClamp());
@@ -425,6 +439,55 @@ TEST(GameStateMachine, ManualControlIgnoresPickRequestAndOnlyQueuesBoxCount)
   EXPECT_EQ(machine.state(), GameState::kManualControl);
   EXPECT_TRUE(machine.hasQueuedSlot());
   EXPECT_FALSE(machine.hasPendingGoal());
+}
+
+// スロット上空に着いても、orient dwell が経過するまでは降下しない。
+// 降下と同時に縦にすると回転が間に合わず缶が斜めのまま箱へ入るため、
+// 動かない待ち時間をここで確保しているという設計の回帰テスト
+TEST(GameStateMachine, OrientingHoldsPositionUntilDwellElapses)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
+  machine.consumePendingGoal();
+  machine.onGoalReached(0.0);
+  machine.onBoxCount(1);
+  machine.tick(1.0);
+  machine.consumePendingGoal();
+
+  machine.onGoalReached(1.5);   // スロット上空に到達
+  ASSERT_EQ(machine.state(), GameState::kOrienting);
+  // 縦にする指示だけが出て、移動のゴールは出ない (静止したまま回す)
+  ASSERT_TRUE(machine.hasPendingOrientVertical());
+  EXPECT_TRUE(machine.consumePendingOrientVertical());
+  EXPECT_FALSE(machine.hasPendingGoal());
+
+  // dwell (0.5s) 未満では ORIENTING のまま。降下ゴールも出ない
+  machine.tick(1.9);
+  EXPECT_EQ(machine.state(), GameState::kOrienting);
+  EXPECT_FALSE(machine.hasPendingGoal());
+
+  // dwell 経過でようやく降下に入る
+  machine.tick(2.0);
+  EXPECT_EQ(machine.state(), GameState::kPlacing);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  EXPECT_DOUBLE_EQ(machine.consumePendingGoal().z, 0.05);  // スロットのz
+}
+
+// 箱の中でグリッパを回さないため、RETRACTING では縦のまま抜き、
+// 横へ戻すのは次の APPROACHING (空中の長い移動) で行う
+TEST(GameStateMachine, StaysVerticalThroughRetractAndReturnsFlatOnNextApproach)
+{
+  GameStateMachine machine(makeConfig());
+  runOneCycle(machine, 1);
+  ASSERT_EQ(machine.state(), GameState::kWaitingForPick);
+  // 1サイクルを通して、最後に出た orient_vertical 指令は ORIENTING の true のみ。
+  // RETRACTING では false を出していない (runOneCycle 中に消費済みでないことを確認)
+  EXPECT_FALSE(machine.hasPendingOrientVertical());
+
+  // 次の pick でようやく横へ戻す指示が出る
+  machine.onPickPoseReceived(makePose(0.4, 0.1, 0.0));
+  ASSERT_TRUE(machine.hasPendingOrientVertical());
+  EXPECT_FALSE(machine.consumePendingOrientVertical());
 }
 
 // kComplete からも自由操作に入れる (試合終了後の片付け等でも使えるように)
