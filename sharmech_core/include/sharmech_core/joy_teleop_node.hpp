@@ -42,10 +42,10 @@ private:
   // 使わない側は -1。反転は scale の符号で表現する (反転フラグは持たない)
   struct DofMapping
   {
-    int    axis{-1};
+    int axis{-1};
     double scale{0.0};
-    int    button_pos{-1};
-    int    button_neg{-1};
+    int button_pos{-1};
+    int button_neg{-1};
   };
 
   void onJoy(const sensor_msgs::msg::Joy::SharedPtr msg);
@@ -59,20 +59,20 @@ private:
   bool   readButton(int index, const sensor_msgs::msg::Joy & joy);
   void   publishHomeGoal();
 
-  rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr             joy_sub_;
-  rclcpp::Subscription<sharmech_msgs::msg::MotionStatus>::SharedPtr  status_sub_;
-  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr            twist_pub_;
-  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr                  gripper_pub_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr      target_pose_pub_;
-  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr                 cancel_pub_;
-  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr                 toggle_manual_control_pub_;
+  rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
+  rclcpp::Subscription<sharmech_msgs::msg::MotionStatus>::SharedPtr status_sub_;
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr twist_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr cancel_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr toggle_manual_control_pub_;
   rclcpp::TimerBase::SharedPtr publish_timer_;
 
   // パラメータ
   double publish_rate_;
   double joy_timeout_;
   double deadzone_;
-  bool   use_deadman_;
+  bool use_deadman_;
   std::vector<double> home_pose_;  // [x, y, z, pitch, yaw]。空なら無効
   DofMapping vx_map_, vy_map_, vz_map_, pitch_map_, yaw_map_;
   int deadman_button_;
@@ -86,7 +86,7 @@ private:
 
   // 内部状態
   std::optional<sensor_msgs::msg::Joy> last_joy_;
-  std::optional<rclcpp::Time>          last_joy_time_;
+  std::optional<rclcpp::Time> last_joy_time_;
   bool gripper_state_{false};   // トグルで反転。起動時は false (開)
   std::vector<int32_t> prev_buttons_;
   bool manual_toggle_combo_was_active_{false};  // 4ボタン同時押しの立ち上がりエッジ検出用

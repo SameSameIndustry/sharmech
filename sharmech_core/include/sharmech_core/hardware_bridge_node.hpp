@@ -54,38 +54,38 @@ private:
   void publishMcuStatus(bool connected, double silence_sec);
 
   rclcpp::Subscription<sharmech_msgs::msg::CartesianCommand>::SharedPtr cartesian_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr         joint_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr                  gripper_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr                  orient_vertical_sub_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr         current_pose_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr            joint_states_pub_;
-  rclcpp::Publisher<sharmech_msgs::msg::McuStatus>::SharedPtr           mcu_status_pub_;
-  rclcpp::TimerBase::SharedPtr                                          feedback_timer_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr gripper_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr orient_vertical_sub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr current_pose_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_states_pub_;
+  rclcpp::Publisher<sharmech_msgs::msg::McuStatus>::SharedPtr mcu_status_pub_;
+  rclcpp::TimerBase::SharedPtr feedback_timer_;
 
   // パラメータ
   std::string command_mode_;
   std::string mcu_ip_;
-  int         mcu_port_;
-  int         local_port_;
-  double      feedback_poll_rate_;   // [Hz]
-  double      feedback_timeout_;     // [s]
+  int mcu_port_;
+  int local_port_;
+  double feedback_poll_rate_;        // [Hz]
+  double feedback_timeout_;          // [s]
   std::vector<std::string> joint_names_;
 
   // 内部状態
-  int         sockfd_{-1};
+  int sockfd_{-1};
   sockaddr_in mcu_addr_{};
-  bool        gripper_state_{false};       // ラッチしたグリッパ状態
-  bool        orient_vertical_state_{false};  // ラッチした「縦にする」指示
-  uint32_t    send_seq_{0};
-  std::optional<uint32_t>     last_recv_seq_;       // 順序逆転の検出用
+  bool gripper_state_{false};              // ラッチしたグリッパ状態
+  bool orient_vertical_state_{false};         // ラッチした「縦にする」指示
+  uint32_t send_seq_{0};
+  std::optional<uint32_t> last_recv_seq_;           // 順序逆転の検出用
   std::optional<rclcpp::Time> last_feedback_time_;  // 途絶の検出用
-  bool        warned_joint_names_{false};
-  bool        warned_joint_cmd_names_{false};   // 0x02送信側の名前不一致の警告 (1回のみ)
-  bool        warned_joint_cmd_velocity_{false};  // 同、velocity欠落の警告 (1回のみ)
-  uint16_t    last_status_flags_{0};
-  bool        last_gripper_state_{false};
-  uint32_t    last_seq_echo_{0};
-  uint32_t    out_of_order_count_{0};
+  bool warned_joint_names_{false};
+  bool warned_joint_cmd_names_{false};          // 0x02送信側の名前不一致の警告 (1回のみ)
+  bool warned_joint_cmd_velocity_{false};         // 同、velocity欠落の警告 (1回のみ)
+  uint16_t last_status_flags_{0};
+  bool last_gripper_state_{false};
+  uint32_t last_seq_echo_{0};
+  uint32_t out_of_order_count_{0};
 };
 
 }  // namespace sharmech_core

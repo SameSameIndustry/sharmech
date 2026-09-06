@@ -22,13 +22,13 @@ namespace sharmech_core
 HardwareBridgeNode::HardwareBridgeNode(const rclcpp::NodeOptions & options)
 : Node("hardware_bridge_node", options)
 {
-  command_mode_       = declare_parameter("command_mode", std::string("cartesian"));
-  mcu_ip_             = declare_parameter("mcu_ip", std::string("192.168.1.50"));
-  mcu_port_           = declare_parameter("mcu_port", 8888);
-  local_port_         = declare_parameter("local_port", 8889);
+  command_mode_ = declare_parameter("command_mode", std::string("cartesian"));
+  mcu_ip_ = declare_parameter("mcu_ip", std::string("192.168.1.50"));
+  mcu_port_ = declare_parameter("mcu_port", 8888);
+  local_port_ = declare_parameter("local_port", 8889);
   feedback_poll_rate_ = declare_parameter("feedback_poll_rate", 200.0);
-  feedback_timeout_   = declare_parameter("feedback_timeout", 0.5);
-  joint_names_        = declare_parameter("joint_names", std::vector<std::string>{});
+  feedback_timeout_ = declare_parameter("feedback_timeout", 0.5);
+  joint_names_ = declare_parameter("joint_names", std::vector<std::string>{});
 
   if (!openUdpSocket()) {
     // ソケットが開けなくてもノード自体は起動させる (送信時に警告が出る)
@@ -71,7 +71,8 @@ HardwareBridgeNode::HardwareBridgeNode(const rclcpp::NodeOptions & options)
     std::chrono::duration_cast<std::chrono::nanoseconds>(poll_period),
     std::bind(&HardwareBridgeNode::onFeedbackTimer, this));
 
-  RCLCPP_INFO(get_logger(),
+  RCLCPP_INFO(
+    get_logger(),
     "hardware_bridge_node started (mode=%s) → udp %s:%d (recv :%d)",
     command_mode_.c_str(), mcu_ip_.c_str(), mcu_port_, local_port_);
 }
@@ -93,13 +94,15 @@ bool HardwareBridgeNode::openUdpSocket()
 
   // 受信用に local_port へ bind する (送信と同じソケットを共用)
   sockaddr_in local_addr{};
-  local_addr.sin_family      = AF_INET;
+  local_addr.sin_family = AF_INET;
   local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  local_addr.sin_port        = htons(static_cast<uint16_t>(local_port_));
-  if (::bind(sockfd_, reinterpret_cast<const sockaddr *>(&local_addr),
-    sizeof(local_addr)) < 0)
+  local_addr.sin_port = htons(static_cast<uint16_t>(local_port_));
+  if (::bind(
+      sockfd_, reinterpret_cast<const sockaddr *>(&local_addr),
+      sizeof(local_addr)) < 0)
   {
-    RCLCPP_ERROR(get_logger(), "bind(:%d) failed: %s",
+    RCLCPP_ERROR(
+      get_logger(), "bind(:%d) failed: %s",
       local_port_, std::strerror(errno));
     ::close(sockfd_);
     sockfd_ = -1;
@@ -108,7 +111,7 @@ bool HardwareBridgeNode::openUdpSocket()
 
   std::memset(&mcu_addr_, 0, sizeof(mcu_addr_));
   mcu_addr_.sin_family = AF_INET;
-  mcu_addr_.sin_port   = htons(static_cast<uint16_t>(mcu_port_));
+  mcu_addr_.sin_port = htons(static_cast<uint16_t>(mcu_port_));
   if (::inet_pton(AF_INET, mcu_ip_.c_str(), &mcu_addr_.sin_addr) != 1) {
     RCLCPP_ERROR(get_logger(), "Invalid mcu_ip parameter: %s", mcu_ip_.c_str());
     ::close(sockfd_);
@@ -146,7 +149,8 @@ void HardwareBridgeNode::onCartesianCommand(
     sockfd_, packet.data(), packet.size(), 0,
     reinterpret_cast<const sockaddr *>(&mcu_addr_), sizeof(mcu_addr_));
   if (sent < 0) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000,
       "UDP send failed: %s", std::strerror(errno));
   }
 }
@@ -166,7 +170,8 @@ void HardwareBridgeNode::onJointCommand(const sensor_msgs::msg::JointState::Shar
       msg->name.begin(), msg->name.end(), udp_protocol::kJointOrder[i]);
     if (it == msg->name.end()) {
       if (!warned_joint_cmd_names_) {
-        RCLCPP_WARN(get_logger(),
+        RCLCPP_WARN(
+          get_logger(),
           "/catchrobo/command/joint is missing joint '%s'; dropping packet "
           "(expected names: shoulder_left, shoulder_right, turntable, knee_left, knee_right)",
           udp_protocol::kJointOrder[i]);
@@ -182,7 +187,8 @@ void HardwareBridgeNode::onJointCommand(const sensor_msgs::msg::JointState::Shar
   // 「位置と速度は常に併送する」原則のため、velocity 欠落は設計違反として警告する
   // (0埋めで送ること自体はできるが、MCU側補間がゼロ次ホールドに退化する)
   if (!has_velocity && !warned_joint_cmd_velocity_) {
-    RCLCPP_WARN(get_logger(),
+    RCLCPP_WARN(
+      get_logger(),
       "/catchrobo/command/joint has no velocity array; sending qdot=0 "
       "(MCU-side interpolation degrades to zero-order hold)");
     warned_joint_cmd_velocity_ = true;
@@ -197,7 +203,8 @@ void HardwareBridgeNode::onJointCommand(const sensor_msgs::msg::JointState::Shar
     sockfd_, packet.data(), packet.size(), 0,
     reinterpret_cast<const sockaddr *>(&mcu_addr_), sizeof(mcu_addr_));
   if (sent < 0) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000,
       "UDP send failed: %s", std::strerror(errno));
   }
 }
@@ -229,7 +236,8 @@ void HardwareBridgeNode::onFeedbackTimer()
 
     auto fb = UdpProtocol::decodeFeedback(buffer, static_cast<size_t>(received));
     if (!fb) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
         "Invalid feedback packet discarded (%zd bytes)", received);
       continue;
     }
@@ -246,7 +254,7 @@ void HardwareBridgeNode::onFeedbackTimer()
     last_feedback_time_ = now();
 
     geometry_msgs::msg::PoseStamped pose_msg;
-    pose_msg.header.stamp    = *last_feedback_time_;
+    pose_msg.header.stamp = *last_feedback_time_;
     pose_msg.header.frame_id = "field";
     pose_msg.pose.position.x = latest->x;
     pose_msg.pose.position.y = latest->y;
@@ -263,7 +271,8 @@ void HardwareBridgeNode::onFeedbackTimer()
       js.name = joint_names_;
     } else {
       if (!warned_joint_names_) {
-        RCLCPP_WARN(get_logger(),
+        RCLCPP_WARN(
+          get_logger(),
           "joint_names size (%zu) != feedback joint_count (%zu); using joint_i",
           joint_names_.size(), n);
         warned_joint_names_ = true;
@@ -277,21 +286,23 @@ void HardwareBridgeNode::onFeedbackTimer()
     joint_states_pub_->publish(js);
 
     if (latest->status_flags != 0) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
         "MCU status_flags = 0x%04x", latest->status_flags);
     }
 
     // ログに出すだけでは可視化クライアントから見えないので、トピックにも出す
-    last_status_flags_  = latest->status_flags;
+    last_status_flags_ = latest->status_flags;
     last_gripper_state_ = latest->gripper_closed;
-    last_seq_echo_      = latest->seq_echo;
+    last_seq_echo_ = latest->seq_echo;
     publishMcuStatus(true, 0.0);
   } else if (last_feedback_time_) {
     // 一度でも届いたことがあるのに途絶した場合のみ警告する。
     // MCU 側が未実装のうちからログを埋めないため
     const auto silence = (now() - *last_feedback_time_).seconds();
     if (silence > feedback_timeout_) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
         "No MCU feedback for %.1f s", silence);
       publishMcuStatus(false, silence);
     }
@@ -304,15 +315,15 @@ void HardwareBridgeNode::onFeedbackTimer()
 void HardwareBridgeNode::publishMcuStatus(bool connected, double silence_sec)
 {
   sharmech_msgs::msg::McuStatus msg;
-  msg.header.stamp    = now();
+  msg.header.stamp = now();
   msg.header.frame_id = "field";
-  msg.connected           = connected;
-  msg.status_flags        = last_status_flags_;
-  msg.gripper_closed      = last_gripper_state_;
-  msg.seq                 = last_recv_seq_.value_or(0);
-  msg.seq_echo            = last_seq_echo_;
-  msg.silence_sec         = silence_sec;
-  msg.out_of_order_count  = out_of_order_count_;
+  msg.connected = connected;
+  msg.status_flags = last_status_flags_;
+  msg.gripper_closed = last_gripper_state_;
+  msg.seq = last_recv_seq_.value_or(0);
+  msg.seq_echo = last_seq_echo_;
+  msg.silence_sec = silence_sec;
+  msg.out_of_order_count = out_of_order_count_;
   mcu_status_pub_->publish(msg);
 }
 

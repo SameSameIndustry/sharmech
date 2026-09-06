@@ -38,11 +38,11 @@ public:
     double v_max, double a_max, double w_max, double alpha_max)
   : start_(start)
   {
-    delta_.x     = goal.x - start.x;
-    delta_.y     = goal.y - start.y;
-    delta_.z     = goal.z - start.z;
+    delta_.x = goal.x - start.x;
+    delta_.y = goal.y - start.y;
+    delta_.z = goal.z - start.z;
     delta_.pitch = goal.pitch - start.pitch;
-    delta_.yaw   = goal.yaw - start.yaw;
+    delta_.yaw = goal.yaw - start.yaw;
 
     const double d_pos = std::sqrt(
       delta_.x * delta_.x + delta_.y * delta_.y + delta_.z * delta_.z);
@@ -62,23 +62,23 @@ public:
     double s = 1.0;       // 正規化進行度
     double s_dot = 0.0;   // その時間微分
     if (profile_.distance > 1e-9 && profile_.total > 0.0) {
-      const double q     = profile_.position(std::clamp(t, 0.0, profile_.total));
+      const double q = profile_.position(std::clamp(t, 0.0, profile_.total));
       const double q_dot = profile_.velocity(std::clamp(t, 0.0, profile_.total));
-      s     = q / profile_.distance;
+      s = q / profile_.distance;
       s_dot = q_dot / profile_.distance;
     }
 
-    pose_out.x     = start_.x + s * delta_.x;
-    pose_out.y     = start_.y + s * delta_.y;
-    pose_out.z     = start_.z + s * delta_.z;
+    pose_out.x = start_.x + s * delta_.x;
+    pose_out.y = start_.y + s * delta_.y;
+    pose_out.z = start_.z + s * delta_.z;
     pose_out.pitch = start_.pitch + s * delta_.pitch;
-    pose_out.yaw   = start_.yaw + s * delta_.yaw;
+    pose_out.yaw = start_.yaw + s * delta_.yaw;
 
-    vel_out.x     = s_dot * delta_.x;
-    vel_out.y     = s_dot * delta_.y;
-    vel_out.z     = s_dot * delta_.z;
+    vel_out.x = s_dot * delta_.x;
+    vel_out.y = s_dot * delta_.y;
+    vel_out.z = s_dot * delta_.z;
     vel_out.pitch = s_dot * delta_.pitch;
-    vel_out.yaw   = s_dot * delta_.yaw;
+    vel_out.yaw = s_dot * delta_.yaw;
   }
 
 private:
@@ -125,10 +125,10 @@ private:
     const double d_acc_full = 0.5 * a_max * t_acc_full * t_acc_full;
     if (2.0 * d_acc_full >= distance) {
       // v_max に届かない三角プロファイル
-      p.t_acc  = std::sqrt(distance / a_max);
+      p.t_acc = std::sqrt(distance / a_max);
       p.t_flat = 0.0;
     } else {
-      p.t_acc  = t_acc_full;
+      p.t_acc = t_acc_full;
       p.t_flat = (distance - 2.0 * d_acc_full) / v_max;
     }
     p.total = 2.0 * p.t_acc + p.t_flat;

@@ -47,7 +47,9 @@ field_geometry:
     #   共通ワーク: 蓋の向きが列内で交互になるように配置
     #   円筒面のデザイン(ラベル)の向きはランダム (ロボット制御上は無視してよい)
     # ワークは治具 (V字型のトレイ状フィクスチャ、ルールブックp.9参照) の上に横倒しで置かれる。
-    # 円柱(直径66mm×長さ142mm)を「縦方向」(+X方向)に寝かせて配置する
+    # 円柱(直径71mm=半径35.5mm・長さ142mm。CAD実測を正本とする。2026-08-30のスケッチ
+    # 実測時に示された直径66mmは保留の代替候補。CLAUDE.md「既知の未解決の食い違い」参照)
+    # を「縦方向」(+X方向)に寝かせて配置する
     #
     # 座標系: 原点はロボット設置エリア(縦300×横700mm)の中心。+Xは設置エリアから
     # 作業エリアへ、+Yは右から左 (motion_generator_node.workspace_x/y_min/maxと同じ。
@@ -133,7 +135,9 @@ joy_teleop_node:
 hardware_bridge_node:
   ros__parameters:
     command_mode: "cartesian"   # "cartesian" (パターンA) / "joint" (パターンB。packet_type=0x02)
-    mcu_ip: "192.168.1.50"      # MCU の IP アドレス (有線 Ethernet)
+    mcu_ip: "192.168.1.100"     # MCU の IP アドレス (有線 Ethernet)。STM32_UDP2CAN_controller の
+                                # main.c gWIZNETINFO.ip と一致させること (2026-09-05 現物に合わせた)。
+                                # 疑似MCUに繋ぐときはここを触らず launch の mock_mcu:=true を使う
     mcu_port: 8888              # MCU の UDP 受信ポート
     local_port: 8889            # フィードバック受信ポート
     feedback_poll_rate: 200.0   # 受信ポーリング周期 [Hz]

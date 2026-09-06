@@ -57,7 +57,7 @@ ROS2 トピックと UDP パケットの間の**変換と輸送のみ**を担う
 | パラメータ | 既定値 | 説明 |
 |---|---|---|
 | `command_mode` | `cartesian` | `cartesian` / `joint` |
-| `mcu_ip` | `192.168.1.50` | MCU の IP アドレス |
+| `mcu_ip` | `192.168.1.100` | MCU の IP アドレス (`STM32_UDP2CAN_controller` の `gWIZNETINFO.ip` と一致させる)。疑似MCUは launch の `mock_mcu:=true` で `config/mock_mcu.yaml` により上書き |
 | `mcu_port` | 8888 | 送信先ポート |
 | `local_port` | 8889 | 受信待ち受けポート |
 | `feedback_poll_rate` | 200.0 | 受信ポーリング周期 [Hz] |

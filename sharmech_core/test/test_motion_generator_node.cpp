@@ -425,7 +425,13 @@ TEST(MotionGeneratorNode, WorkspaceClampResetRestoresDefaultBounds)
 int main(int argc, char ** argv)
 {
   testing::InitGoogleTest(&argc, argv);
-  rclcpp::init(argc, argv);
+  // 同名トピック (/catchrobo/command/cartesian 等) を流す別プロセス (実機 launch や
+  // mock_mcu 疎通中のスタック) と DDS 上で混信すると速度サンプルが混ざって落ちるため、
+  // テスト専用のドメインに隔離する (2026-09-05 に実際に混信で落ちた)。
+  // 101 は既定ポート範囲で使える最大の ROS_DOMAIN_ID
+  rclcpp::InitOptions init_options;
+  init_options.set_domain_id(101);
+  rclcpp::init(argc, argv, init_options);
   const int result = RUN_ALL_TESTS();
   rclcpp::shutdown();
   return result;

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""実機無しで hardware_bridge_node と UDP でやり取りする疑似 MCU。
+"""
+実機無しで hardware_bridge_node と UDP でやり取りする疑似 MCU (mock).
 
 プロトコル仕様は sharmech_core/docs/hardware_bridge_node.md および
 sharmech_core/include/sharmech_core/utility/udp_protocol.hpp が正本。
@@ -106,7 +107,7 @@ def decode_joint(data: bytes):
 
 
 def encode_feedback(seq, seq_echo, timestamp_us, x, y, z, pitch, yaw,
-                     status_flags, gripper_closed, joint_positions):
+                    status_flags, gripper_closed, joint_positions):
     payload_len = FEEDBACK_FIXED_SIZE + 4 * len(joint_positions)
     header = struct.pack(
         HEADER_FMT, PROTOCOL_VERSION, PACKET_TYPE_STATE_FEEDBACK,
@@ -121,27 +122,27 @@ def encode_feedback(seq, seq_echo, timestamp_us, x, y, z, pitch, yaw,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
-                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--listen-port", type=int, default=8888,
-                         help="hardware_bridge_node の mcu_port と合わせる (既定: 8888)")
+                        help="hardware_bridge_node の mcu_port と合わせる (既定: 8888)")
     parser.add_argument("--drop-rate", type=float, default=0.0,
-                         help="受信・送信をランダムに破棄する確率 [0,1] (パケットロス試験用)")
+                        help="受信・送信をランダムに破棄する確率 [0,1] (パケットロス試験用)")
     parser.add_argument("--lag", type=float, default=0.0,
-                         help="指令位置への一次遅れ時定数 [s]。0 なら即座に到達 (既定)")
+                        help="指令位置への一次遅れ時定数 [s]。0 なら即座に到達 (既定)")
     parser.add_argument("--joint-count", type=int, default=0,
-                         help="0x01運用時に feedback に載せるダミー関節角の数 (既定: 0)。"
-                              "0x02 (関節指令) を受信すると以後は5関節のエコーに切り替わる")
+                        help="0x01運用時に feedback に載せるダミー関節角の数 (既定: 0)。"
+                             "0x02 (関節指令) を受信すると以後は5関節のエコーに切り替わる")
     parser.add_argument("--status-flags", type=lambda v: int(v, 0), default=0,
-                         help="常に載せる status_flags (異常系の手動試験用。例: 0x4 = watchdog)")
+                        help="常に載せる status_flags (異常系の手動試験用。例: 0x4 = watchdog)")
     parser.add_argument("--tracking-error-limit", type=float, default=0.0,
-                         help="追従誤差[m]がこれを超えたら FLAG_TRACKING_ERROR を立てる "
-                              "(0 で無効。--lag と併用すると実機に近い立ち方をする)")
+                        help="追従誤差[m]がこれを超えたら FLAG_TRACKING_ERROR を立てる "
+                             "(0 で無効。--lag と併用すると実機に近い立ち方をする)")
     parser.add_argument("--watchdog-timeout", type=float, default=0.05,
-                         help="指令がこの秒数途絶したら FLAG_WATCHDOG を立てて外挿を止める "
-                              "(既定: 0.05 = 仕様の推奨50ms。0 で無効)")
+                        help="指令がこの秒数途絶したら FLAG_WATCHDOG を立てて外挿を止める "
+                             "(既定: 0.05 = 仕様の推奨50ms。0 で無効)")
     parser.add_argument("--feedback-rate", type=float, default=100.0,
-                         help="フィードバック(0x81)の自発送信周期 [Hz] (既定: 100。0 で"
-                              "旧来のエコー型に戻る)")
+                        help="フィードバック(0x81)の自発送信周期 [Hz] (既定: 100。0 で"
+                             "旧来のエコー型に戻る)")
     parser.add_argument("--quiet", action="store_true", help="受信ログを抑制する")
     args = parser.parse_args()
 

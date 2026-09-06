@@ -131,6 +131,7 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 | `/catchrobo/arm/gripper` | `std_msgs/Bool` | 操縦層 / `game_state_manager_node` → `motion_generator_node` | ○ |
 | `/catchrobo/arm/orient_vertical` | `std_msgs/Bool` | `game_state_manager_node` → `motion_generator_node`。PLACING中のみtrue | |
 | `/catchrobo/arm/current_pose` | `geometry_msgs/PoseStamped` | `hardware_bridge_node` → 各ノード / WebXR | ○ |
+| `/catchrobo/arm/mcu_status` | `sharmech_msgs/McuStatus` | `hardware_bridge_node` → 観測者 (疎通状態・`status_flags`・`seq`/`seq_echo`・連番逆転回数)。**latched** | ○ |
 | `/catchrobo/arm/cancel` | `std_msgs/Empty` | 操縦層 → `motion_generator_node` | ○ |
 | `/catchrobo/arm/status` | `sharmech_msgs/MotionStatus` | `motion_generator_node` → 操縦層 / WebXR / `game_state_manager_node`。**latched** | ○ |
 | `/catchrobo/field/cylinders` | `geometry_msgs/PoseArray` | `cylinder_detector_node` → WebXR。**latched**、`scan_interval_sec`毎+手動トリガー | ○ |
@@ -138,9 +139,11 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 | `/catchrobo/game/pick_request` | `geometry_msgs/PoseStamped` | WebXR → `game_state_manager_node`。選択したワーク姿勢 | ○ |
 | `/catchrobo/game/box_count` | `std_msgs/Int32` | WebXR → `game_state_manager_node`。指定箱に置いた通算個数。`N` → `placement_order[N-1]` のスロットへ置きに行く | ○ |
 | `/catchrobo/game/state` | `std_msgs/String` | `game_state_manager_node` → WebXR。**latched** | ○ |
+| `/catchrobo/game/toggle_manual_control` | `std_msgs/Empty` | `joy_teleop_node` (4ボタン同時押し) / WebXR → `game_state_manager_node`。自由操作 (`MANUAL_CONTROL`) のトグル | ○ |
 | `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | `game_state_manager_node` → `motion_generator_node` | |
+| `/catchrobo/debug/change_state` | `std_msgs/String` | デバッグ用 → `game_state_manager_node`。ステートを強制遷移させる (その状態の目標姿勢は配信しない) | ○ |
 | `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `motion_generator_node` → 下流 | |
-| `/catchrobo/command/joint` | `sensor_msgs/JointState` (`name`=5モータ個別名) | `kinematics_node` → `hardware_bridge_node` (**hardware_bridge_node側`joint`モード未実装のため未接続**) | |
+| `/catchrobo/command/joint` | `sensor_msgs/JointState` (`name`=5モータ個別名) | `kinematics_node` → `hardware_bridge_node` (`command_mode: "joint"`、packet_type=0x02。2026-09-01 接続済み。`pattern_b:=true` 時のみ流れる) | |
 | `/catchrobo/command/gripper` | `std_msgs/Bool` | `motion_generator_node` → `hardware_bridge_node` | |
 | `/catchrobo/command/orient_vertical` | `std_msgs/Bool` | `motion_generator_node` → `hardware_bridge_node` | |
 | `/joy` | `sensor_msgs/Joy` | joy ドライバ → `joy_teleop_node` | |

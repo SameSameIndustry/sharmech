@@ -68,16 +68,16 @@ private:
   CartesianState clampToWorkspace(const CartesianState & state) const;
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr       cmd_twist_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr             gripper_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr             orient_vertical_sub_;
-  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr            cancel_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_twist_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr gripper_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr orient_vertical_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr cancel_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr current_pose_sub_;
   rclcpp::Subscription<sharmech_msgs::msg::WorkspaceClamp>::SharedPtr workspace_clamp_sub_;
   rclcpp::Publisher<sharmech_msgs::msg::CartesianCommand>::SharedPtr cartesian_pub_;
-  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr                  gripper_pub_;
-  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr                  orient_vertical_pub_;
-  rclcpp::Publisher<sharmech_msgs::msg::MotionStatus>::SharedPtr     status_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr orient_vertical_pub_;
+  rclcpp::Publisher<sharmech_msgs::msg::MotionStatus>::SharedPtr status_pub_;
   rclcpp::TimerBase::SharedPtr control_timer_;
   rclcpp::TimerBase::SharedPtr status_timer_;
 

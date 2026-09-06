@@ -49,23 +49,23 @@ public:
     // モータ1 (-d, 0) からの2リンクIK
     const double dx1 = target.x + d;
     const double dy1 = target.y;
-    const double r1  = std::hypot(dx1, dy1);
+    const double r1 = std::hypot(dx1, dy1);
 
     if (!isReachableArm(r1, p.l1, p.l2)) {return std::nullopt;}
 
     const double cos_e1 = (p.l1 * p.l1 + r1 * r1 - p.l2 * p.l2) / (2.0 * p.l1 * r1);
-    const double e1     = std::acos(std::clamp(cos_e1, -1.0, 1.0));
+    const double e1 = std::acos(std::clamp(cos_e1, -1.0, 1.0));
     const double theta1 = std::atan2(dy1, dx1) - e1;  // elbow-up
 
     // モータ2 (+d, 0) からの2リンクIK
     const double dx2 = target.x - d;
     const double dy2 = target.y;
-    const double r2  = std::hypot(dx2, dy2);
+    const double r2 = std::hypot(dx2, dy2);
 
     if (!isReachableArm(r2, p.l1, p.l2)) {return std::nullopt;}
 
     const double cos_e2 = (p.l1 * p.l1 + r2 * r2 - p.l2 * p.l2) / (2.0 * p.l1 * r2);
-    const double e2     = std::acos(std::clamp(cos_e2, -1.0, 1.0));
+    const double e2 = std::acos(std::clamp(cos_e2, -1.0, 1.0));
     const double theta2 = std::atan2(dy2, dx2) + e2;  // elbow-up (右腕は符号逆)
 
     return JointAngles{theta1, theta2};
@@ -80,14 +80,15 @@ public:
     const double d = p.base_width / 2.0;
 
     const double ex1 = -d + p.l1 * std::cos(joints.theta1);
-    const double ey1 =      p.l1 * std::sin(joints.theta1);
-    const double ex2 =  d + p.l1 * std::cos(joints.theta2);
-    const double ey2 =      p.l1 * std::sin(joints.theta2);
+    const double ey1 = p.l1 * std::sin(joints.theta1);
+    const double ex2 = d + p.l1 * std::cos(joints.theta2);
+    const double ey2 = p.l1 * std::sin(joints.theta2);
 
     // 2つの前腕の先端が交わる点 (厳密には2円の交点)
     // TODO: 厳密な交点計算に置き換えること
-    return CartesianPoint{(ex1 + ex2) / 2.0 + (p.l2 * std::cos(joints.theta1) + p.l2 * std::cos(joints.theta2)) / 2.0,
-                          (ey1 + ey2) / 2.0 + (p.l2 * std::sin(joints.theta1) + p.l2 * std::sin(joints.theta2)) / 2.0};
+    return CartesianPoint{(ex1 + ex2) / 2.0 +
+      (p.l2 * std::cos(joints.theta1) + p.l2 * std::cos(joints.theta2)) / 2.0,
+      (ey1 + ey2) / 2.0 + (p.l2 * std::sin(joints.theta1) + p.l2 * std::sin(joints.theta2)) / 2.0};
   }
 
   // 目標点が作業領域内か確認

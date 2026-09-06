@@ -1,0 +1,8 @@
+# 疑似MCU (sharmech_core/scripts/mock_mcu.py) に繋ぐときの上書きパラメータ。
+# sharmech.launch.xml の mock_mcu:=true で config.yaml の後に読み込まれ、
+# hardware_bridge_node の送信先だけを 127.0.0.1:8888 (mock_mcu.py の既定) に向ける。
+# 実機の IP は config.yaml が唯一の正本。ここには実機の値を書かないこと
+hardware_bridge_node:
+  ros__parameters:
+    mcu_ip: "127.0.0.1"
+    mcu_port: 8888
