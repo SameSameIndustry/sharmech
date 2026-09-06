@@ -18,11 +18,20 @@ namespace sharmech_core
 // /catchrobo/game/state (std_msgs/String) としてそのまま配信する。
 //
 // 各状態での動作:
+//   kInit           初期位置へ戻している最中。/catchrobo/game/reset を受けると
+//                   **どの状態からでも**ここへ入り、init_pose へ直線1本で移動する
+//                   (グリッパは開・縦は解除・作業領域クランプはデフォルトへ)。
+//                   到達したら kWaitingForPick へ戻る (requestInit() のコメント参照)
 //   kWaitingForPick 次に運ぶワークの選択待ち。VR からの pick_request を受理する
-//   kApproaching    選択したワークの姿勢へ直線1本で接近中 (グリッパは開)
+//   kApproaching    ワークの真上まで approach_clearance_z のまま**水平移動**する
+//                   (グリッパは開)。斜めに降りながら近づくと、200mmピッチで並んだ
+//                   隣のワークを薙ぎ払うため、高さを変えずに移動する
+//   kApproachDescend ワークの真上から**垂直に降下**して掴む位置へ着ける
 //   kGrasping       到達後グリッパを閉じ、grasp_dwell_sec だけ待つ
-//   kTransporting   キュー先頭のスロットのxy・transport_clearance_zまで運搬中。
-//                   到達したらそのまま kOrienting へ進む
+//   kTransportLift  掴んだ位置で transport_clearance_z まで**垂直に上昇**する。
+//                   斜めに持ち上げると、缶を引きずったまま横へ動くことになる
+//   kTransporting   キュー先頭のスロットの上空まで transport_clearance_z のまま
+//                   **水平移動**する。到達したらそのまま kOrienting へ進む
 //   kOrienting      スロット上空で**静止したまま**、横倒しのワークを縦にする
 //                   (orient_vertical=true)。orient_dwell_sec だけ待ってから降下する。
 //                   降下と同時に回すと回転が間に合わず缶が斜めのまま箱に入るため、
@@ -50,6 +59,9 @@ enum class GameState : uint8_t
   kComplete = 6,
   kManualControl = 7,
   kOrienting = 8,
+  kInit = 9,
+  kApproachDescend = 10,
+  kTransportLift = 11,
 };
 
 inline std::string toString(GameState state)
@@ -57,13 +69,16 @@ inline std::string toString(GameState state)
   switch (state) {
     case GameState::kWaitingForPick: return "WAITING_FOR_PICK";
     case GameState::kApproaching: return "APPROACHING";
+    case GameState::kApproachDescend: return "APPROACH_DESCEND";
     case GameState::kGrasping: return "GRASPING";
+    case GameState::kTransportLift: return "TRANSPORT_LIFT";
     case GameState::kTransporting: return "TRANSPORTING";
     case GameState::kOrienting: return "ORIENTING";
     case GameState::kPlacing: return "PLACING";
     case GameState::kRetracting: return "RETRACTING";
     case GameState::kComplete: return "COMPLETE";
     case GameState::kManualControl: return "MANUAL_CONTROL";
+    case GameState::kInit: return "INIT";
   }
   return "UNKNOWN";
 }
@@ -73,9 +88,12 @@ inline std::string toString(GameState state)
 inline std::optional<GameState> gameStateFromString(const std::string & name)
 {
   for (const auto state : {
-      GameState::kWaitingForPick, GameState::kApproaching, GameState::kGrasping,
+      GameState::kWaitingForPick, GameState::kApproaching,
+      GameState::kApproachDescend, GameState::kGrasping, GameState::kTransportLift,
       GameState::kTransporting, GameState::kOrienting, GameState::kPlacing,
-      GameState::kRetracting, GameState::kComplete, GameState::kManualControl})
+      GameState::kRetracting, GameState::kComplete, GameState::kManualControl,
+      GameState::kInit
+    })
   {
     if (toString(state) == name) {return state;}
   }
@@ -116,13 +134,21 @@ public:
     std::vector<CartesianState> slots;   // インデックス = スロットID (0..N-1)
     std::vector<int> placement_order;    // 配置する順番のスロットID列 (長さ = N)
     double slot_clamp_margin_m{0.03};    // ORIENTING〜RETRACTING中の作業領域クランプの片側マージン
-    double transport_clearance_z{0.20};  // TRANSPORTING中に上げるZ [m]
+    // ワーク上空まで水平移動するときのZ [m] (グリッパは空)。**retract_clearance_z と
+    // 同じ値にしておくこと。** 揃っていれば RETRACTING の到達高さのまま
+    // APPROACHING に入るので、接近が完全な水平移動になる (揃っていないとその差分
+    // だけ斜めになる)
+    double approach_clearance_z{0.20};
+    double transport_clearance_z{0.20};  // TRANSPORT_LIFT/TRANSPORTING中のZ [m] (缶を保持)
     double retract_clearance_z{0.20};    // 設置後に上げるZ [m] (箱に当たらない高さ)
     double grasp_dwell_sec{0.3};         // GRASPING状態での待機時間 [s]
     // ORIENTING状態での待機時間 [s]。ピッチ機構が横→縦を回し切るのに要する時間。
     // MCUがピッチの実状態を返さないため、grasp_dwell_sec と同じく固定時間待ちの
     // 暫定実装 (実フィードバックが使えるようになったら実確認へ置き換える)
     double orient_dwell_sec{0.5};
+    // /catchrobo/game/reset で戻る初期位置 (kInit のゴール)。
+    // 既定は原点。実際の値は game_state_manager_node の init_pose パラメータで与える
+    CartesianState init_pose{};
   };
 
   explicit GameStateMachine(Config config)
@@ -141,12 +167,46 @@ public:
 
   // --- イベント: 対応する状態でないときは無視する ---
 
+  // 状態のリセット要求 (/catchrobo/game/reset)。**どの状態からでも受け付ける**
+  // (kManualControl・kComplete を含む)。試合中に手順が崩れたときの立て直しや、
+  // 練習のやり直しのために、VR / PS4 のどちらからでも押せる1つの出口として置く。
+  //
+  // 「リセット」は**アームを初期位置へ戻すところまで**を指す。ゴールを1本出し、
+  // 到達したら kWaitingForPick へ戻る (onGoalReached)。却下・中断されたときは
+  // 他の自動シーケンスと同じ扱いで kWaitingForPick へ落ちる
+  // (onGoalRejectedOrAborted。理由はノード側が警告ログに出す)。
+  //
+  // **配置の進み具合 (order_index_ / authorized_count_) は消さない。**
+  // 消してしまうと、VR側が持っている通算カウント (box_count) と食い違い、
+  // 次に届いた box_count で既に置いたスロットへもう一度置きに行くことになる。
+  // 「何個目まで置いたか」の正本はあくまで VR の box_count 側にある
+  // (docs/game_state_manager_node.md の「box_count のキュー」参照)。
+  void requestInit()
+  {
+    state_ = GameState::kInit;
+    pending_goal_ = config_.init_pose;
+    pending_gripper_ = false;          // 掴んだままにしない
+    pending_orient_vertical_ = false;  // 縦にしていたら横へ戻す
+    WorkspaceClampCommand reset_clamp;
+    reset_clamp.reset = true;          // PLACING中の絞り込みが残っていても解除する
+    pending_clamp_ = reset_clamp;
+    // **自由操作中に押されたら、そこから引き出して初期位置へ戻す。**
+    // リセットは VR 側のボタンなので、押せている時点で VR は生きている
+    // (kManualControl は「VRが使えないときの脱出ハッチ」)。
+    // 退避先 (pre_manual_state_) はここでは触らない —— 次に自由操作へ
+    // 入るときに、そのときの状態で上書きされるため
+  }
+
+  // ワークへは「水平移動 → 垂直降下」の2段で近づく (斜めに降りない)。
+  // ここで出すのは1段目、ワークの**真上**までのゴール
   void onPickPoseReceived(const CartesianState & pose)
   {
     if (state_ != GameState::kWaitingForPick) {return;}
     pick_pose_ = pose;
     state_ = GameState::kApproaching;
-    pending_goal_ = pose;
+    CartesianState above = pose;
+    above.z = config_.approach_clearance_z;
+    pending_goal_ = above;
     pending_gripper_ = false;         // 掴む前は開いている
     pending_orient_vertical_ = false;
   }
@@ -159,10 +219,11 @@ public:
   //
   // 飛び・減少・0リセットも一律「その値が正本」として追従する
   // (VRの再接続やフィールド再設置でカウントが0に戻る実装になっているため)。
-  // **ただし宛先を確定済みのサイクル (kTransporting/kOrienting/kPlacing/kRetracting)
-  // は中断しない。** 途中でスロットが差し替わると、既に publish 済みのゴールと
-  // 退避先の xy がずれて、ワークを保持したまま別の箱の上へ動くことになるため。
-  // 減少がこの4状態中に届いた場合は、そのサイクルを最後まで終えてから効く
+  // **ただし宛先を確定済みのサイクル (kTransportLift/kTransporting/kOrienting/
+  // kPlacing/kRetracting) は中断しない。** 途中でスロットが差し替わると、既に
+  // publish 済みのゴールと退避先の xy がずれて、ワークを保持したまま別の箱の上へ
+  // 動くことになるため。減少がこの5状態中に届いた場合は、そのサイクルを
+  // 最後まで終えてから効く
   void onBoxCount(int count)
   {
     const std::size_t capacity = config_.placement_order.size();
@@ -170,7 +231,8 @@ public:
       std::min(static_cast<std::size_t>(count), capacity);
 
     const bool destination_committed =
-      state_ == GameState::kTransporting || state_ == GameState::kOrienting ||
+      state_ == GameState::kTransportLift || state_ == GameState::kTransporting ||
+      state_ == GameState::kOrienting ||
       state_ == GameState::kPlacing || state_ == GameState::kRetracting;
     if (destination_committed) {return;}
 
@@ -193,9 +255,18 @@ public:
   {
     switch (state_) {
       case GameState::kApproaching:
+        // ワークの真上に着いた。ここから垂直に降ろす
+        state_ = GameState::kApproachDescend;
+        pending_goal_ = pick_pose_;
+        break;
+      case GameState::kApproachDescend:
         state_ = GameState::kGrasping;
         grasp_start_sec_ = now_sec;
         pending_gripper_ = true;      // 閉じる
+        break;
+      case GameState::kTransportLift:
+        // 掴んだ位置での上昇が終わった。ここから水平にスロット上空へ運ぶ
+        enterTransporting();
         break;
       case GameState::kPlacing:
         enterRetracting();
@@ -207,6 +278,10 @@ public:
         break;
       case GameState::kRetracting:
         advanceSlot();
+        break;
+      case GameState::kInit:
+        // 初期位置へ戻り切った。ここから普通に pick_request を受けられる
+        state_ = GameState::kWaitingForPick;
         break;
       default:
         break;
@@ -234,9 +309,10 @@ public:
     if (state_ == GameState::kGrasping && hasQueuedSlot() &&
       now_sec - grasp_start_sec_ >= config_.grasp_dwell_sec)
     {
-      state_ = GameState::kTransporting;
-      const auto id = currentSlotId();
-      CartesianState goal = id ? config_.slots.at(*id) : pick_pose_;
+      // 斜めに持ち上げると缶を引きずるので、まず掴んだ場所で真上に上げる。
+      // 横移動 (kTransporting) はそのあと
+      state_ = GameState::kTransportLift;
+      CartesianState goal = pick_pose_;
       goal.z = config_.transport_clearance_z;
       pending_goal_ = goal;
       return;
@@ -338,11 +414,23 @@ public:
   }
 
 private:
+  // 掴んだ位置での上昇が終わった状態から呼ぶ。transport_clearance_z を保ったまま
+  // スロットの真上まで水平に運ぶ (高さを変えないので箱・設置済みの缶の上を
+  // 一定のクリアランスで通過できる)
+  void enterTransporting()
+  {
+    state_ = GameState::kTransporting;
+    const auto id = currentSlotId();
+    CartesianState goal = id ? config_.slots.at(*id) : pick_pose_;
+    goal.z = config_.transport_clearance_z;
+    pending_goal_ = goal;
+  }
+
   // スロット上空に着いた状態から呼ぶ。**ゴールは発行しない**ので、アームは
   // TRANSPORTING の到達点で静止したまま縦にする動作だけを行う。
   //
   // 降下 (kPlacing) と同時に縦にすると、ピッチ機構の回転が終わる前に箱へ入り、
-  // 缶が斜めのまま狭いスロット (255×510mm に6箇所) へ突っ込む。動かない時間を
+  // 缶が斜めのまま狭いスロット (箱の内寸 138×255mm に6箇所) へ突っ込む。動かない時間を
   // ここで確保することで、kPlacing は「既に縦になった缶をまっすぐ降ろすだけ」になる。
   //
   // 作業領域クランプもここで絞る。降下前から効かせておけば、ORIENTING 中に

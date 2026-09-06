@@ -44,6 +44,8 @@ namespace sharmech_core
 // Sub: /catchrobo/debug/change_state  デバッグ用のステート強制遷移 (std_msgs/String)
 // Sub: /catchrobo/game/toggle_manual_control  DualSenseの特定ボタン同時押し
 //      (L1+R1+L3+R3) で joy_teleop_node が publish する、自由操作の入/切トグル
+// Sub: /catchrobo/game/reset          (std_msgs/Empty) 状態のリセット要求。
+//      どの状態からでも INIT へ入り、init_pose へ戻ってから WAITING_FOR_PICK に復帰する
 class GameStateManagerNode : public rclcpp::Node
 {
 public:
@@ -58,6 +60,9 @@ private:
   // VRが使えない場合の脱出ハッチ。どの状態からでも自由操作(手動ジョグのみ)へ
   // トグルする。詳細は GameStateMachine::toggleManualControl() のコメント参照
   void onToggleManualControl(const std_msgs::msg::Empty::SharedPtr msg);
+  // 状態のリセット要求。どの状態からでも INIT へ入り、初期位置へのゴールを1本出す
+  // (詳細は GameStateMachine::requestInit() のコメント参照)
+  void onResetRequest(const std_msgs::msg::Empty::SharedPtr msg);
   void onTimer();
 
   void publishPendingOutputs();
@@ -67,16 +72,21 @@ private:
   // パラメータ (等長の配列) からスロット姿勢の一覧を組み立てる
   std::vector<CartesianState> loadSlots(const std::string & color_suffix);
 
+  // init_pose パラメータ ([x, y, z, pitch, yaw]) を読む。
+  // 空なら既定値、要素数が5でなければ起動時に落とす (無言で別の場所へ動かさない)
+  CartesianState loadInitPose();
+
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pick_sub_;
-  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr             box_count_sub_;
+  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr box_count_sub_;
   rclcpp::Subscription<sharmech_msgs::msg::MotionStatus>::SharedPtr status_sub_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr     target_pose_pub_;
-  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr                 gripper_pub_;
-  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr                 orient_vertical_pub_;
-  rclcpp::Publisher<sharmech_msgs::msg::WorkspaceClamp>::SharedPtr  workspace_clamp_pub_;
-  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr             change_state_sub_;
-  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr              toggle_manual_control_sub_;
-  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr               state_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr orient_vertical_pub_;
+  rclcpp::Publisher<sharmech_msgs::msg::WorkspaceClamp>::SharedPtr workspace_clamp_pub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr change_state_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr toggle_manual_control_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
   std::unique_ptr<GameStateMachine> machine_;

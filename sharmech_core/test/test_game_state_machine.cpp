@@ -24,6 +24,10 @@ GameStateMachine::Config makeConfig()
   config.retract_clearance_z = 0.20;
   config.grasp_dwell_sec = 0.3;
   config.orient_dwell_sec = 0.5;
+  config.init_pose = CartesianState{};
+  config.init_pose.x = 0.0;
+  config.init_pose.y = 0.15;
+  config.init_pose.z = 0.15;
   return config;
 }
 
@@ -38,13 +42,24 @@ CartesianState makePose(double x, double y, double z)
 
 // pick から退避完了までの1サイクルを一気に進める。box_count は
 // 「通算何個目か」なので、サイクルごとに1ずつ増やして渡す
+// ワークを掴むところまで進める。接近は「水平移動 → 垂直降下」の2段なので
+// onGoalReached が2回要る
+void advanceToGrasping(GameStateMachine & machine, const CartesianState & pose)
+{
+  machine.onPickPoseReceived(pose);
+  machine.consumePendingGoal();
+  machine.onGoalReached(0.0);   // ワーク上空に到達 → APPROACH_DESCEND
+  machine.consumePendingGoal();
+  machine.onGoalReached(0.0);   // 降下完了 → GRASPING
+}
+
 void runOneCycle(GameStateMachine & machine, int box_count)
 {
-  machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
-  machine.consumePendingGoal();
-  machine.onGoalReached(0.0);   // → GRASPING
+  advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
   machine.onBoxCount(box_count);
-  machine.tick(1.0);            // → TRANSPORTING
+  machine.tick(1.0);            // → TRANSPORT_LIFT (掴んだ位置で垂直上昇)
+  machine.consumePendingGoal();
+  machine.onGoalReached(1.5);   // 上昇完了 → TRANSPORTING (水平移動)
   machine.consumePendingGoal();
   machine.onGoalReached(2.0);   // スロット上空に到達 → ORIENTING (ゴールは出ない)
   machine.consumePendingOrientVertical();  // 縦にする指示
@@ -96,6 +111,13 @@ TEST(GameStateMachine, GoalReachedWhileApproachingClosesGripperAndDwells)
   GameStateMachine machine(makeConfig());
   machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
   machine.consumePendingGoal();
+  machine.consumePendingGripper();   // 接近開始時の「開」
+
+  // 1段目の到達 (ワーク上空) では掴まない。垂直降下に入るだけ
+  machine.onGoalReached(/*now_sec=*/ 9.0);
+  EXPECT_EQ(machine.state(), GameState::kApproachDescend);
+  EXPECT_FALSE(machine.hasPendingGripper());
+  machine.consumePendingGoal();
 
   machine.onGoalReached(/*now_sec=*/ 10.0);
   EXPECT_EQ(machine.state(), GameState::kGrasping);
@@ -114,10 +136,20 @@ TEST(GameStateMachine, GoalReachedWhileApproachingClosesGripperAndDwells)
 
   machine.onBoxCount(1);        // 1個目 → placement_order[0] へ置きに行く
   machine.tick(10.4);
+  EXPECT_EQ(machine.state(), GameState::kTransportLift);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  const auto lift = machine.consumePendingGoal();
+  // 上昇は掴んだ場所の真上。xyは掴んだ位置のまま、zだけ上がる (斜めに持ち上げない)
+  EXPECT_DOUBLE_EQ(lift.x, 0.5);
+  EXPECT_DOUBLE_EQ(lift.y, 0.1);
+  EXPECT_DOUBLE_EQ(lift.z, 0.20);
+
+  machine.onGoalReached(11.0);
   EXPECT_EQ(machine.state(), GameState::kTransporting);
   ASSERT_TRUE(machine.hasPendingGoal());
   const auto goal = machine.consumePendingGoal();
-  // TRANSPORTINGの目標はスロット0のxyに、transport_clearance_zの高さ
+  // TRANSPORTINGの目標はスロット0のxyに、transport_clearance_zの高さ。
+  // 上昇後と同じ高さなので、この区間は完全な水平移動になる
   EXPECT_DOUBLE_EQ(goal.x, 0.0);
   EXPECT_DOUBLE_EQ(goal.y, 0.2);
   EXPECT_DOUBLE_EQ(goal.z, 0.20);
@@ -138,15 +170,16 @@ TEST(GameStateMachine, BoxCountAloneDoesNotChangeState)
 TEST(GameStateMachine, BoxCountWhileGraspingStartsTransportToFirstSlot)
 {
   GameStateMachine machine(makeConfig());
-  machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
-  machine.consumePendingGoal();
-  machine.onGoalReached(0.0);
+  advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
   machine.consumePendingGripper();
   machine.tick(1.0);            // dwellは経過済みだがキューが空
   ASSERT_EQ(machine.state(), GameState::kGrasping);
 
   machine.onBoxCount(1);
   machine.tick(1.1);
+  ASSERT_EQ(machine.state(), GameState::kTransportLift);
+  machine.consumePendingGoal();
+  machine.onGoalReached(1.5);
   EXPECT_EQ(machine.state(), GameState::kTransporting);
   ASSERT_TRUE(machine.hasPendingGoal());
   const auto goal = machine.consumePendingGoal();
@@ -178,11 +211,11 @@ TEST(GameStateMachine, BoxCountIsAuthoritativeAndFollowsResetAndJumps)
 TEST(GameStateMachine, BoxCountDecreaseDoesNotInterruptCommittedCycle)
 {
   GameStateMachine machine(makeConfig());
-  machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
-  machine.consumePendingGoal();
-  machine.onGoalReached(0.0);
+  advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
   machine.onBoxCount(1);
   machine.tick(1.0);
+  machine.consumePendingGoal();
+  machine.onGoalReached(1.5);
   ASSERT_EQ(machine.state(), GameState::kTransporting);
   machine.consumePendingGoal();
 
@@ -213,9 +246,14 @@ TEST(GameStateMachine, FullCycleAdvancesToNextSlot)
 
   machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
   machine.consumePendingGoal();
-  machine.onGoalReached(0.0);   // → GRASPING
+  machine.onGoalReached(0.0);   // ワーク上空 → APPROACH_DESCEND
+  machine.consumePendingGoal();
+  machine.onGoalReached(0.2);   // 降下完了 → GRASPING
   machine.onBoxCount(1);        // 1個目のスロットをキューへ
-  machine.tick(1.0);            // dwell経過 + キューあり → TRANSPORTING
+  machine.tick(1.0);            // dwell経過 + キューあり → TRANSPORT_LIFT
+  ASSERT_EQ(machine.state(), GameState::kTransportLift);
+  machine.consumePendingGoal();
+  machine.onGoalReached(1.5);   // 上昇完了 → TRANSPORTING (水平移動)
   ASSERT_EQ(machine.state(), GameState::kTransporting);
   machine.consumePendingGoal();
 
@@ -334,7 +372,7 @@ TEST(GameStateMachine, ForceStateToGraspingResetsDwellTimer)
   EXPECT_EQ(machine.state(), GameState::kGrasping);
 
   machine.tick(100.0 + 1.0);
-  EXPECT_EQ(machine.state(), GameState::kTransporting);
+  EXPECT_EQ(machine.state(), GameState::kTransportLift);
 }
 
 // toggleManualControlは「どの状態からでも」入れる。ここでは自動シーケンスの
@@ -393,14 +431,18 @@ TEST(GameStateMachine, ToggleManualControlFromPlacingResetsNarrowedClamp)
   machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
   machine.consumePendingGoal();
   machine.onGoalReached(0.0);
+  machine.consumePendingGoal();
+  machine.onGoalReached(0.2);
   machine.onBoxCount(1);
   machine.tick(1.0);
   machine.consumePendingGoal();
-  machine.onGoalReached(1.5);
+  machine.onGoalReached(1.5);   // 上昇完了 → TRANSPORTING
+  machine.consumePendingGoal();
+  machine.onGoalReached(2.0);   // スロット上空 → ORIENTING
   ASSERT_EQ(machine.state(), GameState::kOrienting);
   ASSERT_TRUE(machine.hasPendingWorkspaceClamp());
   EXPECT_FALSE(machine.consumePendingWorkspaceClamp().reset);  // 絞られている
-  machine.tick(2.1);                                           // → PLACING (絞りは継続中)
+  machine.tick(2.6);                                           // → PLACING (絞りは継続中)
   ASSERT_EQ(machine.state(), GameState::kPlacing);
 
   machine.toggleManualControl(2.5);
@@ -447,14 +489,14 @@ TEST(GameStateMachine, ManualControlIgnoresPickRequestAndOnlyQueuesBoxCount)
 TEST(GameStateMachine, OrientingHoldsPositionUntilDwellElapses)
 {
   GameStateMachine machine(makeConfig());
-  machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
-  machine.consumePendingGoal();
-  machine.onGoalReached(0.0);
+  advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
   machine.onBoxCount(1);
   machine.tick(1.0);
   machine.consumePendingGoal();
+  machine.onGoalReached(1.5);   // 上昇完了 → TRANSPORTING
+  machine.consumePendingGoal();
 
-  machine.onGoalReached(1.5);   // スロット上空に到達
+  machine.onGoalReached(2.0);   // スロット上空に到達
   ASSERT_EQ(machine.state(), GameState::kOrienting);
   // 縦にする指示だけが出て、移動のゴールは出ない (静止したまま回す)
   ASSERT_TRUE(machine.hasPendingOrientVertical());
@@ -462,15 +504,94 @@ TEST(GameStateMachine, OrientingHoldsPositionUntilDwellElapses)
   EXPECT_FALSE(machine.hasPendingGoal());
 
   // dwell (0.5s) 未満では ORIENTING のまま。降下ゴールも出ない
-  machine.tick(1.9);
+  // (ORIENTING に入ったのは t=2.0)
+  machine.tick(2.4);
   EXPECT_EQ(machine.state(), GameState::kOrienting);
   EXPECT_FALSE(machine.hasPendingGoal());
 
   // dwell 経過でようやく降下に入る
-  machine.tick(2.0);
+  machine.tick(2.5);
   EXPECT_EQ(machine.state(), GameState::kPlacing);
   ASSERT_TRUE(machine.hasPendingGoal());
   EXPECT_DOUBLE_EQ(machine.consumePendingGoal().z, 0.05);  // スロットのz
+}
+
+// 移動はすべて「垂直 → 水平 → 垂直」のL字に分解されており、斜めに動く区間が
+// 無いことの回帰テスト。斜めに降りると隣のワーク(200mmピッチ)を薙ぎ払い、
+// 斜めに持ち上げると缶を引きずるため
+TEST(GameStateMachine, EveryMoveIsEitherPurelyVerticalOrPurelyHorizontal)
+{
+  GameStateMachine machine(makeConfig());
+  const auto pick = makePose(0.5, 0.1, 0.0);
+
+  // 1. 接近: ワークの真上まで。高さは approach_clearance_z で、xyはワークの真上
+  machine.onPickPoseReceived(pick);
+  ASSERT_EQ(machine.state(), GameState::kApproaching);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  const auto approach = machine.consumePendingGoal();
+  EXPECT_DOUBLE_EQ(approach.x, pick.x);
+  EXPECT_DOUBLE_EQ(approach.y, pick.y);
+  EXPECT_DOUBLE_EQ(approach.z, 0.20);   // approach_clearance_z
+
+  // 2. 降下: xyは動かさず、zだけワークの高さへ (完全な垂直移動)
+  machine.onGoalReached(1.0);
+  ASSERT_EQ(machine.state(), GameState::kApproachDescend);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  const auto descend = machine.consumePendingGoal();
+  EXPECT_DOUBLE_EQ(descend.x, approach.x);
+  EXPECT_DOUBLE_EQ(descend.y, approach.y);
+  EXPECT_DOUBLE_EQ(descend.z, pick.z);
+
+  // 3. 掴む
+  machine.onGoalReached(2.0);
+  ASSERT_EQ(machine.state(), GameState::kGrasping);
+  machine.onBoxCount(1);
+
+  // 4. 上昇: 掴んだ場所の真上へ (xyは掴んだ位置のまま = 完全な垂直移動)
+  machine.tick(2.5);
+  ASSERT_EQ(machine.state(), GameState::kTransportLift);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  const auto lift = machine.consumePendingGoal();
+  EXPECT_DOUBLE_EQ(lift.x, pick.x);
+  EXPECT_DOUBLE_EQ(lift.y, pick.y);
+  EXPECT_DOUBLE_EQ(lift.z, 0.20);       // transport_clearance_z
+
+  // 5. 運搬: 高さを変えずにスロット上空へ (完全な水平移動)
+  machine.onGoalReached(3.0);
+  ASSERT_EQ(machine.state(), GameState::kTransporting);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  const auto traverse = machine.consumePendingGoal();
+  EXPECT_DOUBLE_EQ(traverse.z, lift.z);   // ★上昇後と同じ高さ = 水平
+  EXPECT_DOUBLE_EQ(traverse.x, 0.0);      // スロット0のxy
+  EXPECT_DOUBLE_EQ(traverse.y, 0.2);
+
+  // 6. 縦にする (静止)、7. 降下: xyは変えずスロットの高さへ (完全な垂直移動)
+  machine.onGoalReached(4.0);
+  ASSERT_EQ(machine.state(), GameState::kOrienting);
+  machine.tick(4.6);
+  ASSERT_EQ(machine.state(), GameState::kPlacing);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  const auto place = machine.consumePendingGoal();
+  EXPECT_DOUBLE_EQ(place.x, traverse.x);
+  EXPECT_DOUBLE_EQ(place.y, traverse.y);
+  EXPECT_DOUBLE_EQ(place.z, 0.05);        // スロットのz
+
+  // 8. 退避: xyは変えず真上へ (完全な垂直移動)
+  machine.onGoalReached(5.0);
+  ASSERT_EQ(machine.state(), GameState::kRetracting);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  const auto retract = machine.consumePendingGoal();
+  EXPECT_DOUBLE_EQ(retract.x, place.x);
+  EXPECT_DOUBLE_EQ(retract.y, place.y);
+  EXPECT_DOUBLE_EQ(retract.z, 0.20);      // retract_clearance_z
+}
+
+// 退避高さと接近高さが揃っていれば、次サイクルの接近は高さを変えずに始められる
+// (揃っていないとその差分だけ斜めになる、という config 上の約束の回帰テスト)
+TEST(GameStateMachine, ApproachClearanceMatchesRetractClearanceSoTraverseIsFlat)
+{
+  auto config = makeConfig();
+  EXPECT_DOUBLE_EQ(config.approach_clearance_z, config.retract_clearance_z);
 }
 
 // 箱の中でグリッパを回さないため、RETRACTING では縦のまま抜き、
@@ -504,6 +625,108 @@ TEST(GameStateMachine, ToggleManualControlWorksFromComplete)
 
   machine.toggleManualControl(5.0);
   EXPECT_EQ(machine.state(), GameState::kComplete);
+}
+
+// --- 状態のリセット (/catchrobo/game/reset → INIT) ---------------------------
+
+// どの状態からでも INIT に入り、初期位置へのゴールを1本出す。
+// グリッパは開き、縦は解除し、作業領域クランプはデフォルトへ戻す
+TEST(GameStateMachine, ResetEntersInitAndGoesToInitPose)
+{
+  GameStateMachine machine(makeConfig());
+  advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
+  machine.consumePendingGripper();
+  ASSERT_EQ(machine.state(), GameState::kGrasping);
+
+  machine.requestInit();
+  EXPECT_EQ(machine.state(), GameState::kInit);
+
+  ASSERT_TRUE(machine.hasPendingGoal());
+  const auto goal = machine.consumePendingGoal();
+  EXPECT_DOUBLE_EQ(goal.x, 0.0);
+  EXPECT_DOUBLE_EQ(goal.y, 0.15);
+  EXPECT_DOUBLE_EQ(goal.z, 0.15);
+
+  ASSERT_TRUE(machine.hasPendingGripper());
+  EXPECT_FALSE(machine.consumePendingGripper());          // 開く
+  ASSERT_TRUE(machine.hasPendingOrientVertical());
+  EXPECT_FALSE(machine.consumePendingOrientVertical());    // 横へ戻す
+  ASSERT_TRUE(machine.hasPendingWorkspaceClamp());
+  EXPECT_TRUE(machine.consumePendingWorkspaceClamp().reset);
+}
+
+// 初期位置へ着いたら待機状態に戻り、そのまま次の pick を受けられる
+TEST(GameStateMachine, InitReturnsToWaitingForPickOnGoalReached)
+{
+  GameStateMachine machine(makeConfig());
+  machine.requestInit();
+  machine.consumePendingGoal();
+
+  machine.onGoalReached(1.0);
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+
+  machine.onPickPoseReceived(makePose(0.4, 0.1, 0.0));
+  EXPECT_EQ(machine.state(), GameState::kApproaching);
+}
+
+// **自由操作中でもリセットできる。** リセットは VR のボタンなので、押せている
+// 時点で VR は生きている (kManualControl は「VRが使えないときの脱出ハッチ」)。
+// そのまま初期位置へ戻し、到達したら待機へ復帰する
+TEST(GameStateMachine, ResetPullsOutOfManualControl)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
+  machine.consumePendingGoal();
+  ASSERT_EQ(machine.state(), GameState::kApproaching);
+
+  machine.toggleManualControl(1.0);
+  ASSERT_EQ(machine.state(), GameState::kManualControl);
+
+  machine.requestInit();
+  EXPECT_EQ(machine.state(), GameState::kInit);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  EXPECT_DOUBLE_EQ(machine.consumePendingGoal().z, 0.15);  // init_pose
+
+  machine.onGoalReached(2.0);
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+}
+
+// 初期位置へのゴールが却下・中断されたら、他の自動シーケンスと同じ扱いで待機へ落ちる
+TEST(GameStateMachine, InitFallsBackToWaitingForPickWhenGoalRejected)
+{
+  GameStateMachine machine(makeConfig());
+  machine.requestInit();
+  machine.consumePendingGoal();
+
+  machine.onGoalRejectedOrAborted();
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+}
+
+// **配置の進み具合は消さない。** 正本は VR 側の box_count なので、
+// こちらだけ巻き戻すと既に置いたスロットへもう一度置きに行くことになる
+TEST(GameStateMachine, ResetKeepsPlacementProgress)
+{
+  GameStateMachine machine(makeConfig());
+  runOneCycle(machine, 1);
+  ASSERT_EQ(machine.currentSlotId(), 1);  // 1個目を消化済み
+
+  machine.requestInit();
+  machine.consumePendingGoal();
+  machine.onGoalReached(5.0);
+  ASSERT_EQ(machine.state(), GameState::kWaitingForPick);
+
+  // キューも消化済み個数もそのまま (次に置くのは2個目のスロット)
+  EXPECT_EQ(machine.currentSlotId(), 1);
+  EXPECT_FALSE(machine.hasQueuedSlot());
+}
+
+// 状態名の文字列は /catchrobo/game/state の契約そのもの (VR側が色分けに使う)
+TEST(GameStateMachine, InitStateNameRoundTrips)
+{
+  EXPECT_EQ(sharmech_core::toString(GameState::kInit), "INIT");
+  const auto parsed = sharmech_core::gameStateFromString("INIT");
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(*parsed, GameState::kInit);
 }
 
 int main(int argc, char ** argv)

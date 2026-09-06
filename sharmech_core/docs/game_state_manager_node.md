@@ -56,6 +56,7 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 | `/catchrobo/game/box_count` | `std_msgs/Int32` | VR の指定箱にワークを離した**通算個数**(1始まり)。`N` は「`placement_order[N-1]` のスロットへ置きに行く」を意味する。**置きに行くべきスロットのキュー**として扱い、`place_request` 相当の「置け」指示も兼ねる(下記) |
 | `/catchrobo/arm/status` | `sharmech_msgs/MotionStatus` | `motion_generator_node` の状態。`last_result` の変化でゴール到達/却下を検知する |
 | `/catchrobo/game/toggle_manual_control` | `std_msgs/Empty` | `joy_teleop_node` が DualSense の4ボタン同時押しを検知して publish。**どの状態からでもトグルできる** (下記「自由操作」節) |
+| `/catchrobo/game/reset` | `std_msgs/Empty` | 状態のリセット要求(VRメニューの「ステートリセット」)。**どの状態からでも** `kInit` へ入り、`init_pose` へのゴールを1本出す。到達したら `kWaitingForPick` へ復帰する(下記「状態のリセット」) |
 | `/catchrobo/debug/change_state` | `std_msgs/String` | デバッグ専用。状態名 (`"APPROACHING"` 等) を受けて `forceState()` で強制的にその状態へ飛ばす。ゴール・グリッパ・クランプは一切 publish しない (その状態の見た目だけを確認したいとき用)。未知の状態名は無視して警告ログを出す |
 
 `pick_request` の型を `PoseStamped` にしたのは、VR は既に `/catchrobo/field/cylinders`
@@ -81,16 +82,20 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 | `slot_x_blue` / `slot_y_blue` / `slot_z_blue` | 2026-08-30確定 (X/Yのみ) | 青フィールドのスロット座標。`field`がロボット自身のベース座標系であることと「赤の線対称」という前提から、redと同じローカル数値になっている(下記) |
 | `placement_order` | `[0..23]` (箱単位で埋める順) | 配置する順番のスロットID列。「ちょうど6個」ボーナスを狙うなら箱単位が既定として妥当 |
 | `slot_clamp_margin_m` | 0.03 | ORIENTING〜RETRACTING中の作業領域クランプの片側マージン [m] |
-| `transport_clearance_z` | 0.20 | TRANSPORTING中に上げる高さ [m] |
+| `approach_clearance_z` | 0.20 | APPROACHING (空のグリッパ) で水平移動する高さ [m]。**`retract_clearance_z` と同じ値にしておくこと** (揃っていれば退避高さのまま接近でき、接近が完全な水平移動になる) |
+| `transport_clearance_z` | 0.20 | TRANSPORT_LIFT / TRANSPORTING (缶を保持) の高さ [m] |
 | `retract_clearance_z` | 0.20 | 設置後に上げる高さ [m]。箱に当たらない値にすること |
 | `grasp_dwell_sec` | 0.3 | GRASPING状態でグリッパを閉じてから待つ時間 [s] (グリッパの実フィードバックが無いための暫定措置。下記) |
 | `orient_dwell_sec` | 0.5 | ORIENTING状態でワークを縦にし切るまで待つ時間 [s]。**ピッチ機構の速度が未実測なので0.5は仮値**。短すぎると缶が斜めのまま箱へ降下する (下記「縦にするタイミング」) |
 | `state_publish_rate` | 10.0 | `/catchrobo/game/state` の配信周期 [Hz] |
+| `init_pose` | `[0.0, 0.15, 0.15, 0.0, 0.0]` | `/catchrobo/game/reset` で戻る初期位置 `[x, y, z, pitch, yaw]` (m / rad)。**`joy_teleop_node` の `home_pose` と同じ仮値。実機の初期位置が決まったら両方差し替えること (TODO)**。要素数が5でなければ起動時に落とす |
 | `field_origin_offset_x_m` / `_y_m` | 0.0 / 0.0 | 本番設置での原点ズレ補正 [m]。読み込んだスロット座標全体をこの分だけ平行移動する。`motion_generator_node` と同じ値を使う想定 |
 
-**赤フィールドのスロット座標は箱の外形(255×510mm×4箱)までは実測確定しているが、
-箱内の6スロットそれぞれの正確な位置までは実測していない。** 現在の値は箱の外形を
-均等に3×2分割した計算値(詳細は `field_dimensions.md`)。実際のスロット配置が
+**赤フィールドのスロット座標は箱の外形(外形148×265×高150mm、内寸138×255×深145mm。
+フィールドCAD実測)までは確定しているが、箱内の6スロットそれぞれの正確な位置までは
+実測していない。** 現在の値は箱の内寸を均等に2(X)×3(Y)分割した計算値
+(詳細は `field_dimensions.md`)。なお**箱の位置自体はルール上 選手が自由に調整してよい**
+ので、本番の並べ方を変えたら `config.yaml` も変えること。実際のスロット配置が
 分かり次第、この配列を差し替えること。
 
 ### なぜ `field_color` の launch 引数を必須にするか
@@ -112,8 +117,10 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 stateDiagram-v2
   [*] --> WAITING_FOR_PICK
   WAITING_FOR_PICK --> APPROACHING: pick_request 受信
-  APPROACHING --> GRASPING: ゴール到達
-  GRASPING --> TRANSPORTING: grasp dwell 経過 (既定0.3s) かつ box_count のキューあり
+  APPROACHING --> APPROACH_DESCEND: ゴール到達 (ワーク上空)
+  APPROACH_DESCEND --> GRASPING: ゴール到達 (垂直降下の完了)
+  GRASPING --> TRANSPORT_LIFT: grasp dwell 経過 (既定0.3s) かつ box_count のキューあり
+  TRANSPORT_LIFT --> TRANSPORTING: ゴール到達 (垂直上昇の完了)
   TRANSPORTING --> ORIENTING: ゴール到達 (スロット上空)
   ORIENTING --> PLACING: orient dwell 経過 (既定0.5s)
   PLACING --> RETRACTING: ゴール到達
@@ -121,27 +128,35 @@ stateDiagram-v2
   RETRACTING --> COMPLETE: 24箇所すべて完了
   WAITING_FOR_PICK --> MANUAL_CONTROL: 4ボタン同時押し
   MANUAL_CONTROL --> WAITING_FOR_PICK: 4ボタン再押し
+  WAITING_FOR_PICK --> INIT: reset 受信
+  INIT --> WAITING_FOR_PICK: ゴール到達 (初期位置)
 ```
 
-**簡略化の注記:** `MANUAL_CONTROL` は図では `WAITING_FOR_PICK` からのみ描いているが、
-実際は `APPROACHING`/`GRASPING`/`TRANSPORTING`/`PLACING`/`RETRACTING`/`COMPLETE` を含む
-**どの状態からでも**入れ、トグルし直すと退避していたその状態へ戻る (`GRASPING` 中に
-入った場合は dwell タイマーも入れ直す)。全状態からの矢印を描くと読みにくくなるため、
-代表として1本にまとめている。正確な条件は次の表を参照。
+**簡略化の注記:** `MANUAL_CONTROL` と `INIT` は図では `WAITING_FOR_PICK` からのみ
+描いているが、実際は `APPROACHING`/`GRASPING`/`TRANSPORTING`/`PLACING`/`RETRACTING`/
+`COMPLETE` を含む**どの状態からでも**入れる。`MANUAL_CONTROL` はトグルし直すと
+退避していたその状態へ戻る (`GRASPING` 中に入った場合は dwell タイマーも入れ直す)。
+`INIT` は初期位置へ戻ってから `WAITING_FOR_PICK` に復帰する (下記「状態のリセット」節)。
+全状態からの矢印を描くと読みにくくなるため、代表として1本にまとめている。
+正確な条件は次の表を参照。
 
 | # | 遷移 | 条件 | 備考 |
 |---|---|---|---|
 | 1 | `kWaitingForPick` → `kApproaching` | `pick_request` (PoseStamped) 受信 | 他の状態で受信しても無視 |
-| 2 | `kApproaching` → `kGrasping` | `arm/status` の `last_result = SUCCEEDED` | グリッパ close を同時発行 |
-| 3 | `kGrasping` → `kTransporting` | 経過時間 ≥ `grasp_dwell_sec` (既定0.3s) **かつ** `box_count` のキューが空でない | grasp成功の実フィードバックは無い (下記「grasp判定が時間待ちである理由」)。キューが空の間は掴んだ位置で待つ |
+| 2 | `kApproaching` → `kApproachDescend` | `arm/status` の `last_result = SUCCEEDED` (ワーク上空に到達) | ここではまだ掴まない。真下へ降ろすゴールを発行する |
+| 2b | `kApproachDescend` → `kGrasping` | `last_result = SUCCEEDED` (降下完了) | グリッパ close を同時発行 |
+| 3 | `kGrasping` → `kTransportLift` | 経過時間 ≥ `grasp_dwell_sec` (既定0.3s) **かつ** `box_count` のキューが空でない | grasp成功の実フィードバックは無い (下記「grasp判定が時間待ちである理由」)。キューが空の間は掴んだ位置で待つ |
+| 3b | `kTransportLift` → `kTransporting` | `last_result = SUCCEEDED` (上昇完了) | 掴んだ場所の真上まで上がってから、水平移動に入る |
 | 4 | `kTransporting` → `kOrienting` | `last_result = SUCCEEDED` (スロット上空に到達) | 「置け」の指示は `box_count` が既に兼ねている (下記「box_count とスロットのキュー」)。`orient_vertical=true` とクランプ絞りをここで発行 |
 | 5 | `kOrienting` → `kPlacing` | 経過時間 ≥ `orient_dwell_sec` (既定0.5s) | ピッチ機構の実フィードバックは無い (下記「縦にするタイミング」) |
 | 6 | `kPlacing` → `kRetracting` | `last_result = SUCCEEDED` | グリッパ open・クランプ解除を同時発行 |
 | 7 | `kRetracting` → `kWaitingForPick` | `last_result = SUCCEEDED` かつ 未処理のスロットが残っている | 次のスロットへ進む |
 | 8 | `kRetracting` → `kComplete` | `last_result = SUCCEEDED` かつ `placement_order` を使い切った | 全24箇所完了 |
-| 9 | `kApproaching`/`kGrasping`/`kTransporting`/`kOrienting`/`kPlacing`/`kRetracting` → `kWaitingForPick` | `last_result = REJECTED`/`ABORTED` | 安全側フォールバック。`kWaitingForPick`/`kComplete`/`kManualControl` 中は対象外。グリッパを開き直す処理・ピッチを横へ戻す処理は無い (「既知の未対応」参照) |
+| 9 | `kApproaching`/`kApproachDescend`/`kGrasping`/`kTransportLift`/`kTransporting`/`kOrienting`/`kPlacing`/`kRetracting`/`kInit` → `kWaitingForPick` | `last_result = REJECTED`/`ABORTED` | 安全側フォールバック。`kWaitingForPick`/`kComplete`/`kManualControl` 中は対象外。グリッパを開き直す処理・ピッチを横へ戻す処理は無い (「既知の未対応」参照) |
 | 10 | 任意の状態 ⇄ `kManualControl` | `/catchrobo/game/toggle_manual_control` | `kComplete` からも可。復帰時は退避先の状態へ。クランプは必ずデフォルトへ |
 | 11 | 任意の状態 → 任意の状態 (デバッグ専用) | `/catchrobo/debug/change_state` | ゴール/グリッパ/クランプは一切publishしない。未知の状態名は無視+警告 |
+| 12 | 任意の状態 → `kInit` | `/catchrobo/game/reset` | `kManualControl`/`kComplete` からも可。`init_pose` へのゴール1本 + グリッパ開 + 縦解除 + クランプ解除を同時発行。**配置の進み具合(`box_count` のキュー)は消さない** |
+| 13 | `kInit` → `kWaitingForPick` | `last_result = SUCCEEDED` | 初期位置に着いたら通常どおり `pick_request` を受けられる。却下・中断は #9 と同じ扱い |
 
 **状態遷移の条件が変わったら、上の図と表を書き直すこと。** 正本は
 [`game_state_machine.hpp`](../include/sharmech_core/utility/game_state_machine.hpp) と
@@ -150,14 +165,17 @@ stateDiagram-v2
 | 状態 | 動作 |
 |---|---|
 | `kWaitingForPick` | 次に運ぶワークの選択待ち。`pick_request` を受理する |
-| `kApproaching` | グリッパを開いたまま、選択されたワークの姿勢へ直線1本で接近中 |
+| `kApproaching` | グリッパを開いたまま、選択されたワークの**真上**まで `approach_clearance_z` の高さで水平移動中 |
+| `kApproachDescend` | ワークの真上から**垂直に降下**して掴む位置へ着ける |
 | `kGrasping` | 到達直後にグリッパを閉じ、`grasp_dwell_sec` だけ待つ(下記「grasp判定が時間待ちである理由」)。**`box_count` のキューが空ならここで宛先の指示待ちになる** |
-| `kTransporting` | キュー先頭のスロットのxy・`transport_clearance_z` の高さまで運搬中。到達したら `kOrienting` へ |
+| `kTransportLift` | 掴んだ位置で `transport_clearance_z` まで**垂直に上昇**する |
+| `kTransporting` | 高さを保ったまま、キュー先頭のスロットの**真上**まで水平移動中。到達したら `kOrienting` へ |
 | `kOrienting` | **スロット上空で静止したまま**、`orient_vertical` を `true` にして横倒しのワークを縦にする。作業領域クランプもここでスロット周辺 (`slot_clamp_margin_m`) に絞る。**ゴールは発行しない** (下記「縦にするタイミング」) |
 | `kPlacing` | スロット姿勢まで直線で降下する。既に縦になっているのでまっすぐ降ろすだけ |
 | `kRetracting` | グリッパを開き、同じ xy で `retract_clearance_z` まで直線で退避。作業領域クランプをデフォルトに戻す。**縦のまま抜く** (横へ戻すのは次の `kApproaching`) |
 | `kComplete` | `placement_order` を使い切った。以降 `pick_request` は無視される(実質的な終了状態)。ただし `box_count` が巻き戻ると `kWaitingForPick` へ復帰する |
 | `kManualControl` | 自動シーケンス停止。**どの状態からでもトグルで入り、再度トグルで元の状態に戻る**(下記「自由操作」節) |
+| `kInit` | `init_pose` へ直線1本で戻っている最中。グリッパは開・縦は解除・作業領域クランプはデフォルト。到達したら `kWaitingForPick` へ(下記「状態のリセット」節) |
 
 **すべての状態遷移のゴールは直線1本のみ。** 経由点を持つ軌道は作らない、という
 `sharmech/README.md` の既存方針をこの自動シーケンスにもそのまま適用している。
@@ -179,7 +197,7 @@ stateDiagram-v2
 
 **box_count 自体は動き出しの契機ではない。** 受信時にやるのは「置きに行くべき
 スロットのキュー」を更新することだけで(キュー長 = `box_count` - 消化済み個数)、
-実際に動くのは `kGrasping` の dwell 経過後、キューが空でないときに `kTransporting`
+実際に動くのは `kGrasping` の dwell 経過後、キューが空でないときに `kTransportLift`
 へ進むところから。そこから `kPlacing` → `kRetracting` までは**ゴール到達だけで
 自動的に進む**(`place_request` に相当する「置け」指示も `box_count` が兼ねる)。
 `kRetracting` の完了でキューを1つ消化する。
@@ -195,19 +213,51 @@ VR 側はフィールドを再設置するとカウントを0に戻す実装(`pl
 0リセットは正常な運用の一部として起きる。`placement_order` の長さを超える値と
 負値はクランプする。`+1` 以外の変化はノード側で警告ログを出す(追従はする)。
 
-**ただし宛先を確定済みのサイクル (`kTransporting` / `kPlacing` / `kRetracting`) は
+**ただし宛先を確定済みのサイクル (`kTransportLift` / `kTransporting` / `kOrienting` /
+`kPlacing` / `kRetracting`) は
 中断しない。** 途中でスロットが差し替わると、既に publish 済みのゴールと退避先の
 xy がずれ、ワークを保持したまま別の箱の上へ動くことになるため。減少がこの3状態中に
 届いた場合は、そのサイクルを最後まで終えてから効く。
 
-### `kTransporting` の目標が「スロットのxy」である理由
+### 斜めに動かない (すべての移動を「垂直 → 水平 → 垂直」に分解する)
 
-`kGrasping` の直後は、まだ掴んだ場所の低い高さのまま。ここでいきなり `kPlacing` の
-スロット姿勢へ直線移動すると、経由点無しの制約上、低い高さのまま横移動する区間が
-生じうる。そこで `kTransporting` の目標を「キュー先頭のスロットの xy、高さは
-`transport_clearance_z`」にすることで、実質的に「持ち上げながら目的地の上空へ運ぶ」
-という1本の直線になる。`kPlacing` はその状態から同じ xy のままスロット姿勢まで
-まっすぐ降下するだけでよい。
+**このノードが出すゴールは、必ず「xyを変えない垂直移動」か「zを変えない水平移動」の
+どちらかになっている。** 斜めの移動は1区間も無い。
+
+| 区間 | 種類 | ゴール |
+|---|---|---|
+| `kApproaching` | 水平 | ワークの xy・`approach_clearance_z` |
+| `kApproachDescend` | 垂直 | ワークの姿勢そのもの (xyはそのまま) |
+| `kTransportLift` | 垂直 | 掴んだ位置の xy・`transport_clearance_z` |
+| `kTransporting` | 水平 | スロットの xy・`transport_clearance_z` |
+| `kPlacing` | 垂直 | スロット姿勢 (xyはそのまま) |
+| `kRetracting` | 垂直 | スロットの xy・`retract_clearance_z` |
+
+分解前は接近と運搬が斜めの1直線で、それぞれ次の問題があった。
+
+- **接近が斜めに降りる**: 退避高さからワークへ一直線に降りるため、降下しながら
+  横移動する区間ができる。ワークは200mmピッチで3行×6列に並んでいるので、
+  **手前のワークを薙ぎ払う**経路になりうる
+- **運搬が斜めに上がる**: 掴んだ直後に低い高さのまま横へ動き出すため、
+  **缶を引きずる**、あるいは隣のワークに引っ掛ける
+
+垂直と水平に分ければ、横移動は必ず `*_clearance_z` の高さで行われるので、
+**その高さが障害物より高いことだけを確認すれば安全が保証できる** (斜め移動だと
+経路上のどこで高さがいくつになるかを個別に検証しなければならない)。
+
+経由点を持つ軌道は作らない、という既存方針は保たれている。**1つの状態が出すゴールは
+依然として直線1本**で、L字は「状態を分けて直線を積み重ねる」ことで作っている
+(`sharmech/README.md`「経由点についての注意」参照)。
+
+**`approach_clearance_z` は `retract_clearance_z` と同じ値にしておくこと。**
+揃っていれば `kRetracting` の到達高さのまま `kApproaching` に入れるので、接近が
+完全な水平移動になる。揃っていないと、その差分だけ斜めになる (次のサイクルの
+接近開始時に高さを合わせ直す状態は設けていない)。
+
+**既知の限界**: 起動直後や却下・中断からの復帰では、アームがどの高さに居るか
+ステートマシンが知らない (現在位置を購読していない)。この場合の最初の
+`kApproaching` は「今いる高さ → `approach_clearance_z`」の斜め移動になる。
+通常のサイクル中は `kRetracting` が必ず退避高さで終わるため発生しない。
 
 ### 縦にするタイミング (`kOrienting` を独立した状態にした理由)
 
@@ -217,7 +267,7 @@ xy がずれ、ワークを保持したまま別の箱の上へ動くことに�
 
 **以前は `kPlacing` に入る瞬間に `orient_vertical = true` を出していたが、これは
 降下開始と回転開始が完全に同時になるため、回転が終わる前に缶が箱へ入る。**
-箱は 255×510mm に6スロットと狭く、斜めのまま突っ込めばほぼ確実に干渉する
+箱は内寸138×255mm・深さ145mmに6スロットと狭く、斜めのまま突っ込めばほぼ確実に干渉する
 (2026-09-05 に判明し、`kOrienting` を新設して解消)。
 
 タイミングの候補と判定:
@@ -274,6 +324,34 @@ Z方向の寸法が実測できたら、`kTransporting` 中に回して dwell �
 元の状態 (`kApproaching` 等) に戻ったとき、自由操作に入る前の時点でステートマシンが
 把握していたスロット割付のまま自動シーケンスが再開される。これは既知の制限であり、
 VR復旧後に不整合が疑われる場合は運用側で判断すること。
+
+## 状態のリセット (`INIT`)
+
+**`/catchrobo/game/reset` (`std_msgs/Empty`) を受けると、どの状態からでも `kInit` に
+入り、`init_pose` へ直線1本で戻る。** 到達 (`last_result = SUCCEEDED`) したら
+`kWaitingForPick` へ復帰し、そのまま次の `pick_request` を受けられる。
+送るのは VR クライアント (`catchrobo_webxr_controller`) の操作メニューにある
+「ステートリセット」ボタン。
+
+`kInit` に入るとき、状態と一緒に次を同時発行する。**手順が途中で崩れたときに、
+アームを既知の姿勢へ戻して安全に仕切り直す**ためのもの。
+
+| 同時発行するもの | 値 | 理由 |
+|---|---|---|
+| `target_pose` | `init_pose` | 初期位置へ戻る唯一のゴール |
+| `gripper` | `false` (開) | ワークを掴んだままリセットされると、その後どこで落ちるか分からない |
+| `orient_vertical` | `false` (横) | 縦のまま広い範囲を動かさない |
+| `workspace_clamp` | `reset = true` | `kOrienting`〜`kRetracting` の絞り込みが残っていると初期位置へ戻れない |
+
+- **`kManualControl` からも入れる。** リセットは VR のボタンなので、押せている時点で
+  VR は生きている (`kManualControl` は「VRが使えないときの脱出ハッチ」)。
+  自由操作から引き出して初期位置へ戻す方が、ボタンが無反応になるより分かりやすい
+- **却下・中断されたときは #9 と同じ扱い**で `kWaitingForPick` へ落ちる。
+  理由はノードが警告ログに出す (作業領域外の `init_pose` を設定していれば毎回これになる)
+- **配置の進み具合 (`order_index_` / `authorized_count_`) は消さない。**
+  「何個目まで置いたか」の正本は VR 側の `box_count` にあり、こちらだけ巻き戻すと、
+  次に届いた `box_count` で既に置いたスロットへもう一度置きに行くことになる。
+  配置をやり直したいときは VR 側で仮想フィールドを置き直す (カウントが0に戻る)
 
 ## grasp 判定が時間待ちである理由
 

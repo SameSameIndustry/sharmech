@@ -36,7 +36,8 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
   // (config.yaml 側にも既定値を置かない。sharmech.launch.xml の field_color 引数を参照)
   const std::string field_color = declare_parameter("field_color", std::string(""));
   if (field_color != "red" && field_color != "blue") {
-    RCLCPP_FATAL(get_logger(),
+    RCLCPP_FATAL(
+      get_logger(),
       "field_color must be \"red\" or \"blue\" (got \"%s\"). "
       "launch引数 field_color:=red|blue で明示してください",
       field_color.c_str());
@@ -60,10 +61,14 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
   }
   config.placement_order = placement_order;
   config.slot_clamp_margin_m = declare_parameter("slot_clamp_margin_m", 0.03);
+  config.approach_clearance_z = declare_parameter("approach_clearance_z", 0.20);
   config.transport_clearance_z = declare_parameter("transport_clearance_z", 0.20);
   config.retract_clearance_z = declare_parameter("retract_clearance_z", 0.20);
   config.grasp_dwell_sec = declare_parameter("grasp_dwell_sec", 0.3);
   config.orient_dwell_sec = declare_parameter("orient_dwell_sec", 0.5);
+  config.init_pose = loadInitPose();
+  config.init_pose.x += origin_offset_x;
+  config.init_pose.y += origin_offset_y;
 
   if (config.placement_order.empty()) {
     RCLCPP_FATAL(get_logger(), "placement_order is empty; check config.yaml");
@@ -71,7 +76,8 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
   }
   for (const int id : config.placement_order) {
     if (id < 0 || static_cast<std::size_t>(id) >= config.slots.size()) {
-      RCLCPP_FATAL(get_logger(),
+      RCLCPP_FATAL(
+        get_logger(),
         "placement_order contains out-of-range slot id: %d (slots.size()=%zu)",
         id, config.slots.size());
       throw std::invalid_argument("placement_order out of range");
@@ -103,6 +109,12 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
     "/catchrobo/game/toggle_manual_control", 10,
     std::bind(&GameStateManagerNode::onToggleManualControl, this, std::placeholders::_1));
 
+  // 状態のリセット要求。VR (メニューのボタン) から届く。
+  // どの状態からでも INIT へ入り、初期位置へ戻してから待機状態に復帰する
+  reset_sub_ = create_subscription<std_msgs::msg::Empty>(
+    "/catchrobo/game/reset", 10,
+    std::bind(&GameStateManagerNode::onResetRequest, this, std::placeholders::_1));
+
   target_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
     "/catchrobo/arm/target_pose", 10);
   gripper_pub_ = create_publisher<std_msgs::msg::Bool>(
@@ -121,7 +133,8 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
     std::chrono::duration_cast<std::chrono::nanoseconds>(period),
     std::bind(&GameStateManagerNode::onTimer, this));
 
-  RCLCPP_INFO(get_logger(),
+  RCLCPP_INFO(
+    get_logger(),
     "game_state_manager_node started (field_color=%s, %zu slots, %zu-step placement_order)",
     field_color.c_str(), config.slots.size(), config.placement_order.size());
 }
@@ -133,7 +146,8 @@ std::vector<CartesianState> GameStateManagerNode::loadSlots(const std::string & 
   const auto slot_z = declare_parameter("slot_z_" + color_suffix, std::vector<double>{});
 
   if (slot_x.empty() || slot_x.size() != slot_y.size() || slot_x.size() != slot_z.size()) {
-    RCLCPP_FATAL(get_logger(),
+    RCLCPP_FATAL(
+      get_logger(),
       "slot_x_%s / slot_y_%s / slot_z_%s must be non-empty and have equal length "
       "(got %zu / %zu / %zu)",
       color_suffix.c_str(), color_suffix.c_str(), color_suffix.c_str(),
@@ -148,6 +162,32 @@ std::vector<CartesianState> GameStateManagerNode::loadSlots(const std::string & 
     slots[i].z = slot_z[i];
   }
   return slots;
+}
+
+// init_pose = [x, y, z, pitch, yaw]。config.yaml で与える (単位は m / rad)。
+// 空なら既定値を使い、要素数が違えば起動時に落とす —— 「リセットしたら
+// 意図しない場所へ動いた」を黙って起こさないため
+CartesianState GameStateManagerNode::loadInitPose()
+{
+  // 既定は joy_teleop_node の home_pose と同じ仮値 (docs/game_state_manager_node.md)。
+  // **実機の初期位置が決まったら config.yaml 側で差し替えること (TODO)**
+  const std::vector<double> kDefaultInitPose{0.0, 0.15, 0.15, 0.0, 0.0};
+  const auto values = declare_parameter("init_pose", kDefaultInitPose);
+
+  if (values.size() != 5) {
+    RCLCPP_FATAL(
+      get_logger(),
+      "init_pose must be [x, y, z, pitch, yaw] (got %zu values)", values.size());
+    throw std::invalid_argument("init_pose must have 5 elements");
+  }
+
+  CartesianState pose;
+  pose.x = values[0];
+  pose.y = values[1];
+  pose.z = values[2];
+  pose.pitch = values[3];
+  pose.yaw = values[4];
+  return pose;
 }
 
 void GameStateManagerNode::onPickRequest(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
@@ -176,10 +216,12 @@ void GameStateManagerNode::onBoxCount(const std_msgs::msg::Int32::SharedPtr msg)
   const int count = msg->data;
   const int capacity = static_cast<int>(machine_->placementCount());
   if (count < 0 || count > capacity) {
-    RCLCPP_WARN(get_logger(),
+    RCLCPP_WARN(
+      get_logger(),
       "box_count %d is out of range [0, %d]; clamped", count, capacity);
   } else if (count != prev_box_count_ + 1) {
-    RCLCPP_WARN(get_logger(),
+    RCLCPP_WARN(
+      get_logger(),
       "box_count changed %d -> %d (expected +1); following the received value as-is",
       prev_box_count_, count);
   }
@@ -203,7 +245,8 @@ void GameStateManagerNode::onArmStatus(const sharmech_msgs::msg::MotionStatus::S
   } else if (msg->last_result == sharmech_msgs::msg::MotionStatus::RESULT_REJECTED ||
     msg->last_result == sharmech_msgs::msg::MotionStatus::RESULT_ABORTED)
   {
-    RCLCPP_WARN(get_logger(),
+    RCLCPP_WARN(
+      get_logger(),
       "Automated goal was not accepted (last_result=%u, %s); returning to WAITING_FOR_PICK",
       msg->last_result, msg->message.c_str());
     machine_->onGoalRejectedOrAborted();
@@ -219,14 +262,16 @@ void GameStateManagerNode::onChangeStateRequest(
 {
   const auto requested = gameStateFromString(msg->data);
   if (!requested) {
-    RCLCPP_WARN(get_logger(),
+    RCLCPP_WARN(
+      get_logger(),
       "Unknown state name for /catchrobo/debug/change_state: '%s'", msg->data.c_str());
     return;
   }
 
   const auto previous = machine_->state();
   machine_->forceState(*requested, now().seconds());
-  RCLCPP_WARN(get_logger(),
+  RCLCPP_WARN(
+    get_logger(),
     "Game state forced by debug topic: %s -> %s (no goal is published)",
     toString(previous).c_str(), toString(*requested).c_str());
   publishState();
@@ -239,9 +284,27 @@ void GameStateManagerNode::onToggleManualControl(const std_msgs::msg::Empty::Sha
 {
   const auto previous = machine_->state();
   machine_->toggleManualControl(now().seconds());
-  RCLCPP_WARN(get_logger(),
+  RCLCPP_WARN(
+    get_logger(),
     "Manual control toggled: %s -> %s",
     toString(previous).c_str(), toString(machine_->state()).c_str());
+  publishPendingOutputs();
+  publishState();
+}
+
+// 状態のリセット要求 (/catchrobo/game/reset)。どの状態からでも INIT へ入り、
+// 初期位置へのゴールを1本出す。到達したら WAITING_FOR_PICK へ戻る。
+// **配置の進み具合 (box_count のキュー) は消さない** ——
+// 正本は VR 側の通算カウントなので、こちらだけ巻き戻すと食い違う
+// (GameStateMachine::requestInit() のコメント参照)
+void GameStateManagerNode::onResetRequest(const std_msgs::msg::Empty::SharedPtr)
+{
+  const auto previous = machine_->state();
+  machine_->requestInit();
+  RCLCPP_WARN(
+    get_logger(),
+    "Game state reset requested: %s -> INIT (moving to init_pose)",
+    toString(previous).c_str());
   publishPendingOutputs();
   publishState();
 }
