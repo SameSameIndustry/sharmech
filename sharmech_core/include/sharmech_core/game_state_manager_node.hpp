@@ -12,6 +12,7 @@
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <sharmech_msgs/msg/cartesian_command.hpp>
 #include <sharmech_msgs/msg/motion_status.hpp>
 #include <sharmech_msgs/msg/workspace_clamp.hpp>
 
@@ -63,6 +64,10 @@ private:
   // 状態のリセット要求。どの状態からでも INIT へ入り、初期位置へのゴールを1本出す
   // (詳細は GameStateMachine::requestInit() のコメント参照)
   void onResetRequest(const std_msgs::msg::Empty::SharedPtr msg);
+  // 操縦者の確定 (微調整の完了)。ADJUSTING_PICK / ADJUSTING_PLACE でのみ効く
+  void onConfirm(const std_msgs::msg::Empty::SharedPtr msg);
+  // motion_generator の現在の目標姿勢。微調整でジョグした結果を追うために購読する
+  void onCommandCartesian(const sharmech_msgs::msg::CartesianCommand::SharedPtr msg);
   void onTimer();
 
   void publishPendingOutputs();
@@ -78,6 +83,8 @@ private:
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pick_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr box_count_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr confirm_sub_;
+  rclcpp::Subscription<sharmech_msgs::msg::CartesianCommand>::SharedPtr command_cartesian_sub_;
   rclcpp::Subscription<sharmech_msgs::msg::MotionStatus>::SharedPtr status_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_pub_;

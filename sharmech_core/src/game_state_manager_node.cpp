@@ -61,6 +61,7 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
   }
   config.placement_order = placement_order;
   config.slot_clamp_margin_m = declare_parameter("slot_clamp_margin_m", 0.03);
+  config.require_manual_confirm = declare_parameter("require_manual_confirm", true);
   config.approach_clearance_z = declare_parameter("approach_clearance_z", 0.20);
   config.transport_clearance_z = declare_parameter("transport_clearance_z", 0.20);
   config.retract_clearance_z = declare_parameter("retract_clearance_z", 0.20);
@@ -105,6 +106,18 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
 
   // VRが使えない場合の脱出ハッチ。joy_teleop_node がDualSenseの特定ボタン
   // 同時押し(L1+R1+L3+R3)を検知して publish する
+  // 微調整の確定。PS4の確定ボタン (joy_teleop_node) と VR のサムズアップが
+  // どちらもここへ publish する契約
+  confirm_sub_ = create_subscription<std_msgs::msg::Empty>(
+    "/catchrobo/game/confirm", 10,
+    std::bind(&GameStateManagerNode::onConfirm, this, std::placeholders::_1));
+
+  // 微調整で操縦者がジョグした結果を追うため、現在の目標姿勢を購読する。
+  // 100Hz だが姿勢を1つ保持するだけなので負荷は無視できる
+  command_cartesian_sub_ = create_subscription<sharmech_msgs::msg::CartesianCommand>(
+    "/catchrobo/command/cartesian", 10,
+    std::bind(&GameStateManagerNode::onCommandCartesian, this, std::placeholders::_1));
+
   toggle_manual_control_sub_ = create_subscription<std_msgs::msg::Empty>(
     "/catchrobo/game/toggle_manual_control", 10,
     std::bind(&GameStateManagerNode::onToggleManualControl, this, std::placeholders::_1));
@@ -307,6 +320,36 @@ void GameStateManagerNode::onResetRequest(const std_msgs::msg::Empty::SharedPtr)
     toString(previous).c_str());
   publishPendingOutputs();
   publishState();
+}
+
+// 微調整の確定。ADJUSTING_PICK / ADJUSTING_PLACE 以外では何も起きない
+void GameStateManagerNode::onConfirm(const std_msgs::msg::Empty::SharedPtr)
+{
+  const auto previous = machine_->state();
+  machine_->onConfirm(now().seconds());
+  if (machine_->state() != previous) {
+    RCLCPP_INFO(
+      get_logger(), "Confirmed by operator: %s -> %s",
+      toString(previous).c_str(), toString(machine_->state()).c_str());
+  } else {
+    RCLCPP_DEBUG(get_logger(), "Confirm ignored (state=%s)", toString(previous).c_str());
+  }
+  publishPendingOutputs();
+  publishState();
+}
+
+// 現在の目標姿勢を控えるだけ (publish はしない)。微調整後の垂直移動の起点に使う
+void GameStateManagerNode::onCommandCartesian(
+  const sharmech_msgs::msg::CartesianCommand::SharedPtr msg)
+{
+  const auto pitch_yaw = OrientationUtils::toPitchYaw(msg->pose.orientation);
+  CartesianState pose;
+  pose.x = msg->pose.position.x;
+  pose.y = msg->pose.position.y;
+  pose.z = msg->pose.position.z;
+  pose.pitch = pitch_yaw.pitch;
+  pose.yaw = pitch_yaw.yaw;
+  machine_->onCurrentPose(pose);
 }
 
 void GameStateManagerNode::onTimer()

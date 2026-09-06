@@ -29,6 +29,7 @@ namespace sharmech_core
 // Pub: /catchrobo/arm/gripper     (同上)
 // Pub: /catchrobo/arm/target_pose (ホームボタンの立ち上がりエッジ)
 // Pub: /catchrobo/arm/cancel      (デッドマンの立ち下がり)
+// Pub: /catchrobo/game/confirm (微調整の確定。ADJUSTING_PICK/ADJUSTING_PLACE で効く)
 // Pub: /catchrobo/game/toggle_manual_control (L1+R1+L3+R3 同時押しの立ち上がりエッジ。
 //      VRが使えない場合にDualSenseだけで最低限試合を進められるようにする脱出ハッチ。
 //      game_state_manager_node が受けて GameState::kManualControl をトグルする)
@@ -66,6 +67,7 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr cancel_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr toggle_manual_control_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr confirm_pub_;
   rclcpp::TimerBase::SharedPtr publish_timer_;
 
   // パラメータ
@@ -83,6 +85,9 @@ private:
   int manual_toggle_button_r1_;
   int manual_toggle_button_l_stick_;
   int manual_toggle_button_r_stick_;
+  // 微調整の確定ボタン。既定は R3 (自由操作トグルの4ボタンと同じ番号なので、
+  // 他の3つが押されていないときだけ確定として扱う。下記 onJoy 参照)
+  int confirm_button_;
 
   // 内部状態
   std::optional<sensor_msgs::msg::Joy> last_joy_;

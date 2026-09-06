@@ -62,6 +62,8 @@ enum class GameState : uint8_t
   kInit = 9,
   kApproachDescend = 10,
   kTransportLift = 11,
+  kAdjustingPick = 12,
+  kAdjustingPlace = 13,
 };
 
 inline std::string toString(GameState state)
@@ -70,6 +72,8 @@ inline std::string toString(GameState state)
     case GameState::kWaitingForPick: return "WAITING_FOR_PICK";
     case GameState::kApproaching: return "APPROACHING";
     case GameState::kApproachDescend: return "APPROACH_DESCEND";
+    case GameState::kAdjustingPick: return "ADJUSTING_PICK";
+    case GameState::kAdjustingPlace: return "ADJUSTING_PLACE";
     case GameState::kGrasping: return "GRASPING";
     case GameState::kTransportLift: return "TRANSPORT_LIFT";
     case GameState::kTransporting: return "TRANSPORTING";
@@ -89,7 +93,8 @@ inline std::optional<GameState> gameStateFromString(const std::string & name)
 {
   for (const auto state : {
       GameState::kWaitingForPick, GameState::kApproaching,
-      GameState::kApproachDescend, GameState::kGrasping, GameState::kTransportLift,
+      GameState::kApproachDescend, GameState::kAdjustingPick,
+      GameState::kAdjustingPlace, GameState::kGrasping, GameState::kTransportLift,
       GameState::kTransporting, GameState::kOrienting, GameState::kPlacing,
       GameState::kRetracting, GameState::kComplete, GameState::kManualControl,
       GameState::kInit
@@ -146,6 +151,10 @@ public:
     // MCUがピッチの実状態を返さないため、grasp_dwell_sec と同じく固定時間待ちの
     // 暫定実装 (実フィードバックが使えるようになったら実確認へ置き換える)
     double orient_dwell_sec{0.5};
+    // true なら「掴む直前」「離す直前」で止まり、操縦者の確定 (onConfirm) を待つ。
+    // false なら止まらずそのまま掴む/離す (完全自動)。
+    // 実機で位置合わせの精度が出るまでは true を推奨
+    bool require_manual_confirm{true};
     // /catchrobo/game/reset で戻る初期位置 (kInit のゴール)。
     // 既定は原点。実際の値は game_state_manager_node の init_pose パラメータで与える
     CartesianState init_pose{};
@@ -243,6 +252,24 @@ public:
     }
   }
 
+  // 操縦者の「これでよい」。/catchrobo/game/confirm (PS4の確定ボタン、VRのサムズアップ)
+  // を受けてノードが呼ぶ。**微調整待ちの2状態でのみ有効**で、それ以外では無視する
+  // (自動シーケンス中に誤って押しても何も起きない)
+  void onConfirm(double now_sec)
+  {
+    if (state_ == GameState::kAdjustingPick) {
+      enterGrasping(now_sec);
+    } else if (state_ == GameState::kAdjustingPlace) {
+      enterRetracting();
+    }
+  }
+
+  // motion_generator が 100Hz で出している現在の目標姿勢 (/catchrobo/command/cartesian)。
+  // **微調整で操縦者がジョグした結果を含む**ため、掴んだ/離した実際の位置はこれで分かる。
+  // 直後の垂直移動 (kTransportLift / kRetracting) の xy にこれを使うことで、
+  // 微調整した分だけ横にずれた斜め移動になるのを防ぐ
+  void onCurrentPose(const CartesianState & pose) {current_pose_ = pose;}
+
   // 置きに行くべきスロットがキューに残っているか (box_count が消化済み個数より先行しているか)
   bool hasQueuedSlot() const {return order_index_ < authorized_count_;}
 
@@ -260,16 +287,26 @@ public:
         pending_goal_ = pick_pose_;
         break;
       case GameState::kApproachDescend:
-        state_ = GameState::kGrasping;
-        grasp_start_sec_ = now_sec;
-        pending_gripper_ = true;      // 閉じる
+        // 掴む位置へ着いた。require_manual_confirm なら、ここで止まって
+        // 操縦者が微調整して確定 (onConfirm) するのを待つ
+        if (config_.require_manual_confirm) {
+          state_ = GameState::kAdjustingPick;
+        } else {
+          enterGrasping(now_sec);
+        }
         break;
       case GameState::kTransportLift:
         // 掴んだ位置での上昇が終わった。ここから水平にスロット上空へ運ぶ
         enterTransporting();
         break;
       case GameState::kPlacing:
-        enterRetracting();
+        // スロットへ降ろし切った。require_manual_confirm なら、離す前に
+        // 止まって操縦者の確定を待つ
+        if (config_.require_manual_confirm) {
+          state_ = GameState::kAdjustingPlace;
+        } else {
+          enterRetracting();
+        }
         break;
       case GameState::kTransporting:
         // スロットの上空へ着いた。降下の前に、その場で縦にする時間を取る。
@@ -312,7 +349,7 @@ public:
       // 斜めに持ち上げると缶を引きずるので、まず掴んだ場所で真上に上げる。
       // 横移動 (kTransporting) はそのあと
       state_ = GameState::kTransportLift;
-      CartesianState goal = pick_pose_;
+      CartesianState goal = verticalFrom(pick_pose_);
       goal.z = config_.transport_clearance_z;
       pending_goal_ = goal;
       return;
@@ -414,6 +451,25 @@ public:
   }
 
 private:
+  void enterGrasping(double now_sec)
+  {
+    state_ = GameState::kGrasping;
+    grasp_start_sec_ = now_sec;
+    pending_gripper_ = true;          // 閉じる
+  }
+
+  // 垂直移動の起点にする xy。微調整で操縦者がずらしていれば実際の位置を、
+  // 現在位置が未受信なら nominal (引数) をそのまま使う。
+  // これを使わずに nominal へ戻すと、微調整した分だけ横にずれた斜め移動になる
+  CartesianState verticalFrom(const CartesianState & nominal) const
+  {
+    if (!current_pose_) {return nominal;}
+    CartesianState from = nominal;
+    from.x = current_pose_->x;
+    from.y = current_pose_->y;
+    return from;
+  }
+
   // 掴んだ位置での上昇が終わった状態から呼ぶ。transport_clearance_z を保ったまま
   // スロットの真上まで水平に運ぶ (高さを変えないので箱・設置済みの缶の上を
   // 一定のクリアランスで通過できる)
@@ -472,7 +528,7 @@ private:
   {
     state_ = GameState::kRetracting;
     const auto id = currentSlotId();
-    CartesianState goal = id ? config_.slots.at(*id) : CartesianState{};
+    CartesianState goal = verticalFrom(id ? config_.slots.at(*id) : CartesianState{});
     goal.z = config_.retract_clearance_z;
     pending_goal_ = goal;
     pending_gripper_ = false;         // 置いたので開く
@@ -499,6 +555,8 @@ private:
   CartesianState pick_pose_{};
   double grasp_start_sec_{0.0};
   double orient_start_sec_{0.0};   // kOrienting に入った時刻。orient dwell 判定に使う
+  // motion_generator の現在の目標姿勢 (微調整のジョグを含む)。未受信なら nullopt
+  std::optional<CartesianState> current_pose_;
 
   std::optional<CartesianState> pending_goal_;
   std::optional<bool> pending_gripper_;

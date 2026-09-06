@@ -229,10 +229,12 @@ TEST(MotionGeneratorNode, ZeroTwistDoesNotAbortGoalAndGoalSucceeds)
   EXPECT_TRUE(succeeded);
 }
 
-TEST(MotionGeneratorNode, NonZeroTwistAbortsActiveGoal)
+// twist_priority (旧既定) だけの挙動。既定は goal_priority なので明示する
+TEST(MotionGeneratorNode, NonZeroTwistAbortsActiveGoalInTwistPriorityMode)
 {
   TestHarness harness("aborttwist");
-  auto motion_node = std::make_shared<sharmech_core::MotionGeneratorNode>(fastTestOptions());
+  auto motion_node = std::make_shared<sharmech_core::MotionGeneratorNode>(
+    fastTestOptions({rclcpp::Parameter("goal_mode", "twist_priority")}));
 
   rclcpp::executors::SingleThreadedExecutor executor;
   executor.add_node(harness.node());
@@ -256,6 +258,83 @@ TEST(MotionGeneratorNode, NonZeroTwistAbortsActiveGoal)
     }, 1.0);
   ASSERT_TRUE(aborted);
   EXPECT_NE(harness.latestStatus()->message.find("jog"), std::string::npos);
+}
+
+// goal_priority (既定): ゴール実行中の非ゼロ Twist はゴールを abort しない。
+// WebXR が毎フレーム流す cmd_twist に左手の微小な上下動が混ざっても、
+// game_state_manager_node の接近ゴールが途中で落ちないための回帰
+TEST(MotionGeneratorNode, GoalPriorityIgnoresNonZeroTwistDuringGoal)
+{
+  TestHarness harness("goalpriority_twist");
+  auto motion_node = std::make_shared<sharmech_core::MotionGeneratorNode>(fastTestOptions());
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(harness.node());
+  executor.add_node(motion_node);
+
+  harness.publishTargetPose(0.02, 0.05, 0.0);
+  ASSERT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        auto s = harness.latestStatus();
+        return s && s->mode == sharmech_msgs::msg::MotionStatus::MODE_GOAL;
+      }, 1.0));
+
+  for (int i = 0; i < 10; ++i) {
+    harness.publishTwist(0.05, 0.0, 0.03);
+    executor.spin_some();
+    std::this_thread::sleep_for(10ms);
+  }
+  auto status = harness.latestStatus();
+  ASSERT_TRUE(status.has_value());
+  EXPECT_EQ(status->mode, sharmech_msgs::msg::MotionStatus::MODE_GOAL);
+  EXPECT_NE(status->last_result, sharmech_msgs::msg::MotionStatus::RESULT_ABORTED);
+
+  EXPECT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        auto s = harness.latestStatus();
+        return s && s->last_result == sharmech_msgs::msg::MotionStatus::RESULT_SUCCEEDED;
+      }, 2.0));
+}
+
+// goal_priority (既定): ジョグ中に来たゴールは却下せず、ジョグを止めて受理する。
+// 減速しきる前 (a_max のレート制限で数秒かかる) に pick_request 由来のゴールが
+// 来ても "jog active" で落ちないための回帰
+TEST(MotionGeneratorNode, GoalPriorityGoalPreemptsActiveJog)
+{
+  TestHarness harness("goalpriority_jog");
+  auto motion_node = std::make_shared<sharmech_core::MotionGeneratorNode>(fastTestOptions());
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(harness.node());
+  executor.add_node(motion_node);
+
+  harness.publishTwist(0.05, 0.0, 0.0);
+  ASSERT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        auto s = harness.latestStatus();
+        return s && s->mode == sharmech_msgs::msg::MotionStatus::MODE_JOG;
+      }, 1.0));
+
+  harness.publishTargetPose(0.02, 0.05, 0.0);
+  const bool accepted = waitUntil(
+    executor, [&harness]() {
+      auto s = harness.latestStatus();
+      return s && s->mode == sharmech_msgs::msg::MotionStatus::MODE_GOAL;
+    }, 1.0);
+  ASSERT_TRUE(accepted);
+  EXPECT_NE(
+    harness.latestStatus()->last_result,
+    sharmech_msgs::msg::MotionStatus::RESULT_REJECTED);
+
+  EXPECT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        auto s = harness.latestStatus();
+        return s && s->last_result == sharmech_msgs::msg::MotionStatus::RESULT_SUCCEEDED;
+      }, 2.0));
 }
 
 TEST(MotionGeneratorNode, WatchdogDeceleratesJogToIdleWhenTwistStalls)

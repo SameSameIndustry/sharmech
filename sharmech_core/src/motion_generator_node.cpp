@@ -64,7 +64,7 @@ MotionGeneratorNode::MotionGeneratorNode(const rclcpp::NodeOptions & options)
   workspace_z_min_ = declare_parameter("workspace_z_min", 0.00);
   workspace_z_max_ = declare_parameter("workspace_z_max", 0.30);
   twist_timeout_ = declare_parameter("twist_timeout", 0.4);
-  goal_mode_ = declare_parameter("goal_mode", std::string("twist_priority"));
+  goal_mode_ = declare_parameter("goal_mode", std::string("goal_priority"));
 
   // 本番設置での原点ズレ補正 (sharmech/docs/field_dimensions.md 参照)。
   // 既定0.0。X/Yの作業領域全体をこの分だけ平行移動する (Zは対象外)
@@ -75,7 +75,9 @@ MotionGeneratorNode::MotionGeneratorNode(const rclcpp::NodeOptions & options)
   workspace_y_min_ += origin_offset_y;
   workspace_y_max_ += origin_offset_y;
 
-  if (goal_mode_ != "twist_priority" && goal_mode_ != "exclusive") {
+  if (goal_mode_ != "twist_priority" && goal_mode_ != "exclusive" &&
+    goal_mode_ != "goal_priority")
+  {
     RCLCPP_FATAL(get_logger(), "Unknown goal_mode: %s", goal_mode_.c_str());
     throw std::invalid_argument("unknown goal_mode");
   }
@@ -156,8 +158,16 @@ void MotionGeneratorNode::onTargetPose(
     return;
   }
   if (mode_ == Mode::kJog) {
-    rejectGoal("jog active");
-    return;
+    if (goal_mode_ != "goal_priority") {
+      rejectGoal("jog active");
+      return;
+    }
+    // goal_priority: ゴールがジョグを横取りする。ジョグの速度指令は捨て、
+    // 減速中の速度も 0 にする (残しておくと次にジョグへ戻った瞬間に
+    // 古い速度が積分されて飛ぶ)。始点は現在の指令姿勢 target_ なので段差は出ない
+    commanded_twist_ = CartesianState{};
+    current_twist_ = CartesianState{};
+    RCLCPP_INFO(get_logger(), "Jog preempted by goal");
   }
 
   // 新しいゴールは実行中のゴールを上書きする。
@@ -190,7 +200,9 @@ void MotionGeneratorNode::onCmdTwist(const geometry_msgs::msg::Twist::SharedPtr 
   // 「受信したら abort」と実装するとゴール指定が一切使えなくなる
   const bool active = isActive(twist);
 
-  if (goal_mode_ == "exclusive" && mode_ == Mode::kGoal) {
+  if ((goal_mode_ == "exclusive" || goal_mode_ == "goal_priority") &&
+    mode_ == Mode::kGoal)
+  {
     return;  // ゴール実行中は Twist を無視 (記録もしない)
   }
 

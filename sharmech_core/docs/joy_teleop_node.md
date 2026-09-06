@@ -113,6 +113,7 @@ ROS2 Humble の `joy` (SDL2 ベース) と `joy_linux` でも異なる。
 | `manual_toggle_button_r1` | 5 | R1 |
 | `manual_toggle_button_l_stick` | 11 | L3 (左スティック押し込み) |
 | `manual_toggle_button_r_stick` | 12 | R3 (右スティック押し込み) |
+| `confirm_button` | 12 | R3。微調整の確定 (下記「微調整の確定ボタン」) |
 
 反転は `scale` を負値にすることで表現する(反転フラグは持たない)。
 
@@ -264,3 +265,19 @@ L1 は `deadman_button` と兼用してよい(コンボの一部として押さ�
 | `home_pose` の具体値 | 機構の確定待ち |
 | 軸・ボタン番号の既定値 | 実機の `ros2 topic echo /joy` で要確認 |
 | 速度スケールの切り替え | 低速モード / 高速モードをボタンで切り替えたいか |
+
+## 微調整の確定ボタン
+
+`game_state_manager_node` の微調整待ち (`ADJUSTING_PICK` / `ADJUSTING_PLACE`) を
+抜けるための「これでよい」を `/catchrobo/game/confirm` (`std_msgs/Empty`) へ publish する。
+立ち上がりエッジで1回だけ送る。VR 側はサムズアップで同じトピックへ送る契約
+(詳細は [`game_state_manager_node.md`](game_state_manager_node.md) の「手動微調整」)。
+
+**既定の R3 (12) は自由操作トグルの4ボタン同時押し (L1+R1+L3+R3) にも含まれている。**
+そのため「L1 / R1 / L3 のいずれかが押されている間は確定を出さない」というガードを
+入れてある。コンボを組むつもりで R3 を先に押しても誤確定しないようにするためで、
+逆に言えば **R3 を単独で押したときだけ確定になる**。
+
+コンボと無関係のボタン (例: ○ = 1) を `confirm_button` に割り当てれば、この
+ガードは実質無効になり素直な単独押し判定になる。実機のボタン割り当てが決まったら
+そちらへ移すことを検討してよい。

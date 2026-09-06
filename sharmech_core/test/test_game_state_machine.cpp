@@ -24,6 +24,9 @@ GameStateMachine::Config makeConfig()
   config.retract_clearance_z = 0.20;
   config.grasp_dwell_sec = 0.3;
   config.orient_dwell_sec = 0.5;
+  // 既存のサイクルテストは完全自動モードを対象にする。
+  // 微調整あり (true) の動作は ManualConfirm* のテストで別途検証する
+  config.require_manual_confirm = false;
   config.init_pose = CartesianState{};
   config.init_pose.x = 0.0;
   config.init_pose.y = 0.15;
@@ -514,6 +517,121 @@ TEST(GameStateMachine, OrientingHoldsPositionUntilDwellElapses)
   EXPECT_EQ(machine.state(), GameState::kPlacing);
   ASSERT_TRUE(machine.hasPendingGoal());
   EXPECT_DOUBLE_EQ(machine.consumePendingGoal().z, 0.05);  // スロットのz
+}
+
+// require_manual_confirm=true では、掴む直前と離す直前で止まり、
+// 操縦者の確定 (onConfirm) を待つ
+TEST(GameStateMachine, ManualConfirmStopsBeforeGraspAndBeforeRelease)
+{
+  auto config = makeConfig();
+  config.require_manual_confirm = true;
+  GameStateMachine machine(config);
+
+  // 掴む直前: 降下しきっても掴まず、ADJUSTING_PICK で待つ
+  machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
+  machine.consumePendingGoal();
+  machine.consumePendingGripper();
+  machine.onGoalReached(1.0);            // ワーク上空 → APPROACH_DESCEND
+  machine.consumePendingGoal();
+  machine.onGoalReached(2.0);            // 降下完了
+  ASSERT_EQ(machine.state(), GameState::kAdjustingPick);
+  EXPECT_FALSE(machine.hasPendingGoal());     // 止まったまま (ジョグで動かせる)
+  EXPECT_FALSE(machine.hasPendingGripper());  // まだ閉じない
+
+  // 待っている間はいくら時間が経っても進まない
+  machine.tick(100.0);
+  EXPECT_EQ(machine.state(), GameState::kAdjustingPick);
+
+  // 確定でようやく掴む
+  machine.onConfirm(101.0);
+  ASSERT_EQ(machine.state(), GameState::kGrasping);
+  ASSERT_TRUE(machine.hasPendingGripper());
+  EXPECT_TRUE(machine.consumePendingGripper());   // 閉じる
+
+  // 離す直前: スロットへ降ろしきっても開かず、ADJUSTING_PLACE で待つ
+  machine.onBoxCount(1);
+  machine.tick(101.4);                   // grasp dwell 経過 → TRANSPORT_LIFT
+  machine.consumePendingGoal();
+  machine.onGoalReached(102.0);          // → TRANSPORTING
+  machine.consumePendingGoal();
+  machine.onGoalReached(103.0);          // スロット上空 → ORIENTING
+  machine.consumePendingOrientVertical();
+  machine.consumePendingWorkspaceClamp();
+  machine.tick(103.6);                   // orient dwell 経過 → PLACING
+  machine.consumePendingGoal();
+  machine.onGoalReached(104.0);          // 降下完了
+  ASSERT_EQ(machine.state(), GameState::kAdjustingPlace);
+  EXPECT_FALSE(machine.hasPendingGoal());     // 止まったまま
+  EXPECT_FALSE(machine.hasPendingGripper());  // まだ開かない
+
+  machine.tick(200.0);
+  EXPECT_EQ(machine.state(), GameState::kAdjustingPlace);
+
+  machine.onConfirm(201.0);
+  ASSERT_EQ(machine.state(), GameState::kRetracting);
+  ASSERT_TRUE(machine.hasPendingGripper());
+  EXPECT_FALSE(machine.consumePendingGripper());  // 開く
+}
+
+// 微調整で操縦者がジョグした分は、その後の垂直移動の起点に反映される。
+// nominal (掴む前に指定された位置) へ戻してしまうと、ずらした分だけ
+// 斜めに動くことになるため
+TEST(GameStateMachine, ManualAdjustmentShiftsTheFollowingVerticalMove)
+{
+  auto config = makeConfig();
+  config.require_manual_confirm = true;
+  GameStateMachine machine(config);
+
+  machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
+  machine.consumePendingGoal();
+  machine.onGoalReached(1.0);
+  machine.consumePendingGoal();
+  machine.onGoalReached(2.0);
+  ASSERT_EQ(machine.state(), GameState::kAdjustingPick);
+
+  // 操縦者がジョグで +5mm / -3mm ずらした結果が current_pose として届く
+  machine.onCurrentPose(makePose(0.505, 0.097, 0.0));
+  machine.onConfirm(3.0);
+  machine.onBoxCount(1);
+  machine.tick(3.4);
+
+  ASSERT_EQ(machine.state(), GameState::kTransportLift);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  const auto lift = machine.consumePendingGoal();
+  // nominal の (0.5, 0.1) ではなく、実際に掴んだ位置から真上へ上げる
+  EXPECT_DOUBLE_EQ(lift.x, 0.505);
+  EXPECT_DOUBLE_EQ(lift.y, 0.097);
+  EXPECT_DOUBLE_EQ(lift.z, 0.20);
+}
+
+// 微調整待ちでない状態で確定ボタンを押しても何も起きない
+// (自動シーケンス中の誤操作でサイクルが飛ばないこと)
+TEST(GameStateMachine, ConfirmIsIgnoredOutsideAdjustingStates)
+{
+  auto config = makeConfig();
+  config.require_manual_confirm = true;
+  GameStateMachine machine(config);
+
+  machine.onConfirm(1.0);
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+
+  machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
+  machine.consumePendingGoal();
+  ASSERT_EQ(machine.state(), GameState::kApproaching);
+  machine.onConfirm(2.0);
+  EXPECT_EQ(machine.state(), GameState::kApproaching);   // 移動中は無視
+  EXPECT_FALSE(machine.hasPendingGoal());
+}
+
+// require_manual_confirm=false なら従来どおり止まらずに掴む/離す
+TEST(GameStateMachine, AutomaticModeDoesNotEnterAdjustingStates)
+{
+  auto config = makeConfig();
+  config.require_manual_confirm = false;
+  GameStateMachine machine(config);
+
+  advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
+  EXPECT_EQ(machine.state(), GameState::kGrasping);   // ADJUSTING_PICK を経由しない
 }
 
 // 移動はすべて「垂直 → 水平 → 垂直」のL字に分解されており、斜めに動く区間が

@@ -96,7 +96,14 @@ motion_generator_node:
     workspace_z_min:  0.00   # 作業領域 Z 下限 [m] (未確定。要実測)
     workspace_z_max:  0.30   # 作業領域 Z 上限 [m] (未確定。要実測)
     twist_timeout: 0.4       # ジョグのウォッチドッグ [s]
-    goal_mode: "twist_priority"  # "twist_priority" / "exclusive"
+    # ゴール(target_pose)とジョグ(cmd_twist)の調停。
+    #   goal_priority  … ゴール実行中の cmd_twist は無視し、ジョグ中に来たゴールはジョグを止めて受理する
+    #   twist_priority … ゼロでない cmd_twist がゴールを abort する (旧既定)
+    #   exclusive      … ゴール実行中の cmd_twist は無視するが、ジョグ中のゴールは却下
+    # 2026-09-06: game_state_manager_node の自動シーケンス中に、WebXR が流し続ける
+    # cmd_twist (左手のわずかな上下動など) がゴールを abort して WAITING_FOR_PICK へ
+    # 落ちる事故が出たため goal_priority に変更 (ユーザー判断)。
+    goal_mode: "goal_priority"  # "goal_priority" / "twist_priority" / "exclusive"
     # 本番設置での原点ズレ補正 [m]。ロボット設置エリアの設計中心(=fieldの原点)からの
     # 実際の設置誤差を現場合わせで吸収する。既定0.0 (ズレ無し)。
     # workspace_x/y_min/max全体をこの分だけ平行移動する
@@ -131,6 +138,11 @@ joy_teleop_node:
     manual_toggle_button_r1: 5        # R1
     manual_toggle_button_l_stick: 11  # L3 (左スティック押し込み)
     manual_toggle_button_r_stick: 12  # R3 (右スティック押し込み)
+    # 微調整の確定ボタン (ADJUSTING_PICK / ADJUSTING_PLACE で「これでよい」を送る)。
+    # 既定の R3 は上の自由操作トグルにも含まれるため、L1/R1/L3 のどれかが押されて
+    # いる間は確定を出さない (コンボを組むつもりの押下で誤確定しないため)。
+    # 単独で使えるボタン (例: ○=1) に変えればこの制約は無くなる
+    confirm_button: 12                # R3。VR側はサムズアップで同じトピックへ送る
 
 hardware_bridge_node:
   ros__parameters:
@@ -238,6 +250,14 @@ game_state_manager_node:
     slot_clamp_margin_m: 0.03     # PLACING/RETRACTING中の作業領域クランプの片側マージン [m]
     # 箱の高さはCAD実測で外形150mm (ロボット取り付け面基準で z=0.006〜0.156)。
     # 0.20 なら箱の上端を約44mm越えるので当たらない
+    # true: 「掴む直前」(ADJUSTING_PICK) と「離す直前」(ADJUSTING_PLACE) で必ず止まり、
+    #       操縦者がジョグで微調整してから確定ボタン (/catchrobo/game/confirm) を
+    #       押すまで待つ。止まっている間はゴールが無いのでジョグを入れても
+    #       自動シーケンスは中断されない
+    # false: 止まらずそのまま掴む/離す (完全自動)
+    # 実機で位置合わせの精度が出るまでは true を推奨
+    require_manual_confirm: true
+
     # 移動はすべて「垂直に上げる → 水平に動く → 垂直に降ろす」のL字に分解してある
     # (斜めに動くと、行き掛けは隣のワークを薙ぎ払い、帰りは缶を引きずるため)。
     # 下の2つはその「水平に動く高さ」。**箱の上端より高くすること**

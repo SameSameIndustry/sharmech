@@ -92,7 +92,7 @@ private:
   double workspace_y_min_, workspace_y_max_;
   double workspace_z_min_, workspace_z_max_;
   double twist_timeout_;        // [s] ジョグのウォッチドッグ
-  std::string goal_mode_;       // "twist_priority" / "exclusive"
+  std::string goal_mode_;       // "goal_priority" / "twist_priority" / "exclusive"
 
   // 現在有効な作業領域。通常時は workspace_*_min_/max_ と同じだが、
   // game_state_manager_node が PLACING/RETRACTING 中に一時的に絞ることがある。

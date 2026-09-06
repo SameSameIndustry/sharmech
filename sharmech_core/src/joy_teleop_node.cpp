@@ -33,6 +33,7 @@ JoyTeleopNode::JoyTeleopNode(const rclcpp::NodeOptions & options)
   manual_toggle_button_r1_ = declare_parameter("manual_toggle_button_r1", 5);
   manual_toggle_button_l_stick_ = declare_parameter("manual_toggle_button_l_stick", 11);
   manual_toggle_button_r_stick_ = declare_parameter("manual_toggle_button_r_stick", 12);
+  confirm_button_ = declare_parameter("confirm_button", 12);
 
   if (!home_pose_.empty() && home_pose_.size() != 5) {
     RCLCPP_FATAL(
@@ -57,6 +58,8 @@ JoyTeleopNode::JoyTeleopNode(const rclcpp::NodeOptions & options)
     "/catchrobo/arm/cancel", 10);
   toggle_manual_control_pub_ = create_publisher<std_msgs::msg::Empty>(
     "/catchrobo/game/toggle_manual_control", 10);
+  confirm_pub_ = create_publisher<std_msgs::msg::Empty>(
+    "/catchrobo/game/confirm", 10);
 
   const auto period = std::chrono::duration<double>(1.0 / publish_rate_);
   publish_timer_ = create_wall_timer(
@@ -124,6 +127,20 @@ void JoyTeleopNode::onJoy(const sensor_msgs::msg::Joy::SharedPtr msg)
     RCLCPP_INFO(get_logger(), "Manual control toggle combo detected (L1+R1+L3+R3)");
   }
   manual_toggle_combo_was_active_ = combo_now;
+
+  // 微調整の確定: 確定ボタンの立ち上がりエッジ。
+  // **既定の R3 は自由操作トグルの4ボタンにも含まれている**ため、
+  // 他の3つ (L1/R1/L3) が1つでも押されていたら「コンボの一部」とみなして
+  // 確定を出さない (コンボを組むつもりの押下で誤確定しないようにする)。
+  // 別のボタンに割り当てれば (confirm_button パラメータ) この制約は無くなる
+  const bool combo_partner_pressed =
+    readButton(manual_toggle_button_l1_, *msg) ||
+    readButton(manual_toggle_button_r1_, *msg) ||
+    readButton(manual_toggle_button_l_stick_, *msg);
+  if (pressed_edge(confirm_button_) && !combo_partner_pressed) {
+    confirm_pub_->publish(std_msgs::msg::Empty());
+    RCLCPP_INFO(get_logger(), "Confirm button pressed");
+  }
 
   prev_buttons_.assign(msg->buttons.begin(), msg->buttons.end());
   last_joy_ = *msg;

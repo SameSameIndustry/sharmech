@@ -95,7 +95,7 @@ geometry_msgs/Twist  twist     # 目標速度(並進 + 角速度)
 | `workspace_z_min` / `z_max` | 0.00 / 0.30 | 作業領域 Z [m]。**未確定のまま** (今回の実測は上面図のみでZ情報を含まない) |
 | `field_origin_offset_x_m` / `_y_m` | 0.0 / 0.0 | 本番設置での原点ズレ補正 [m]。上記 workspace_x/y_min/max 全体をこの分だけ平行移動する |
 | `twist_timeout` | 0.4 | ジョグのウォッチドッグ [s] (300〜500ms) |
-| `goal_mode` | `twist_priority` | 調停方式。`twist_priority` / `exclusive` |
+| `goal_mode` | `goal_priority` | ゴールとジョグの調停方式。`goal_priority` / `twist_priority` / `exclusive` (下記「入力の調停」) |
 
 `pos_tolerance` / `rot_tolerance` (実誤差での到達判定) は、MCU フィードバックを使った
 到達判定を導入する時点で追加する。現在の到達判定は経過時間のみ。
@@ -170,15 +170,37 @@ is_active = デッドゾーン処理後の値のいずれかが 0 でない     
 if goal_mode == twist_priority:
     if is_active かつ mode_ == GOAL:  ゴールを abort し、mode_ ← JOG
     if is_active かつ mode_ == IDLE:  mode_ ← JOG
-else:  # exclusive
+else:  # goal_priority / exclusive
     if mode_ == GOAL:  Twist を無視(記録もしない)
+    if is_active かつ mode_ == IDLE:  mode_ ← JOG
 ```
+
+### 入力の調停 (`goal_mode`)
+
+| `goal_mode` | ゴール実行中に非ゼロ Twist | ジョグ中にゴール |
+|---|---|---|
+| `goal_priority` (**既定**) | 無視 (ゴール継続) | **受理** (ジョグを止めてゴールへ。速度指令は捨てる) |
+| `twist_priority` | ゴールを abort してジョグへ | 却下 (`jog active`) |
+| `exclusive` | 無視 (ゴール継続) | 却下 (`jog active`) |
+
+**2026-09-06 に既定を `twist_priority` → `goal_priority` に変えた (ユーザー判断)。**
+`game_state_manager_node` の自動シーケンスは `target_pose` を順に投げて進むが、
+WebXR クライアントは `cmd_twist` を毎フレーム流し続けており、左コントローラーの
+わずかな上下動 (数 cm/s) や手のジェスチャーの誤検出で非ゼロが混ざる。
+`twist_priority` だとそれが接近中のゴールを abort し、`game_state_manager_node` が
+`WAITING_FOR_PICK` へ落ちる事故が実機で出た。ジョグはそもそも
+`MANUAL_CONTROL` (自動シーケンスが止まっている状態) で使うものなので、
+ゴール側を優先しても運用上失うものは無い。
+`goal_priority` でジョグ中のゴールを受理するとき、`commanded_twist_` /
+`current_twist_` を 0 にしてから軌道を作る。残しておくと、ゴール到達後に
+次のジョグへ入った瞬間、減速しきっていない古い速度が積分されて飛ぶ。
+軌道の始点は現在の指令姿勢 `target_` なので位置の段差は出ない。
 
 **`/catchrobo/arm/target_pose` 受信時**
 
 ```
 目標姿勢が作業領域外        → 却下 (last_result_ ← rejected, 理由を status_message_ へ)
-mode_ == JOG (ジョグ動作中) → 却下
+mode_ == JOG (ジョグ動作中) → goal_priority なら受理 (Twist を捨ててゴールへ)、それ以外は却下
 それ以外                    → 受理
   trajectory_ ← 軌道生成(始点 = target_pose_, 終点 = ゴール)
   trajectory_start_time_ ← now
@@ -263,8 +285,8 @@ gripper_state_ ← msg.data     (publish はタイマー内で行う)
 |---|---|
 | Twist が `twist_timeout` の間届かない | 速度指令を 0 とみなし、レート制限に従って減速停止。`mode_` ← `IDLE` |
 | ゴールが作業領域外 | 受理せず reject |
-| ジョグ動作中にゴールが来た | reject |
-| ゴール実行中に**ゼロでない** Twist が来た | ゴールを abort し、ジョグへ移行 (`twist_priority` 時) |
+| ジョグ動作中にゴールが来た | `goal_priority` (既定): ジョグを止めて受理 / それ以外: reject |
+| ゴール実行中に**ゼロでない** Twist が来た | `goal_priority` / `exclusive` (既定): 無視してゴール継続 / `twist_priority`: ゴールを abort し、ジョグへ移行 |
 | ゴール実行中にゼロの Twist が来た | **何もしない。** ゴールは継続する |
 | `/catchrobo/arm/cancel` を受信 | その場で停止、姿勢を保持、`mode_` ← `IDLE`、`last_result` ← `aborted` |
 | `/catchrobo/arm/current_pose` が来ない | 到達判定は元々経過時間で行うので影響なし。状態トピックは publish し続ける |
