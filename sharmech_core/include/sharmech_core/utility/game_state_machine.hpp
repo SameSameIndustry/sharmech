@@ -167,6 +167,25 @@ public:
 
   GameState state() const {return state_;}
 
+  const Config & config() const {return config_;}
+
+  // 実行中の設定差し替え (ros2 param set からの現場合わせ用)。
+  // **状態 (state_ / order_index_ / 保持中のワーク等) は保持したまま設定だけ入れ替える。**
+  // 当日フィールドに合わなかったときに、シーケンスを最初からやり直さずに
+  // スロット座標や高さだけを直せるようにするためのもの。
+  //
+  // 次にゴールを出す状態へ進んだ時点から新しい値が効く (すでに publish 済みの
+  // ゴールは追いかけて書き換えない。動作中に目標が飛ぶのを避けるため)。
+  // placement_order の長さが縮んで order_index_ が範囲外になる場合だけは、
+  // 「全部置き終わった」扱いに丸めて範囲外参照を防ぐ
+  void setConfig(Config config)
+  {
+    config_ = std::move(config);
+    if (order_index_ > config_.placement_order.size()) {
+      order_index_ = config_.placement_order.size();
+    }
+  }
+
   // 現在(または直近)扱っているスロットID。全配置完了後は nullopt
   std::optional<int> currentSlotId() const
   {

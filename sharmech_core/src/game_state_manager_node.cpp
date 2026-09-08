@@ -44,48 +44,20 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
     throw std::invalid_argument("field_color must be 'red' or 'blue'");
   }
 
-  const auto placement_order_i64 =
-    declare_parameter("placement_order", std::vector<int64_t>{});
-  std::vector<int> placement_order(placement_order_i64.begin(), placement_order_i64.end());
+  field_color_ = field_color;
+  declareParameters(field_color);
 
-  // 本番設置での原点ズレ補正 (sharmech/docs/field_dimensions.md 参照)。既定0.0。
-  // motion_generator_node と同じ意味・同じ値を使う想定 (現場合わせで両方に入れる)
-  const double origin_offset_x = declare_parameter("field_origin_offset_x_m", 0.0);
-  const double origin_offset_y = declare_parameter("field_origin_offset_y_m", 0.0);
-
-  GameStateMachine::Config config;
-  config.slots = loadSlots(field_color);
-  for (auto & slot : config.slots) {
-    slot.x += origin_offset_x;
-    slot.y += origin_offset_y;
-  }
-  config.placement_order = placement_order;
-  config.slot_clamp_margin_m = declare_parameter("slot_clamp_margin_m", 0.03);
-  config.require_manual_confirm = declare_parameter("require_manual_confirm", true);
-  config.approach_clearance_z = declare_parameter("approach_clearance_z", 0.20);
-  config.transport_clearance_z = declare_parameter("transport_clearance_z", 0.20);
-  config.retract_clearance_z = declare_parameter("retract_clearance_z", 0.20);
-  config.grasp_dwell_sec = declare_parameter("grasp_dwell_sec", 0.3);
-  config.orient_dwell_sec = declare_parameter("orient_dwell_sec", 0.5);
-  config.init_pose = loadInitPose();
-  config.init_pose.x += origin_offset_x;
-  config.init_pose.y += origin_offset_y;
-
-  if (config.placement_order.empty()) {
-    RCLCPP_FATAL(get_logger(), "placement_order is empty; check config.yaml");
-    throw std::invalid_argument("empty placement_order");
-  }
-  for (const int id : config.placement_order) {
-    if (id < 0 || static_cast<std::size_t>(id) >= config.slots.size()) {
-      RCLCPP_FATAL(
-        get_logger(),
-        "placement_order contains out-of-range slot id: %d (slots.size()=%zu)",
-        id, config.slots.size());
-      throw std::invalid_argument("placement_order out of range");
-    }
-  }
-
+  // 起動時は「上書き無し」で組み立てる。ここで throw する不整合 (placement_order が
+  // 空/範囲外など) は起動を止める。実行中の ros2 param set では throw せず
+  // reason を返して却下する (下記 onSetParameters)
+  GameStateMachine::Config config = buildConfig({});
   machine_ = std::make_unique<GameStateMachine>(config);
+
+  // 実行中のパラメータ変更を即反映する (再起動なしで現場合わせできるようにする)。
+  // Humble には post-set コールバックが無いため、この on-set コールバックの中で
+  // 検証と適用の両方を行う
+  param_callback_handle_ = add_on_set_parameters_callback(
+    std::bind(&GameStateManagerNode::onSetParameters, this, std::placeholders::_1));
 
   pick_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
     "/catchrobo/game/pick_request", 10,
@@ -140,7 +112,7 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
   state_pub_ = create_publisher<std_msgs::msg::String>(
     "/catchrobo/game/state", rclcpp::QoS(1).transient_local());
 
-  const double state_publish_rate = declare_parameter("state_publish_rate", 10.0);
+  const double state_publish_rate = get_parameter("state_publish_rate").as_double();
   const auto period = std::chrono::duration<double>(1.0 / state_publish_rate);
   timer_ = create_wall_timer(
     std::chrono::duration_cast<std::chrono::nanoseconds>(period),
@@ -150,57 +122,271 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
     get_logger(),
     "game_state_manager_node started (field_color=%s, %zu slots, %zu-step placement_order)",
     field_color.c_str(), config.slots.size(), config.placement_order.size());
+  logSlotGeometry(config, {});
 }
 
-std::vector<CartesianState> GameStateManagerNode::loadSlots(const std::string & color_suffix)
-{
-  const auto slot_x = declare_parameter("slot_x_" + color_suffix, std::vector<double>{});
-  const auto slot_y = declare_parameter("slot_y_" + color_suffix, std::vector<double>{});
-  const auto slot_z = declare_parameter("slot_z_" + color_suffix, std::vector<double>{});
-
-  if (slot_x.empty() || slot_x.size() != slot_y.size() || slot_x.size() != slot_z.size()) {
-    RCLCPP_FATAL(
-      get_logger(),
-      "slot_x_%s / slot_y_%s / slot_z_%s must be non-empty and have equal length "
-      "(got %zu / %zu / %zu)",
-      color_suffix.c_str(), color_suffix.c_str(), color_suffix.c_str(),
-      slot_x.size(), slot_y.size(), slot_z.size());
-    throw std::invalid_argument("invalid slot coordinate arrays");
-  }
-
-  std::vector<CartesianState> slots(slot_x.size());
-  for (std::size_t i = 0; i < slot_x.size(); ++i) {
-    slots[i].x = slot_x[i];
-    slots[i].y = slot_y[i];
-    slots[i].z = slot_z[i];
-  }
-  return slots;
-}
 
 // init_pose = [x, y, z, pitch, yaw]。config.yaml で与える (単位は m / rad)。
 // 空なら既定値を使い、要素数が違えば起動時に落とす —— 「リセットしたら
 // 意図しない場所へ動いた」を黙って起こさないため
-CartesianState GameStateManagerNode::loadInitPose()
+// パラメータの宣言。値の取得は buildConfig() 側で行い、ここでは既定値だけを与える
+// (実行中の ros2 param set で組み直せるよう、宣言と読み取りを分けてある)
+void GameStateManagerNode::declareParameters(const std::string & color_suffix)
 {
+  declare_parameter("placement_order", std::vector<int64_t>{});
+  declare_parameter("state_publish_rate", 10.0);
+
+  // --- 本番設置での原点ズレ補正 (フィールド全体を平行移動する) ---
+  // sharmech/docs/field_dimensions.md 参照。motion_generator_node と同じ意味・同じ値を
+  // 使う想定 (現場合わせで両方に入れる)。Z は箱の高さ基準ごと持ち上げ下げしたいとき用
+  declare_parameter("field_origin_offset_x_m", 0.0);
+  declare_parameter("field_origin_offset_y_m", 0.0);
+  declare_parameter("field_origin_offset_z_m", 0.0);
+
+  // --- 箱の位置 (箱を動かしたらここを変える) ---
+  // 各箱の中心X [m]。長さがそのまま箱の数になる
+  declare_parameter("box_center_x_" + color_suffix, std::vector<double>{});
+  // 箱の中心Y [m] (全箱共通)
+  declare_parameter("box_center_y_" + color_suffix, 0.0);
+
+  // --- 箱の内寸 (はみ出し警告に使うだけで、座標計算には使わない) ---
+  declare_parameter("box_inner_size_x_m", 0.138);
+  declare_parameter("box_inner_size_y_m", 0.255);
+
+  // --- 箱内のスロット格子 ---
+  declare_parameter("slot_cols_x", 2);   // X方向(箱の短辺)の列数
+  declare_parameter("slot_rows_y", 3);   // Y方向(箱の長辺)の行数
+  declare_parameter("cylinder_diameter_m", 0.071);
+  // ★当日ここを調整する。隣り合う缶の「隙間」[m] (中心間距離 = 直径 + 隙間)。
+  // 缶同士が当たるなら増やす。箱からはみ出すなら減らす (負値も許す = 干渉している状態)
+  declare_parameter("slot_gap_x_m", -0.002);
+  declare_parameter("slot_gap_y_m", 0.014);
+
+  // --- 高さ (基準面からの相対で与える) ---
+  // 当日実測するのはこの box_top_z_m 1個だけで済むようにしてある
+  declare_parameter("box_top_z_m", 0.156);
+  declare_parameter("slot_release_below_box_top_m", 0.106);
+  declare_parameter("approach_clearance_above_box_top_m", 0.044);
+  declare_parameter("transport_clearance_above_box_top_m", 0.044);
+  declare_parameter("retract_clearance_above_box_top_m", 0.044);
+
+  declare_parameter("slot_clamp_margin_m", 0.03);
+  declare_parameter("require_manual_confirm", true);
+  declare_parameter("grasp_dwell_sec", 0.3);
+  declare_parameter("orient_dwell_sec", 0.5);
+
   // 既定は joy_teleop_node の home_pose と同じ仮値 (docs/game_state_manager_node.md)。
   // **実機の初期位置が決まったら config.yaml 側で差し替えること (TODO)**
-  const std::vector<double> kDefaultInitPose{0.0, 0.15, 0.15, 0.0, 0.0};
-  const auto values = declare_parameter("init_pose", kDefaultInitPose);
+  declare_parameter("init_pose", std::vector<double>{0.0, 0.15, 0.15, 0.0, 0.0});
+}
 
-  if (values.size() != 5) {
-    RCLCPP_FATAL(
-      get_logger(),
-      "init_pose must be [x, y, z, pitch, yaw] (got %zu values)", values.size());
-    throw std::invalid_argument("init_pose must have 5 elements");
+// overrides に載っているものはその値を、載っていないものは現在値を使って設定を組む。
+// overrides は ros2 param set の「これから設定される値」(Humble には post-set
+// コールバックが無いため、適用前の値をここで先取りして組み立てる)
+GameStateMachine::Config GameStateManagerNode::buildConfig(
+  const std::vector<rclcpp::Parameter> & overrides) const
+{
+  const auto find = [&overrides](const std::string & name) -> const rclcpp::Parameter * {
+      for (const auto & p : overrides) {
+        if (p.get_name() == name) {return &p;}
+      }
+      return nullptr;
+    };
+  const auto dbl = [&](const std::string & name) {
+      const auto * o = find(name);
+      return o ? o->as_double() : get_parameter(name).as_double();
+    };
+  const auto integer = [&](const std::string & name) {
+      const auto * o = find(name);
+      return o ? o->as_int() : get_parameter(name).as_int();
+    };
+  const auto boolean = [&](const std::string & name) {
+      const auto * o = find(name);
+      return o ? o->as_bool() : get_parameter(name).as_bool();
+    };
+  const auto dbl_array = [&](const std::string & name) {
+      const auto * o = find(name);
+      return o ? o->as_double_array() : get_parameter(name).as_double_array();
+    };
+  const auto int_array = [&](const std::string & name) {
+      const auto * o = find(name);
+      return o ? o->as_integer_array() : get_parameter(name).as_integer_array();
+    };
+
+  const double offset_x = dbl("field_origin_offset_x_m");
+  const double offset_y = dbl("field_origin_offset_y_m");
+  const double offset_z = dbl("field_origin_offset_z_m");
+
+  // 高さはすべて box_top_z_m (箱の上端) からの相対で決める。
+  // 当日は box_top_z_m だけ実測して入れれば、離す高さも各退避高さもまとめて追従する
+  const double box_top_z = dbl("box_top_z_m");
+  const double slot_z = box_top_z - dbl("slot_release_below_box_top_m") + offset_z;
+
+  GameStateMachine::Config config;
+  config.slots = generateSlots(
+    dbl_array("box_center_x_" + field_color_),
+    dbl("box_center_y_" + field_color_),
+    static_cast<int>(integer("slot_cols_x")),
+    static_cast<int>(integer("slot_rows_y")),
+    dbl("cylinder_diameter_m") + dbl("slot_gap_x_m"),
+    dbl("cylinder_diameter_m") + dbl("slot_gap_y_m"),
+    slot_z);
+  for (auto & slot : config.slots) {
+    slot.x += offset_x;
+    slot.y += offset_y;
   }
 
-  CartesianState pose;
-  pose.x = values[0];
-  pose.y = values[1];
-  pose.z = values[2];
-  pose.pitch = values[3];
-  pose.yaw = values[4];
-  return pose;
+  const auto order_i64 = int_array("placement_order");
+  config.placement_order.assign(order_i64.begin(), order_i64.end());
+
+  config.slot_clamp_margin_m = dbl("slot_clamp_margin_m");
+  config.require_manual_confirm = boolean("require_manual_confirm");
+  config.approach_clearance_z =
+    box_top_z + dbl("approach_clearance_above_box_top_m") + offset_z;
+  config.transport_clearance_z =
+    box_top_z + dbl("transport_clearance_above_box_top_m") + offset_z;
+  config.retract_clearance_z =
+    box_top_z + dbl("retract_clearance_above_box_top_m") + offset_z;
+  config.grasp_dwell_sec = dbl("grasp_dwell_sec");
+  config.orient_dwell_sec = dbl("orient_dwell_sec");
+
+  const auto init_values = dbl_array("init_pose");
+  if (init_values.size() != 5) {
+    throw std::invalid_argument(
+            "init_pose must be [x, y, z, pitch, yaw] (got " +
+            std::to_string(init_values.size()) + " values)");
+  }
+  config.init_pose.x = init_values[0] + offset_x;
+  config.init_pose.y = init_values[1] + offset_y;
+  config.init_pose.z = init_values[2] + offset_z;
+  config.init_pose.pitch = init_values[3];
+  config.init_pose.yaw = init_values[4];
+
+  if (config.slots.empty()) {
+    throw std::invalid_argument(
+            "no slots generated; box_center_x_" + field_color_ +
+            " が空か、slot_cols_x / slot_rows_y が 0 以下です");
+  }
+  if (config.placement_order.empty()) {
+    throw std::invalid_argument("placement_order is empty; check config.yaml");
+  }
+  for (const int id : config.placement_order) {
+    if (id < 0 || static_cast<std::size_t>(id) >= config.slots.size()) {
+      throw std::invalid_argument(
+              "placement_order contains out-of-range slot id: " + std::to_string(id) +
+              " (slots.size()=" + std::to_string(config.slots.size()) + ")");
+    }
+  }
+  return config;
+}
+
+// 箱の中心と格子ピッチからスロット座標を作る。
+// スロットIDの順番は「箱ごとに、X列を外側・Y行を内側」で 0 から通し番号
+// (箱0の(x0,y0),(x0,y1),(x0,y2),(x1,y0)... → 箱1の…)。
+// placement_order はこのIDを並べたもの
+std::vector<CartesianState> GameStateManagerNode::generateSlots(
+  const std::vector<double> & box_center_x, double box_center_y,
+  int cols_x, int rows_y, double pitch_x, double pitch_y, double slot_z)
+{
+  std::vector<CartesianState> slots;
+  if (cols_x <= 0 || rows_y <= 0) {return slots;}
+  slots.reserve(box_center_x.size() * static_cast<std::size_t>(cols_x * rows_y));
+
+  for (const double cx : box_center_x) {
+    for (int ix = 0; ix < cols_x; ++ix) {
+      // 格子は箱の中心に対して左右(上下)対称に置く
+      const double dx = (static_cast<double>(ix) - (cols_x - 1) / 2.0) * pitch_x;
+      for (int iy = 0; iy < rows_y; ++iy) {
+        const double dy = (static_cast<double>(iy) - (rows_y - 1) / 2.0) * pitch_y;
+        CartesianState slot;
+        slot.x = cx + dx;
+        slot.y = box_center_y + dy;
+        slot.z = slot_z;
+        slots.push_back(slot);
+      }
+    }
+  }
+  return slots;
+}
+
+// 生成したスロットが箱に収まっているかを起動時とパラメータ変更時に知らせる。
+// 当日「缶が入らない」に現場で気づけるようにするための警告
+void GameStateManagerNode::logSlotGeometry(
+  const GameStateMachine::Config & config,
+  const std::vector<rclcpp::Parameter> & overrides) const
+{
+  // buildConfig と同じく「これから設定される値」を優先して見る
+  // (Humble には post-set コールバックが無く、適用前に呼ばれるため)
+  const auto dbl = [&](const std::string & name) {
+      for (const auto & p : overrides) {
+        if (p.get_name() == name) {return p.as_double();}
+      }
+      return get_parameter(name).as_double();
+    };
+  const auto integer = [&](const std::string & name) {
+      for (const auto & p : overrides) {
+        if (p.get_name() == name) {return p.as_int();}
+      }
+      return get_parameter(name).as_int();
+    };
+  const double diameter = dbl("cylinder_diameter_m");
+  const int cols = static_cast<int>(integer("slot_cols_x"));
+  const int rows = static_cast<int>(integer("slot_rows_y"));
+  const double gap_x = dbl("slot_gap_x_m");
+  const double gap_y = dbl("slot_gap_y_m");
+  const double inner_x = dbl("box_inner_size_x_m");
+  const double inner_y = dbl("box_inner_size_y_m");
+
+  // 格子全体が占める幅 = (缶の数-1)*中心間距離 + 缶1個分
+  const double span_x = (cols - 1) * (diameter + gap_x) + diameter;
+  const double span_y = (rows - 1) * (diameter + gap_y) + diameter;
+
+  RCLCPP_INFO(
+    get_logger(),
+    "slot grid: %dx%d/box, diameter=%.0fmm, gap=(%.1f, %.1f)mm, "
+    "span=(%.1f, %.1f)mm vs box inner=(%.1f, %.1f)mm, slot_z=%.3fm",
+    cols, rows, diameter * 1000.0, gap_x * 1000.0, gap_y * 1000.0,
+    span_x * 1000.0, span_y * 1000.0, inner_x * 1000.0, inner_y * 1000.0,
+    config.slots.empty() ? 0.0 : config.slots.front().z);
+
+  if (gap_x < 0.0 || gap_y < 0.0) {
+    RCLCPP_WARN(
+      get_logger(),
+      "隣り合う缶が重なっています (gap_x=%.1fmm, gap_y=%.1fmm)。"
+      "slot_gap_x_m / slot_gap_y_m を増やすか、並べ方を見直してください",
+      gap_x * 1000.0, gap_y * 1000.0);
+  }
+  if (span_x > inner_x || span_y > inner_y) {
+    RCLCPP_WARN(
+      get_logger(),
+      "スロット格子が箱の内寸をはみ出しています "
+      "(span=(%.1f, %.1f)mm > inner=(%.1f, %.1f)mm)。"
+      "slot_gap_x_m / slot_gap_y_m を減らすか、slot_cols_x / slot_rows_y を見直してください",
+      span_x * 1000.0, span_y * 1000.0, inner_x * 1000.0, inner_y * 1000.0);
+  }
+}
+
+// 実行中のパラメータ変更。組み直せたものだけを適用し、駄目なら理由を返して却下する。
+// **却下してもロボットは動き続ける** (直前の設定のまま) ので、現場で値を打ち間違えても
+// シーケンスが壊れない
+rcl_interfaces::msg::SetParametersResult GameStateManagerNode::onSetParameters(
+  const std::vector<rclcpp::Parameter> & parameters)
+{
+  rcl_interfaces::msg::SetParametersResult result;
+  try {
+    GameStateMachine::Config config = buildConfig(parameters);
+    machine_->setConfig(config);
+    result.successful = true;
+    RCLCPP_INFO(
+      get_logger(), "parameters updated at runtime (%zu changed); %zu slots",
+      parameters.size(), config.slots.size());
+    logSlotGeometry(config, parameters);
+  } catch (const std::exception & e) {
+    result.successful = false;
+    result.reason = e.what();
+    RCLCPP_WARN(get_logger(), "parameter update rejected: %s", e.what());
+  }
+  return result;
 }
 
 void GameStateManagerNode::onPickRequest(const geometry_msgs::msg::PoseStamped::SharedPtr msg)

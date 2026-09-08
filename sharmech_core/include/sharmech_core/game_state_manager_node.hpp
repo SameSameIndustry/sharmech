@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
@@ -75,11 +76,9 @@ private:
 
   // slot_x_<color_suffix> / slot_y_<color_suffix> / slot_z_<color_suffix>
   // パラメータ (等長の配列) からスロット姿勢の一覧を組み立てる
-  std::vector<CartesianState> loadSlots(const std::string & color_suffix);
 
   // init_pose パラメータ ([x, y, z, pitch, yaw]) を読む。
   // 空なら既定値、要素数が5でなければ起動時に落とす (無言で別の場所へ動かさない)
-  CartesianState loadInitPose();
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pick_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr box_count_sub_;
@@ -95,6 +94,26 @@ private:
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
+
+  // パラメータの宣言 (既定値のみ)。値の取得は buildConfig() で行う
+  void declareParameters(const std::string & color_suffix);
+  // 現在値 (overrides があればそちらを優先) から設定を組み立てる。
+  // 不整合は std::invalid_argument を投げる
+  GameStateMachine::Config buildConfig(const std::vector<rclcpp::Parameter> & overrides) const;
+  // 箱の中心と格子ピッチからスロット座標を生成する (箱ごとにX列が外側・Y行が内側)
+  static std::vector<CartesianState> generateSlots(
+    const std::vector<double> & box_center_x, double box_center_y,
+    int cols_x, int rows_y, double pitch_x, double pitch_y, double slot_z);
+  // 生成した格子が箱に収まっているかを知らせる (はみ出し・缶同士の干渉を警告)
+  void logSlotGeometry(
+    const GameStateMachine::Config & config,
+    const std::vector<rclcpp::Parameter> & overrides) const;
+  // 実行中のパラメータ変更を検証して適用する (再起動なしの現場合わせ)
+  rcl_interfaces::msg::SetParametersResult onSetParameters(
+    const std::vector<rclcpp::Parameter> & parameters);
+
+  std::string field_color_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
   std::unique_ptr<GameStateMachine> machine_;
   // /catchrobo/arm/status は status_rate で常時流れてくるため、

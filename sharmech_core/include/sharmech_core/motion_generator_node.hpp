@@ -5,6 +5,7 @@
 #include <string>
 
 #include <rclcpp/rclcpp.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -84,6 +85,15 @@ private:
   // パラメータ
   double control_rate_;
   double status_rate_;
+  // パラメータ (overrides 優先) をメンバへ反映する。失敗時は理由を返し何も書き換えない
+  rcl_interfaces::msg::SetParametersResult applyParameters(
+    const std::vector<rclcpp::Parameter> & overrides);
+  // 実行中のパラメータ変更を検証して適用する (再起動なしの現場合わせ)
+  rcl_interfaces::msg::SetParametersResult onSetParameters(
+    const std::vector<rclcpp::Parameter> & parameters);
+
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
+
   double v_max_, a_max_;        // 並進 [m/s], [m/s²]。軌道生成とジョグで共用
   double w_max_, alpha_max_;    // 姿勢 [rad/s], [rad/s²]。同上
   // 起動時 (config.yaml) の作業領域。/catchrobo/game/workspace_clamp の

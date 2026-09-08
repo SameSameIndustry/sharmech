@@ -51,36 +51,41 @@ MotionGeneratorNode::MotionGeneratorNode(const rclcpp::NodeOptions & options)
 : Node("motion_generator_node", options),
   trajectory_start_time_(0, 0, RCL_ROS_TIME)
 {
+  // control_rate / status_rate はタイマー周期を決めるため起動時のみ (実行中は変えない)
   control_rate_ = declare_parameter("control_rate", 100.0);
   status_rate_ = declare_parameter("status_rate", 10.0);
-  v_max_ = declare_parameter("v_max", 0.10);
-  a_max_ = declare_parameter("a_max", 0.20);
-  w_max_ = declare_parameter("w_max", 1.0);
-  alpha_max_ = declare_parameter("alpha_max", 2.0);
-  workspace_x_min_ = declare_parameter("workspace_x_min", -0.20);
-  workspace_x_max_ = declare_parameter("workspace_x_max", 0.20);
-  workspace_y_min_ = declare_parameter("workspace_y_min", 0.05);
-  workspace_y_max_ = declare_parameter("workspace_y_max", 0.30);
-  workspace_z_min_ = declare_parameter("workspace_z_min", 0.00);
-  workspace_z_max_ = declare_parameter("workspace_z_max", 0.30);
-  twist_timeout_ = declare_parameter("twist_timeout", 0.4);
-  goal_mode_ = declare_parameter("goal_mode", std::string("goal_priority"));
 
-  // 本番設置での原点ズレ補正 (sharmech/docs/field_dimensions.md 参照)。
-  // 既定0.0。X/Yの作業領域全体をこの分だけ平行移動する (Zは対象外)
-  const double origin_offset_x = declare_parameter("field_origin_offset_x_m", 0.0);
-  const double origin_offset_y = declare_parameter("field_origin_offset_y_m", 0.0);
-  workspace_x_min_ += origin_offset_x;
-  workspace_x_max_ += origin_offset_x;
-  workspace_y_min_ += origin_offset_y;
-  workspace_y_max_ += origin_offset_y;
+  // 以下は実行中に ros2 param set で変更できる (現場合わせ用。下記 onSetParameters)
+  declare_parameter("v_max", 0.10);
+  declare_parameter("a_max", 0.20);
+  declare_parameter("w_max", 1.0);
+  declare_parameter("alpha_max", 2.0);
+  declare_parameter("workspace_x_min", -0.20);
+  declare_parameter("workspace_x_max", 0.20);
+  declare_parameter("workspace_y_min", 0.05);
+  declare_parameter("workspace_y_max", 0.30);
+  declare_parameter("workspace_z_min", 0.00);
+  declare_parameter("workspace_z_max", 0.30);
+  declare_parameter("twist_timeout", 0.4);
+  declare_parameter("goal_mode", std::string("goal_priority"));
 
-  if (goal_mode_ != "twist_priority" && goal_mode_ != "exclusive" &&
-    goal_mode_ != "goal_priority")
-  {
-    RCLCPP_FATAL(get_logger(), "Unknown goal_mode: %s", goal_mode_.c_str());
-    throw std::invalid_argument("unknown goal_mode");
+  // 本番設置での原点ズレ補正 (sharmech/docs/field_dimensions.md 参照)。既定0.0。
+  // 作業領域全体をこの分だけ平行移動する。Zは game_state_manager_node の
+  // field_origin_offset_z_m と同じ意味・同じ値を使う想定
+  declare_parameter("field_origin_offset_x_m", 0.0);
+  declare_parameter("field_origin_offset_y_m", 0.0);
+  declare_parameter("field_origin_offset_z_m", 0.0);
+
+  // 起動時は「上書き無し」で反映する。ここで弾かれる値 (未知の goal_mode 等) は
+  // 起動を止める。実行中の変更は reason を返して却下するだけで走り続ける
+  const auto initial = applyParameters({});
+  if (!initial.successful) {
+    RCLCPP_FATAL(get_logger(), "%s", initial.reason.c_str());
+    throw std::invalid_argument(initial.reason);
   }
+
+  param_callback_handle_ = add_on_set_parameters_callback(
+    std::bind(&MotionGeneratorNode::onSetParameters, this, std::placeholders::_1));
 
   // 起動直後は有効な作業領域 = config.yaml のデフォルト
   active_workspace_x_min_ = workspace_x_min_;
@@ -262,6 +267,109 @@ void MotionGeneratorNode::onCurrentPose(
       get_logger(),
       "Target synced to MCU feedback: (%.3f, %.3f, %.3f)", fb.x, fb.y, fb.z);
   }
+}
+
+// パラメータ (overrides があればそちらを優先) を実際のメンバへ反映する。
+// 起動時とパラメータ変更時の両方から呼ぶ。失敗時は理由を返し、メンバは書き換えない
+rcl_interfaces::msg::SetParametersResult MotionGeneratorNode::applyParameters(
+  const std::vector<rclcpp::Parameter> & overrides)
+{
+  const auto find = [&overrides](const std::string & name) -> const rclcpp::Parameter * {
+      for (const auto & p : overrides) {
+        if (p.get_name() == name) {return &p;}
+      }
+      return nullptr;
+    };
+  const auto dbl = [&](const std::string & name) {
+      const auto * o = find(name);
+      return o ? o->as_double() : get_parameter(name).as_double();
+    };
+  const auto str = [&](const std::string & name) {
+      const auto * o = find(name);
+      return o ? o->as_string() : get_parameter(name).as_string();
+    };
+
+  rcl_interfaces::msg::SetParametersResult result;
+  result.successful = false;
+
+  const std::string goal_mode = str("goal_mode");
+  if (goal_mode != "twist_priority" && goal_mode != "exclusive" &&
+    goal_mode != "goal_priority")
+  {
+    result.reason = "unknown goal_mode: " + goal_mode +
+      " (goal_priority / twist_priority / exclusive のいずれか)";
+    return result;
+  }
+
+  const double offset_x = dbl("field_origin_offset_x_m");
+  const double offset_y = dbl("field_origin_offset_y_m");
+  const double offset_z = dbl("field_origin_offset_z_m");
+  const double x_min = dbl("workspace_x_min") + offset_x;
+  const double x_max = dbl("workspace_x_max") + offset_x;
+  const double y_min = dbl("workspace_y_min") + offset_y;
+  const double y_max = dbl("workspace_y_max") + offset_y;
+  const double z_min = dbl("workspace_z_min") + offset_z;
+  const double z_max = dbl("workspace_z_max") + offset_z;
+  if (x_min > x_max || y_min > y_max || z_min > z_max) {
+    result.reason = "workspace min must not exceed max";
+    return result;
+  }
+
+  const double v_max = dbl("v_max");
+  const double a_max = dbl("a_max");
+  const double w_max = dbl("w_max");
+  const double alpha_max = dbl("alpha_max");
+  const double twist_timeout = dbl("twist_timeout");
+  if (v_max <= 0.0 || a_max <= 0.0 || w_max <= 0.0 || alpha_max <= 0.0 ||
+    twist_timeout <= 0.0)
+  {
+    result.reason = "v_max / a_max / w_max / alpha_max / twist_timeout must be positive";
+    return result;
+  }
+
+  goal_mode_ = goal_mode;
+  v_max_ = v_max;
+  a_max_ = a_max;
+  w_max_ = w_max;
+  alpha_max_ = alpha_max;
+  twist_timeout_ = twist_timeout;
+  workspace_x_min_ = x_min;
+  workspace_x_max_ = x_max;
+  workspace_y_min_ = y_min;
+  workspace_y_max_ = y_max;
+  workspace_z_min_ = z_min;
+  workspace_z_max_ = z_max;
+
+  // 現在有効な領域を新しい上限下限へ収め直す。
+  // **クランプ中 (game_state_manager_node が縮めている最中) でもその狭さを保ったまま、
+  // 「active は必ず workspace の内側」という安全条件だけを守る**
+  active_workspace_x_min_ = std::clamp(active_workspace_x_min_, x_min, x_max);
+  active_workspace_x_max_ = std::clamp(active_workspace_x_max_, x_min, x_max);
+  active_workspace_y_min_ = std::clamp(active_workspace_y_min_, y_min, y_max);
+  active_workspace_y_max_ = std::clamp(active_workspace_y_max_, y_min, y_max);
+  active_workspace_z_min_ = std::clamp(active_workspace_z_min_, z_min, z_max);
+  active_workspace_z_max_ = std::clamp(active_workspace_z_max_, z_min, z_max);
+
+  result.successful = true;
+  return result;
+}
+
+// 実行中のパラメータ変更。弾かれた場合は直前の設定のまま動き続ける
+rcl_interfaces::msg::SetParametersResult MotionGeneratorNode::onSetParameters(
+  const std::vector<rclcpp::Parameter> & parameters)
+{
+  const auto result = applyParameters(parameters);
+  if (result.successful) {
+    RCLCPP_INFO(
+      get_logger(),
+      "parameters updated at runtime (%zu changed); v_max=%.3f a_max=%.3f "
+      "workspace z=[%.3f, %.3f] goal_mode=%s",
+      parameters.size(), v_max_, a_max_, workspace_z_min_, workspace_z_max_,
+      goal_mode_.c_str());
+  } else {
+    RCLCPP_WARN(get_logger(), "parameter update rejected: %s", result.reason.c_str());
+  }
+  return result;
 }
 
 void MotionGeneratorNode::onWorkspaceClamp(

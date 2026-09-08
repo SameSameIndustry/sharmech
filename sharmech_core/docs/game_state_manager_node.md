@@ -80,25 +80,66 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 | パラメータ | 既定値 | 説明 |
 |---|---|---|
 | `field_color` | (既定値なし。**必須**) | `"red"` / `"blue"`。launch 引数 `field_color:=` で指定。他の値ならノード起動失敗 |
-| `slot_x_red` / `slot_y_red` / `slot_z_red` | 2026-08-30実測 (X/Yのみ確定) | 赤フィールドのスロット座標。等長配列、インデックス=スロットID。詳細は `sharmech/docs/field_dimensions.md` |
+| `box_center_x_red` / `_blue` | CAD実測 | 各箱の中心X [m]。**配列の長さ = 箱の数。箱を動かしたらここを変える** |
+| `box_center_y_red` / `_blue` | 0.5255 | 箱の中心Y [m] (全箱共通) |
+| `slot_cols_x` / `slot_rows_y` | 2 / 3 | 箱内の格子。X方向(短辺)の列数 / Y方向(長辺)の行数 |
+| `cylinder_diameter_m` | 0.071 | 缶の直径 [m]。CAD実測を正本 (スケッチ実測の66mm説が正しければ 0.066) |
+| `slot_gap_x_m` / `slot_gap_y_m` | -0.002 / 0.014 | **★当日調整する主役。** 隣り合う缶の隙間 [m] (中心間距離 = 直径 + この値)。缶が当たるなら増やし、箱からはみ出すなら減らす |
+| `box_inner_size_x_m` / `_y_m` | 0.138 / 0.255 | 箱の内寸 [m]。**はみ出し警告に使うだけで座標計算には入らない** |
 | `slot_x_blue` / `slot_y_blue` / `slot_z_blue` | 2026-08-30確定 (X/Yのみ) | 青フィールドのスロット座標。`field`がロボット自身のベース座標系であることと「赤の線対称」という前提から、redと同じローカル数値になっている(下記) |
 | `placement_order` | `[0..23]` (箱単位で埋める順) | 配置する順番のスロットID列。「ちょうど6個」ボーナスを狙うなら箱単位が既定として妥当 |
 | `slot_clamp_margin_m` | 0.03 | ORIENTING〜RETRACTING中の作業領域クランプの片側マージン [m] |
 | `require_manual_confirm` | true | true: 掴む直前・離す直前で止まり操縦者の確定を待つ / false: 止まらず完全自動。実機で位置合わせの精度が出るまでは true 推奨 |
-| `approach_clearance_z` | 0.20 | APPROACHING (空のグリッパ) で水平移動する高さ [m]。**`retract_clearance_z` と同じ値にしておくこと** (揃っていれば退避高さのまま接近でき、接近が完全な水平移動になる) |
-| `transport_clearance_z` | 0.20 | TRANSPORT_LIFT / TRANSPORTING (缶を保持) の高さ [m] |
-| `retract_clearance_z` | 0.20 | 設置後に上げる高さ [m]。箱に当たらない値にすること |
+| `box_top_z_m` | 0.156 | **高さの基準面。箱の上端の高さ [m]。当日実測して入れるのはこれ1個でよく、下の相対値がすべて追従する** |
+| `slot_release_below_box_top_m` | 0.106 | 缶を離す高さ。基準面から何m下か (既定で絶対 z=0.05 相当) |
+| `approach_clearance_above_box_top_m` | 0.044 | APPROACHING (空のグリッパ) で水平移動する高さ。基準面から何m上か (既定で絶対 z=0.20 相当)。**`retract_...` と同じ値にしておくこと** (揃っていれば退避高さのまま接近でき、接近が完全な水平移動になる) |
+| `transport_clearance_above_box_top_m` | 0.044 | TRANSPORT_LIFT / TRANSPORTING (缶を保持) の高さ。同上 |
+| `retract_clearance_above_box_top_m` | 0.044 | 設置後に上げる高さ。同上 |
+| `field_origin_offset_z_m` | 0.0 | Z方向の平行移動 [m]。基準面の実測値はそのままに全体を上げ下げする逃げ道 |
 | `grasp_dwell_sec` | 0.3 | GRASPING状態でグリッパを閉じてから待つ時間 [s] (グリッパの実フィードバックが無いための暫定措置。下記) |
 | `orient_dwell_sec` | 0.5 | ORIENTING状態でワークを縦にし切るまで待つ時間 [s]。**ピッチ機構の速度が未実測なので0.5は仮値**。短すぎると缶が斜めのまま箱へ降下する (下記「縦にするタイミング」) |
 | `state_publish_rate` | 10.0 | `/catchrobo/game/state` の配信周期 [Hz] |
 | `init_pose` | `[0.0, 0.15, 0.15, 0.0, 0.0]` | `/catchrobo/game/reset` で戻る初期位置 `[x, y, z, pitch, yaw]` (m / rad)。**`joy_teleop_node` の `home_pose` と同じ仮値。実機の初期位置が決まったら両方差し替えること (TODO)**。要素数が5でなければ起動時に落とす |
 | `field_origin_offset_x_m` / `_y_m` | 0.0 / 0.0 | 本番設置での原点ズレ補正 [m]。読み込んだスロット座標全体をこの分だけ平行移動する。`motion_generator_node` と同じ値を使う想定 |
 
-**赤フィールドのスロット座標は箱の外形(外形148×265×高150mm、内寸138×255×深145mm。
-フィールドCAD実測)までは確定しているが、箱内の6スロットそれぞれの正確な位置までは
-実測していない。** 現在の値は箱の内寸を均等に2(X)×3(Y)分割した計算値
+> **名前について。** 本ドキュメントの状態遷移の説明に出てくる
+> `approach_clearance_z` / `transport_clearance_z` / `retract_clearance_z` は
+> `GameStateMachine::Config` の内部フィールド (**絶対高さ** [m]) を指す。
+> ROS パラメータ側は 2026-09-06 に基準面からの相対
+> (`*_above_box_top_m`) へ変わっており、内部の絶対値は
+> `box_top_z_m + *_above_box_top_m + field_origin_offset_z_m` として組み立てられる。
+
+### スロット座標の決まり方 (2026-09-06 に生成方式へ変更)
+
+**24箇所の座標を直接書くのをやめ、箱の中心と缶の隙間から起動時に生成する。**
+当日フィールドに合わなかったときに直す場所を最小にするための構成:
+
+| 当日起きたこと | 直すパラメータ |
+|---|---|
+| 箱を動かした / 並べ方を変えた | `box_center_x_*` (箱の数もここで決まる) ・`box_center_y_*` |
+| 缶同士が当たる / 箱に入らない | **`slot_gap_x_m` / `slot_gap_y_m`** |
+| 高さが合わない | `box_top_z_m` (基準面。1個で全部追従) |
+| フィールド全体がずれた | `field_origin_offset_x/y/z_m` |
+
+**すべて実行中に `ros2 param set` で即反映できる (再起動不要)。**
+不正な値は却下され、直前の設定のまま動き続ける。生成結果は起動時と変更時に
+ログへ出る (格子の広がり vs 箱の内寸)。缶同士が重なる場合・箱をはみ出す場合は
+警告が出るので、**当日その場で気づける。**
+
+```
+slot grid: 2x3/box, diameter=71mm, gap=(-2.0, 14.0)mm,
+           span=(140.0, 241.0)mm vs box inner=(138.0, 255.0)mm, slot_z=0.050m
+[WARN] 隣り合う缶が重なっています ...
+[WARN] スロット格子が箱の内寸をはみ出しています ...
+```
+
+スロットIDは0始まりの通し番号で、箱ごとに「X列が外側・Y行が内側」の順
+(箱0の (x0,y0),(x0,y1),(x0,y2),(x1,y0),(x1,y1),(x1,y2) → 箱1の…)。
+
+**箱内の6個の並べ方そのものは未解決。** 既定値は箱の内寸を均等に2(X)×3(Y)分割した計算値
 (詳細は `field_dimensions.md`)。なお**箱の位置自体はルール上 選手が自由に調整してよい**
-ので、本番の並べ方を変えたら `config.yaml` も変えること。実際のスロット配置が
+ので、本番の並べ方を変えたら `sharmech/params/robot_geometry.yaml` の `shooting_box` も変えること
+(2026-09-08〜。`config.yaml` には無い。手順は `sharmech/docs/parameter_tuning.md`)。実際のスロット配置が
 分かり次第、この配列を差し替えること。
 
 ### なぜ `field_color` の launch 引数を必須にするか
