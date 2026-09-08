@@ -265,25 +265,31 @@ geometry_msgs/Twist twist
 
 | offset | 型 | 名前 | 説明 |
 |---|---|---|---|
-| 0 | `uint8` | `protocol_version` | 現在 1 |
-| 1 | `uint8` | `packet_type` | **1 = Cartesian、2 = 関節 (パターンB)** |
+| 0 | `uint8` | `protocol_version` | 現在 2 (2026-09-08 に xy 平面を極座標へ変更。1 とは非互換) |
+| 1 | `uint8` | `packet_type` | **1 = 極座標、2 = 関節 (パターンB)** |
 | 2 | `uint16` | `payload_length` | ペイロード長 |
 | 4 | `uint32` | `seq` | 送信ごとに +1 |
 | 8 | `uint64` | `timestamp_us` | 送信時刻 [μs] |
 
 `packet_type` を最初から持たせるのは、**パターンB追加を破壊的変更にしないため**。プロトコルは他人(MCU担当者)との契約なので、後から変えるコストが最も高い。
 
-### ペイロード: `packet_type = 1` (Cartesian) — 44 バイト
+### ペイロード: `packet_type = 1` (極座標) — 44 バイト
+
+**xy 平面は極座標 (r, θ) で送る (2026-09-08 変更)。** この機構の xy 平面は
+「ターンテーブルが θ、肩の対称二軸駆動が r」の r-θ 型 (上記「ロボット構成」) なので、
+直交座標のまま渡すと MCU が毎周期 atan2/hypot をやり直すことになる。ROS2 層の内部は
+直交座標のままで、`hardware_bridge_node` が送信直前に `PolarUtils` で変換する。
+`z` は肘/膝機構が直接与えるため変換の対象外。
 
 | offset | 型 | 名前 | 単位 |
 |---|---|---|---|
-| 16 | `float32` | `x` | m |
-| 20 | `float32` | `y` | m |
+| 16 | `float32` | `r` | m (ターンテーブル軸からの水平距離) |
+| 20 | `float32` | `theta` | rad (+X から反時計回り。**±π を超えうる連続値**) |
 | 24 | `float32` | `z` | m |
 | 28 | `float32` | `pitch` | rad |
 | 32 | `float32` | `yaw` | rad |
-| 36 | `float32` | `vx` | m/s |
-| 40 | `float32` | `vy` | m/s |
+| 36 | `float32` | `r_dot` | m/s |
+| 40 | `float32` | `theta_dot` | rad/s |
 | 44 | `float32` | `vz` | m/s |
 | 48 | `float32` | `pitch_rate` | rad/s |
 | 52 | `float32` | `yaw_rate` | rad/s |
@@ -291,18 +297,23 @@ geometry_msgs/Twist twist
 | 57 | `uint8` | `control_flags` | bit0: 動作許可, bit1: 縦にする指示 (`game_state_manager_node` のPLACING時のみ) |
 | 58 | `uint16` | `reserved` | 将来用・0埋め |
 
-**合計 60 バイト。**
+**合計 60 バイト** (バイト数・各フィールドのオフセットは直交座標版と同じ)。
+
+**θ は `(-π, π]` に丸めない。** 作業領域は X が -2.045〜+0.941 m なので -X 軸
+(θ = ±π) を実際にまたぐ。atan2 の生値を送るとシューティングボックス上で
+θ が +3.14 → -3.14 に飛び、ターンテーブルが 1 回転逆走する。直前に送った θ の
+近傍へアンラップした連続値を送り、MCU 側では正規化し直さないのが契約。
 
 `float32` を使う理由: 作業領域が 1m 以下なら精度は 0.1μm 相当で必要精度を大きく上回る。STM32 は 32bit MCU で、FPU付きの品種なら `float32` がネイティブ、`double` はソフトウェアエミュレーションで遅い。
 
 ### 送信例
 
 ```
-protocol_version = 1        packet_type = 1        payload_length = 44
+protocol_version = 2        packet_type = 1        payload_length = 44
 seq = 100                   timestamp_us = 1724400000123456
 
-x     =  0.0500      vx         =  0.0667
-y     =  0.2000      vy         =  0.0667
+r     =  0.2500      r_dot      =  0.0667
+theta =  1.2000      theta_dot  =  0.2667
 z     =  0.0750      vz         = -0.0333
 pitch =  0.1000      pitch_rate =  0.1333
 yaw   =  0.2000      yaw_rate   =  0.2667
@@ -348,7 +359,7 @@ UDPフィードバックの3箇所で1つの順序。定義は `udp_protocol.hpp
 | 内容 | 型 | 用途 |
 |---|---|---|
 | `seq_echo` | `uint32` | 最後に受信した指令の `seq`。往復遅延の測定 |
-| `x, y, z, pitch, yaw` | `float32` × 5 | 実姿勢。**MCU 側で FK して返す** |
+| `r, theta, z, pitch, yaw` | `float32` × 5 | 実姿勢。**MCU 側で FK して返す**。指令と同じく xy 平面は極座標 (MCU は xy の直交座標を扱わない)。`hardware_bridge_node` が `x = r·cos θ`, `y = r·sin θ` で戻して `/catchrobo/arm/current_pose` に流す |
 | `status_flags` | `uint16` | bit0: 追従誤差過大 / bit1: ドライバ異常 / bit2: ウォッチドッグ作動中 / bit3: 未初期化・原点未確定 / bit4: 直近指令を破棄した (作業領域外・seq逆転等。破棄後しばらく立てておく) |
 | `gripper_state` | `uint8` | 実際のグリッパ状態 |
 | `joint_count` + `joint_positions[N]` | `uint8` + `float32[N]` | 実測の関節角。診断と rviz 表示用。**並び順は 0x02 の `q[]` と同一** (上記「関節の並び順」) |
@@ -428,8 +439,8 @@ UDPフィードバックの3箇所で1つの順序。定義は `udp_protocol.hpp
 
 ```c
 // 制御ループ(1kHz)ごと
-target_x += vx * dt;
-target_y += vy * dt;
+target_r     += r_dot     * dt;
+target_theta += theta_dot * dt;
 // ...
 ```
 

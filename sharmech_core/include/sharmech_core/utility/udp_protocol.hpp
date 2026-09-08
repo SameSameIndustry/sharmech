@@ -16,20 +16,28 @@ namespace sharmech_core
 // リトルエンディアン・パディングなし。x86 も STM32 (Cortex-M) もリトルエンディアン
 // なのでバイトオーダ変換は行わない。
 //
+// **座標系: xy平面は極座標 (r, θ) で送る (protocol_version 2 で変更)。**
+// この機構の xy 平面はターンテーブルで θ を、肩の対称二軸駆動で r を与える
+// r-θ 型のアームなので、直交座標で渡すとマイコン側が毎回 atan2/hypot を
+// やり直すことになる。ROS2 層は内部では直交座標のままで、UDP 送信直前に
+// PolarUtils で変換する (utility/polar_utils.hpp)。
+// z・pitch・yaw は変換の対象外。
+//
 // packet_type:
-//   0x01 = Cartesian 指令 (パターンA・現在)
-//   0x02 = 関節指令       (パターンB・将来)
+//   0x01 = 極座標指令 (パターンA・現在)
+//   0x02 = 関節指令   (パターンB・将来)
 //   0x81 = 状態フィードバック (MCU → ROS2。0x80 以上がフィードバック方向)
 namespace udp_protocol
 {
 
-constexpr uint8_t kProtocolVersion = 1;
+// 2 = xy平面を極座標 (r, θ) に変更した版。1 (直交座標 x, y) とは互換性が無い
+constexpr uint8_t kProtocolVersion = 2;
 
 enum class PacketType : uint8_t
 {
-  kCartesianCommand = 0x01,
-  kJointCommand     = 0x02,  // パターンB
-  kStateFeedback    = 0x81,
+  kPolarCommand = 0x01,
+  kJointCommand = 0x02,  // パターンB
+  kStateFeedback = 0x81,
 };
 
 // 関節の並び順の契約 (2026-09-01 ユーザー確定)。
@@ -60,16 +68,18 @@ struct CommandHeader
   uint64_t timestamp_us;
 };
 
-// packet_type = 0x01 のペイロード (44 バイト)
-struct CartesianPayload
+// packet_type = 0x01 のペイロード (44 バイト)。
+// xy平面は極座標。θ は ±π を超えうる連続値で届く (-x軸をまたぐ移動で
+// +π ⇄ -π に飛ばないよう ROS2 側がアンラップして送るため)
+struct PolarPayload
 {
-  float x;              // [m]
-  float y;              // [m]
+  float r;              // [m]   ターンテーブル軸からの距離
+  float theta;          // [rad] +x軸から反時計回り。連続値 (±π を超えうる)
   float z;              // [m]
   float pitch;          // [rad]
   float yaw;            // [rad]
-  float vx;             // [m/s]
-  float vy;             // [m/s]
+  float r_dot;          // [m/s]   r の時間微分
+  float theta_dot;      // [rad/s] θ の時間微分
   float vz;             // [m/s]
   float pitch_rate;     // [rad/s]
   float yaw_rate;       // [rad/s]
@@ -78,10 +88,10 @@ struct CartesianPayload
   uint16_t reserved;
 };
 
-struct CartesianPacket
+struct PolarPacket
 {
   CommandHeader header;
-  CartesianPayload payload;
+  PolarPayload payload;
 };
 
 // packet_type = 0x02 のペイロード (44 バイト)。パターンB (ROS2側IK)。
@@ -103,14 +113,15 @@ struct JointPacket
 };
 
 // packet_type = 0x81 の固定部 (ヘッダ込み 44 バイト)。
-// 直後に float32 × joint_count の関節角配列が続く
+// 直後に float32 × joint_count の関節角配列が続く。
+// 指令 (0x01) と同じくxy平面は極座標で返す (MCU は xy の運動学を持たなくてよい)
 struct FeedbackFixedPart
 {
   CommandHeader header;
   uint32_t seq_echo;      // 最後に受信した指令の seq
-  float x;                // 実位置 [m]
-  float y;
-  float z;
+  float r;                // 実位置 [m]   (FK結果。指令のエコーではない)
+  float theta;            // 実位置 [rad] (連続値でなくてよい。ROS2側は cos/sin で戻す)
+  float z;                // [m]
   float pitch;            // 実姿勢 [rad]
   float yaw;
   uint16_t status_flags;
@@ -121,8 +132,8 @@ struct FeedbackFixedPart
 #pragma pack(pop)
 
 static_assert(sizeof(CommandHeader) == 16, "CommandHeader must be 16 bytes");
-static_assert(sizeof(CartesianPayload) == 44, "CartesianPayload must be 44 bytes");
-static_assert(sizeof(CartesianPacket) == 60, "CartesianPacket must be 60 bytes");
+static_assert(sizeof(PolarPayload) == 44, "PolarPayload must be 44 bytes");
+static_assert(sizeof(PolarPacket) == 60, "PolarPacket must be 60 bytes");
 static_assert(sizeof(JointPayload) == 44, "JointPayload must be 44 bytes");
 static_assert(sizeof(JointPacket) == 60, "JointPacket must be 60 bytes");
 static_assert(sizeof(FeedbackFixedPart) == 44, "FeedbackFixedPart must be 44 bytes");
@@ -134,13 +145,14 @@ constexpr uint16_t kStatusWatchdog = 1 << 2;          // ウォッチドッグ�
 constexpr uint16_t kStatusUninitialized = 1 << 3;     // 未初期化・原点未確定
 constexpr uint16_t kStatusCommandRejected = 1 << 4;   // 直近の指令を破棄した (作業領域外・seq逆転等)
 
-// デコード済みフィードバック
+// デコード済みフィードバック。r/theta は極座標のまま
+// (直交座標へ戻すのは hardware_bridge_node の責務)
 struct Feedback
 {
   uint32_t seq;
   uint32_t seq_echo;
   uint64_t timestamp_us;
-  float x, y, z, pitch, yaw;
+  float r, theta, z, pitch, yaw;
   uint16_t status_flags;
   bool gripper_closed;
   std::vector<float> joint_positions;
@@ -154,27 +166,29 @@ class UdpProtocol
 public:
   UdpProtocol() = delete;
 
-  // Cartesian 指令パケット (packet_type = 0x01) を組み立てる
-  static std::vector<uint8_t> encodeCartesian(
-    float x, float y, float z, float pitch, float yaw,
-    float vx, float vy, float vz, float pitch_rate, float yaw_rate,
+  // 極座標指令パケット (packet_type = 0x01) を組み立てる。
+  // r/theta/r_dot/theta_dot は PolarUtils::toPolar で変換済みのものを渡すこと
+  // (theta はアンラップ済みの連続値であることが呼び出し側の責務)
+  static std::vector<uint8_t> encodePolar(
+    float r, float theta, float z, float pitch, float yaw,
+    float r_dot, float theta_dot, float vz, float pitch_rate, float yaw_rate,
     bool gripper_closed, bool orient_vertical, uint32_t seq, uint64_t timestamp_us)
   {
-    udp_protocol::CartesianPacket packet{};
+    udp_protocol::PolarPacket packet{};
     packet.header.protocol_version = udp_protocol::kProtocolVersion;
     packet.header.packet_type =
-      static_cast<uint8_t>(udp_protocol::PacketType::kCartesianCommand);
-    packet.header.payload_length = sizeof(udp_protocol::CartesianPayload);
+      static_cast<uint8_t>(udp_protocol::PacketType::kPolarCommand);
+    packet.header.payload_length = sizeof(udp_protocol::PolarPayload);
     packet.header.seq = seq;
     packet.header.timestamp_us = timestamp_us;
 
-    packet.payload.x = x;
-    packet.payload.y = y;
+    packet.payload.r = r;
+    packet.payload.theta = theta;
     packet.payload.z = z;
     packet.payload.pitch = pitch;
     packet.payload.yaw = yaw;
-    packet.payload.vx = vx;
-    packet.payload.vy = vy;
+    packet.payload.r_dot = r_dot;
+    packet.payload.theta_dot = theta_dot;
     packet.payload.vz = vz;
     packet.payload.pitch_rate = pitch_rate;
     packet.payload.yaw_rate = yaw_rate;
@@ -243,8 +257,8 @@ public:
     fb.seq = fixed.header.seq;
     fb.seq_echo = fixed.seq_echo;
     fb.timestamp_us = fixed.header.timestamp_us;
-    fb.x = fixed.x;
-    fb.y = fixed.y;
+    fb.r = fixed.r;
+    fb.theta = fixed.theta;
     fb.z = fixed.z;
     fb.pitch = fixed.pitch;
     fb.yaw = fixed.yaw;

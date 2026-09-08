@@ -7,7 +7,7 @@
 実装すること。設計の背景・理由づけの詳細は [`sharmech/README.md`](../README.md) の
 「MCU通信仕様 (UDP)」節にあるが、両者に食い違いがあればこの文書が優先する。
 
-最終更新: 2026-09-01 (ストリーミング方式の詳細契約を確定)
+最終更新: 2026-09-08 (**xy平面を極座標 r-θ に変更。`protocol_version` = 2**)
 
 ---
 
@@ -20,9 +20,10 @@ ROS2層 (別PC。軌道生成・調停・作業領域クランプ・ウォッチ
    │  有線Ethernet / UDP / 100Hz
    ▼
 ★マイコン (この仕様書の対象)
-   │  ・UDP受信 (目標位置+速度のストリーム)
+   │  ・UDP受信 (目標位置+速度のストリーム。xy平面は極座標 r-θ)
    │  ・自分の制御周期での補間
    │  ・IK (逆運動学) → 各モータへの指令
+   │    (θ はターンテーブル、r は肩、z は肘/膝。xy平面のIKは不要)
    │  ・グリッパ開閉・「縦にする」動作
    │  ・FK (順運動学) → フィードバックのUDP送信
    ▼
@@ -35,7 +36,8 @@ ROS2層 (別PC。軌道生成・調停・作業領域クランプ・ウォッチ
 |---|---|
 | 軌道生成 (台形速度プロファイル等) | ROS2側が100Hzのストリームとして送ってくる。マイコンは「今この瞬間の目標」に追従するだけ |
 | 複数入力 (VR/PS4/自動シーケンス) の調停 | ROS2側で1本のストリームに合流済み |
-| 座標変換・TF | 受信するx/y/zは最初からロボットベース座標系 (後述) |
+| 座標変換・TF | 受信する値は最初からロボットベース座標系 (後述) |
+| **xy平面の直交⇄極座標変換 (atan2/hypot)** | **ROS2側が送信直前に済ませて `r`,`θ` で送る。マイコンは受け取った `θ` をそのままターンテーブルに、`r` をそのまま肩機構に渡せばよい** |
 | CRC 検証 | UDPチェックサムに委ねる (入れない、と決定済み) |
 
 ---
@@ -80,26 +82,32 @@ ROS2層 (別PC。軌道生成・調停・作業領域クランプ・ウォッチ
 
 | offset | 型 | 名前 | 説明 |
 |---|---|---|---|
-| 0 | `uint8` | `protocol_version` | 現在 **1**。不一致のパケットは破棄すること |
-| 1 | `uint8` | `packet_type` | 0x01=Cartesian指令, 0x02=関節指令, 0x81=フィードバック |
+| 0 | `uint8` | `protocol_version` | 現在 **2** (2026-09-08にxy平面を極座標へ変更。1とは非互換)。不一致のパケットは破棄すること |
+| 1 | `uint8` | `packet_type` | 0x01=極座標指令, 0x02=関節指令, 0x81=フィードバック |
 | 2 | `uint16` | `payload_length` | ペイロード長 [byte]。不一致は破棄 |
 | 4 | `uint32` | `seq` | 送信ごとに+1される連番 |
 | 8 | `uint64` | `timestamp_us` | 送信時刻 [μs]。**診断用。マイコンは無視してよい** (時刻同期は要求しない。補間に使う時間は自分のクロックで測ること) |
 
-### 3.2 指令 `packet_type = 0x01` (Cartesian。パターンA・通常運用)
+### 3.2 指令 `packet_type = 0x01` (極座標。パターンA・通常運用)
 
 ペイロード44バイト、パケット全体60バイト。**100Hzで届き続ける** (アイドル中も
 速度0で届く。途絶=ROS2側の停止・切断を意味する)。
 
+**xy平面は極座標 (r, θ) で届く (2026-09-08変更。それ以前は `x`,`y`)。**
+この機構は xy 平面が「ターンテーブルで θ、肩の対称二軸駆動で r」の r-θ 型なので、
+直交座標で渡すとマイコンが毎周期 atan2/hypot をやり直すことになる。
+`z` は肘/膝機構が直接与えるため変換の対象外。バイト数・オフセット・
+`gripper`/`control_flags` の位置は変更前と同じ。
+
 | offset | 型 | 名前 | 単位 |
 |---|---|---|---|
-| 16 | `float32` | `x` | m |
-| 20 | `float32` | `y` | m |
+| 16 | `float32` | `r` | m (ターンテーブル回転軸からの水平距離) |
+| 20 | `float32` | `theta` | rad (+X軸から反時計回り。**±π を超えうる連続値**。下記) |
 | 24 | `float32` | `z` | m |
 | 28 | `float32` | `pitch` | rad (※末尾「未確定事項」参照) |
 | 32 | `float32` | `yaw` | rad (※同上) |
-| 36 | `float32` | `vx` | m/s |
-| 40 | `float32` | `vy` | m/s |
+| 36 | `float32` | `r_dot` | m/s (r の時間微分) |
+| 40 | `float32` | `theta_dot` | rad/s (θ の時間微分) |
 | 44 | `float32` | `vz` | m/s |
 | 48 | `float32` | `pitch_rate` | rad/s |
 | 52 | `float32` | `yaw_rate` | rad/s |
@@ -107,8 +115,15 @@ ROS2層 (別PC。軌道生成・調停・作業領域クランプ・ウォッチ
 | 57 | `uint8` | `control_flags` | bit0=動作許可, bit1=縦にする指示 (下記) |
 | 58 | `uint16` | `reserved` | 0埋め。無視すること |
 
-- 位置 (x,y,z,pitch,yaw) と速度 (vx..yaw_rate) は**常に両方入っている**。
-  使い方は §4.2 (補間) を参照
+- **`theta` は `(-π, π]` に丸められていない。** 作業領域は X が -2.045〜+0.941 m
+  なので -X 軸 (θ = ±π) を実際にまたぐ。atan2 の生値をそのまま送ると
+  シューティングボックスの上で θ が +3.14 → -3.14 と飛び、ターンテーブルが
+  1回転逆走する。ROS2側は直前に送った値の近傍へアンラップした連続値を送るので、
+  **マイコン側で ±π に正規化し直さないこと** (せっかくの連続性が壊れる)。
+  θ が可動域を超えたら §4.1 の可動域外破棄で弾いてよい
+- 位置 (r,θ,z,pitch,yaw) と速度 (r_dot..yaw_rate) は**常に両方入っている**。
+  使い方は §4.2 (補間) を参照。**極座標の速度なので、直交座標の速度とは違い
+  `theta_dot` は原点に近いほど大きくなる** (θ̇ = (x·vy - y·vx)/r²)
 - `gripper`・`control_flags` は**毎パケットに載る「状態 (レベル)」であって
   イベント (エッジ) ではない**。パケットを取りこぼしても次のパケットで正しい状態に
   回復する。「開→閉に変わった瞬間」が要る場合はマイコン側で前回値と比較する
@@ -154,16 +169,17 @@ index 4: knee_right      (肘/膝 右モータ)
 
 ### 3.4 フィードバック `packet_type = 0x81` (マイコン → ROS2)
 
-ヘッダは共通 (方向の区別のためフィードバックは0x80以上を使う)。
+**指令と同じく xy 平面は極座標で返す** (マイコンは xy 平面の直交座標を
+一切扱わなくてよい)。ヘッダは共通 (方向の区別のためフィードバックは0x80以上を使う)。
 関節数5なら **合計64バイト**。
 
 | offset | 型 | 名前 | 説明 |
 |---|---|---|---|
 | 0-15 | | (共通ヘッダ) | `seq`はフィードバック自身の連番 (送信ごとに+1) |
 | 16 | `uint32` | `seq_echo` | **最後に受信した指令の`seq`** (往復遅延の測定用) |
-| 20 | `float32` | `x` | 実位置 [m]。**マイコン側でFKして返す** |
-| 24 | `float32` | `y` | 〃 |
-| 28 | `float32` | `z` | 〃 |
+| 20 | `float32` | `r` | 実位置 [m]。**マイコン側でFKして返す** (肩の実測角から) |
+| 24 | `float32` | `theta` | 実位置 [rad] (ターンテーブルの実測角)。**指令と違い ±π を超えた連続値でなくてよい** (ROS2側は cos/sin で直交座標へ戻すだけなので、どちらでも同じ点になる) |
+| 28 | `float32` | `z` | 実位置 [m] (肘/膝の実測角から) |
 | 32 | `float32` | `pitch` | 実姿勢 [rad] |
 | 36 | `float32` | `yaw` | 〃 |
 | 40 | `uint16` | `status_flags` | 下記 §3.5 |
@@ -212,19 +228,23 @@ typedef struct {
 
 // packet_type = 0x01 (ROS2 → MCU)
 typedef struct {
-  float    x, y, z;              // [m]
+  float    r;                    // [m]   ターンテーブル軸からの水平距離
+  float    theta;                // [rad] +X軸から反時計回り。±π を超えうる連続値
+  float    z;                    // [m]
   float    pitch, yaw;           // [rad]
-  float    vx, vy, vz;           // [m/s]
+  float    r_dot;                // [m/s]
+  float    theta_dot;            // [rad/s]
+  float    vz;                   // [m/s]
   float    pitch_rate, yaw_rate; // [rad/s]
   uint8_t  gripper;              // 0=開, 1=閉
   uint8_t  control_flags;        // bit0=動作許可, bit1=縦にする指示
   uint16_t reserved;
-} CartesianPayload;              // 44 bytes
+} PolarPayload;                  // 44 bytes
 
 typedef struct {
-  CommandHeader    header;
-  CartesianPayload payload;
-} CartesianPacket;               // 60 bytes
+  CommandHeader header;
+  PolarPayload  payload;
+} PolarPacket;                   // 60 bytes
 
 // packet_type = 0x02 (ROS2 → MCU。パターンB)
 typedef struct {
@@ -244,7 +264,9 @@ typedef struct {
 typedef struct {
   CommandHeader header;        // seq はフィードバック自身の連番
   uint32_t seq_echo;           // 最後に受信した指令の seq
-  float    x, y, z;            // FK結果 [m]
+  float    r;                  // FK結果 [m]
+  float    theta;              // FK結果 [rad]
+  float    z;                  // FK結果 [m]
   float    pitch, yaw;         // [rad]
   uint16_t status_flags;       // §3.5
   uint8_t  gripper_state;      // 実際のグリッパ状態 (0=開, 1=閉)
@@ -255,7 +277,7 @@ typedef struct {
 #pragma pack(pop)
 
 _Static_assert(sizeof(CommandHeader)   == 16, "layout mismatch");
-_Static_assert(sizeof(CartesianPacket) == 60, "layout mismatch");
+_Static_assert(sizeof(PolarPacket)     == 60, "layout mismatch");
 _Static_assert(sizeof(JointPacket)     == 60, "layout mismatch");
 _Static_assert(sizeof(FeedbackPacket)  == 64, "layout mismatch");
 ```
@@ -291,9 +313,10 @@ _Static_assert(sizeof(FeedbackPacket)  == 64, "layout mismatch");
 
 ```c
 // 制御ループ (1kHz推奨) ごと
-target_x += vx * dt;   // dt = 自分のループ周期
-target_y += vy * dt;
-// ... z, pitch, yaw も同様
+target_r     += r_dot     * dt;   // dt = 自分のループ周期
+target_theta += theta_dot * dt;
+// ... z, pitch, yaw も同様 (極座標のまま外挿してよい。
+//     直交座標に戻してから外挿する必要は無い)
 ```
 
 - 新しいパケットが来たら位置を絶対値で再同期する (積分誤差はここでリセットされる。
@@ -329,14 +352,20 @@ target_y += vy * dt;
 
 ## 5. 座標系
 
-受信する `x, y, z` は **field座標系 = ロボットのベース座標系** (完全に同一。
-座標変換は存在しない)。
+受信する `r, θ, z` は **field座標系 = ロボットのベース座標系** を極座標で
+表したもの (座標変換は存在しない。ROS2側が同じ座標系のまま極座標へ直しているだけ)。
 
-- 原点: ロボット設置エリア (縦300×横700mm) の中心
-- +X: 設置エリアから作業エリア (ワークが並んでいる方向) へ
-- +Y: 右から左
+- 原点: ロボット設置エリア (縦300×横700mm) の中心。
+  **極座標の原点 (r=0) でもあり、ターンテーブルの回転軸と一致する前提**
+  (ターンテーブル軸がここからずれていた場合は申告してほしい)
+- +X: 設置エリアから作業エリア (ワークが並んでいる方向) へ。**θ = 0 の向き**
+- +Y: 右から左。**θ = +π/2 の向き** (θ は +X から +Y へ回る向きが正)
 - +Z: 上
 - 単位: m / rad (ROS標準)
+
+直交座標へ戻したいときは `x = r·cos θ`, `y = r·sin θ`。
+ROS2側は §3.4 のフィードバックをこの式で直交座標へ戻して
+`/catchrobo/arm/current_pose` に流している。
 
 寸法の詳細は [`field_dimensions.md`](field_dimensions.md) を参照。
 IK/FKに必要なリンク長・機構定数はマイコン側が実測して持つ (ROS2側は持たない)。
@@ -389,29 +418,29 @@ ros2 topic pub --once /catchrobo/arm/target_pose geometry_msgs/msg/PoseStamped \
 
 ### 7.3 実バイト列の例 (パーサの答え合わせ用)
 
-以下は実際に `UdpProtocol::encodeCartesian` / `struct.pack` が生成するバイト列
+以下は実際に `UdpProtocol::encodePolar` / `struct.pack` が生成するバイト列
 そのもの。自作パーサのテストベクタとして使える。
 
-**0x01 Cartesian指令 (60バイト):**
-値: x=0.05, y=0.2, z=0.075, pitch=0.1, yaw=0.2, vx=vy=0.0667, vz=-0.0333,
-pitch_rate=0.1333, yaw_rate=0.2667, gripper=0, control_flags=0x01,
-seq=100, timestamp_us=1724400000123456
+**0x01 極座標指令 (60バイト):**
+値: r=0.25, theta=1.2, z=0.075, pitch=0.1, yaw=0.2, r_dot=0.0667,
+theta_dot=0.2667, vz=-0.0333, pitch_rate=0.1333, yaw_rate=0.2667,
+gripper=0, control_flags=0x01, seq=100, timestamp_us=1724400000123456
 
 ```
 offset  bytes (hex, リトルエンディアン)   field
-   0    01                        protocol_version = 1
+   0    02                        protocol_version = 2
    1    01                        packet_type      = 0x01
    2    2c 00                     payload_length   = 44
    4    64 00 00 00               seq              = 100
    8    40 42 75 29 55 20 06 00   timestamp_us     = 1724400000123456
-  16    cd cc 4c 3d               x     = 0.05  [m]
-  20    cd cc 4c 3e               y     = 0.2   [m]
+  16    00 00 80 3e               r     = 0.25  [m]
+  20    9a 99 99 3f               theta = 1.2   [rad]
   24    9a 99 99 3d               z     = 0.075 [m]
   28    cd cc cc 3d               pitch = 0.1   [rad]
   32    cd cc 4c 3e               yaw   = 0.2   [rad]
-  36    02 9a 88 3d               vx    = 0.0667  [m/s]
-  40    02 9a 88 3d               vy    = 0.0667  [m/s]
-  44    95 65 08 bd               vz    = -0.0333 [m/s]
+  36    02 9a 88 3d               r_dot     = 0.0667  [m/s]
+  40    e7 8c 88 3e               theta_dot = 0.2667  [rad/s]
+  44    95 65 08 bd               vz        = -0.0333 [m/s]
   48    cc 7f 08 3e               pitch_rate = 0.1333 [rad/s]
   52    e7 8c 88 3e               yaw_rate   = 0.2667 [rad/s]
   56    00                        gripper       = 0 (開)
@@ -421,27 +450,27 @@ offset  bytes (hex, リトルエンディアン)   field
 
 60バイト連続:
 ```
-01 01 2c 00 64 00 00 00 40 42 75 29 55 20 06 00 cd cc 4c 3d cd cc 4c 3e
-9a 99 99 3d cd cc cc 3d cd cc 4c 3e 02 9a 88 3d 02 9a 88 3d 95 65 08 bd
+02 01 2c 00 64 00 00 00 40 42 75 29 55 20 06 00 00 00 80 3e 9a 99 99 3f
+9a 99 99 3d cd cc cc 3d cd cc 4c 3e 02 9a 88 3d e7 8c 88 3e 95 65 08 bd
 cc 7f 08 3e e7 8c 88 3e 00 01 00 00
 ```
 
 **0x81 フィードバック (5関節、64バイト):**
-値: seq=2500 (FB自身の連番), seq_echo=100, x=0.051, y=0.199, z=0.076,
+値: seq=2500 (FB自身の連番), seq_echo=100, r=0.2505, theta=1.199, z=0.076,
 pitch=0.1, yaw=0.2, status_flags=0, gripper_state=0, joint_count=5,
 joints=[0.21, 0.21, 1.05, -0.35, -0.35] (§3.3の並び順)
 
 ```
 offset  bytes (hex)               field
-   0    01                        protocol_version = 1
+   0    02                        protocol_version = 2
    1    81                        packet_type      = 0x81
    2    30 00                     payload_length   = 48 (= 28 + 4×5)
    4    c4 09 00 00               seq              = 2500
-   8    50 69 75 29 55 20 06 00   timestamp_us
+   8    50 42 75 29 55 20 06 00   timestamp_us
   16    64 00 00 00               seq_echo = 100
-  20    60 e5 50 3d               x = 0.051 [m] (FK結果)
-  24    a8 c6 4b 3e               y = 0.199 [m]
-  28    e3 a5 9b 3d               z = 0.076 [m]
+  20    89 41 80 3e               r     = 0.2505 [m]   (FK結果)
+  24    d5 78 99 3f               theta = 1.199  [rad] (FK結果)
+  28    e3 a5 9b 3d               z     = 0.076  [m]
   32    cd cc cc 3d               pitch = 0.1 [rad]
   36    cd cc 4c 3e               yaw   = 0.2 [rad]
   40    00 00                     status_flags = 0x0000 (正常)
@@ -456,8 +485,8 @@ offset  bytes (hex)               field
 
 64バイト連続:
 ```
-01 81 30 00 c4 09 00 00 50 69 75 29 55 20 06 00 64 00 00 00 60 e5 50 3d
-a8 c6 4b 3e e3 a5 9b 3d cd cc cc 3d cd cc 4c 3e 00 00 00 05 3d 0a 57 3e
+02 81 30 00 c4 09 00 00 50 42 75 29 55 20 06 00 64 00 00 00 89 41 80 3e
+d5 78 99 3f e3 a5 9b 3d cd cc cc 3d cd cc 4c 3e 00 00 00 05 3d 0a 57 3e
 3d 0a 57 3e 66 66 86 3f 33 33 b3 be 33 33 b3 be
 ```
 
@@ -487,5 +516,7 @@ UDPの指令だけでは動かない。以下はパケットでは送られて�
 | `pitch`/`yaw` の扱い | 連続値 (float32) として定義済みだが**実質未使用** | 2026-09-05 確認: ピッチは機構的に2値 (横倒し/縦) であり、**`control_flags` bit1 が正本**。連続値の `pitch`/`pitch_rate` は VR運用・自動シーケンスのどちらでも常に0が流れる (PS4の右スティックだけが唯一の非ゼロ源だが、5軸機構に姿勢の自由度が無いため実現できない)。**位置(x,y,z)+速度+グリッパ+bit1 だけ実装すればよく、pitch/yaw は無視してよい。** 将来手首を追加する場合の枠として残してある |
 | 把持確認 | ROS2側は固定時間待ち (0.3s) の暫定実装 | `gripper_state` を実状態で返してもらえれば、将来「実際に閉じたことの確認」に置き換える |
 | ピッチ完了の確認 | ROS2側は固定時間待ち (`orient_dwell_sec` 既定0.5s) の暫定実装 | 0x81 にピッチの実状態を返すフィールドが無い。返せるようになれば把持確認とまとめて実確認へ置き換える |
+| ターンテーブル回転軸の位置 | ベース座標系の原点 (0, 0) と一致する前提 (§5)。ROS2側の値は `sharmech/params/robot_geometry.yaml` の `kinematics.turntable_axis_x/y_m` (未実測) | ずれている場合、ROS2側が送る `r`,`θ` の原点が実際の回転軸と食い違う。**実測して申告してほしい** (ROS2側で原点をずらして送るよう直す) |
+| θ の可動域 | マイコン側の裁量 | ROS2側は ±π を超える連続値を送りうる (§3.2)。物理的に回れない範囲は §4.1 の可動域外破棄で弾いてよい |
 | 0x02 (関節指令) | ワイヤ仕様は確定・ROS2側実装済み | リンク長が未実測のため当面実機では使わない。実装優先度は低くてよい |
 | 可動域の値 | マイコン側の裁量 | 実測が揃い次第、ROS2側の作業領域クランプ値と整合を取る |

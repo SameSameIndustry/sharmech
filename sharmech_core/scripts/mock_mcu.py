@@ -6,8 +6,11 @@
 sharmech_core/include/sharmech_core/utility/udp_protocol.hpp が正本。
 このスクリプトは ROS2 に依存せず、標準ライブラリのみで動く。
 
-デフォルト動作: Cartesian 指令 (packet_type=0x01) を受信すると、指令された
+デフォルト動作: 極座標指令 (packet_type=0x01) を受信すると、指令された
 位置・姿勢へ即座に到達したものとして内部状態を更新する (補間はしない)。
+**xy平面は極座標 (r, θ) で送受信する (protocol_version 2)。** θ は ROS2 側が
+アンラップした連続値で届くが、本モックは値をそのまま保持してエコーするだけ
+なので ±π の外でも扱いは変わらない。
 フィードバック (0x81) は仕様どおり **指令の受信とは独立に一定周期
 (--feedback-rate、既定100Hz) で自発送信する** (2026-09-01確定の契約。
 実MCUは起動直後から送るが、本モックは送り先アドレスを知らないため
@@ -17,7 +20,7 @@ sharmech_core/include/sharmech_core/utility/udp_protocol.hpp が正本。
 
 関節指令 (packet_type=0x02、パターンB) も受理する。この場合は指令された
 関節角をそのままフィードバックの joint_positions にエコーバックする。
-ただし本スクリプトは FK を持たないため、0x02 に対する x/y/z/pitch/yaw の
+ただし本スクリプトは FK を持たないため、0x02 に対する r/θ/z/pitch/yaw の
 フィードバックは最後の値のまま更新されない (実機のMCUはFKして返す契約。
 hardware_bridge_node 側のプロトコル疎通確認用と割り切ること)。
 
@@ -38,10 +41,11 @@ HEADER_FMT = "<BBHIQ"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 assert HEADER_SIZE == 16
 
-# CartesianPayload (44B)
-CARTESIAN_PAYLOAD_FMT = "<10fBBH"
-CARTESIAN_PAYLOAD_SIZE = struct.calcsize(CARTESIAN_PAYLOAD_FMT)
-assert CARTESIAN_PAYLOAD_SIZE == 44
+# PolarPayload (44B): r, theta, z, pitch, yaw, r_dot, theta_dot, vz,
+# pitch_rate, yaw_rate, gripper, control_flags, reserved
+POLAR_PAYLOAD_FMT = "<10fBBH"
+POLAR_PAYLOAD_SIZE = struct.calcsize(POLAR_PAYLOAD_FMT)
+assert POLAR_PAYLOAD_SIZE == 44
 
 # JointPayload (44B): q[5] + qdot[5] + gripper + control_flags + reserved。
 # 並び順は [shoulder_left, shoulder_right, turntable, knee_left, knee_right]
@@ -50,14 +54,15 @@ JOINT_PAYLOAD_FMT = "<10fBBH"
 JOINT_PAYLOAD_SIZE = struct.calcsize(JOINT_PAYLOAD_FMT)
 assert JOINT_PAYLOAD_SIZE == 44
 
-# FeedbackFixedPart の固定部 (ヘッダを除く、28B): seq_echo u32, xyz/pitch/yaw f32*5,
-# status_flags u16, gripper_state u8, joint_count u8
+# FeedbackFixedPart の固定部 (ヘッダを除く、28B): seq_echo u32,
+# r/theta/z/pitch/yaw f32*5, status_flags u16, gripper_state u8, joint_count u8
 FEEDBACK_FIXED_FMT = "<I5fHBB"
 FEEDBACK_FIXED_SIZE = struct.calcsize(FEEDBACK_FIXED_FMT)
 assert FEEDBACK_FIXED_SIZE == 28
 
-PROTOCOL_VERSION = 1
-PACKET_TYPE_CARTESIAN = 0x01
+# 2 = xy平面を極座標 (r, θ) に変更した版 (udp_protocol.hpp の kProtocolVersion)
+PROTOCOL_VERSION = 2
+PACKET_TYPE_POLAR = 0x01
 PACKET_TYPE_JOINT = 0x02
 PACKET_TYPE_STATE_FEEDBACK = 0x81
 
@@ -69,21 +74,21 @@ FLAG_UNINITIALIZED = 1 << 3
 FLAG_COMMAND_REJECTED = 1 << 4
 
 
-def decode_cartesian(data: bytes):
-    if len(data) < HEADER_SIZE + CARTESIAN_PAYLOAD_SIZE:
+def decode_polar(data: bytes):
+    if len(data) < HEADER_SIZE + POLAR_PAYLOAD_SIZE:
         return None
     version, ptype, payload_len, seq, ts_us = struct.unpack_from(HEADER_FMT, data, 0)
-    if version != PROTOCOL_VERSION or ptype != PACKET_TYPE_CARTESIAN:
+    if version != PROTOCOL_VERSION or ptype != PACKET_TYPE_POLAR:
         return None
-    if payload_len != CARTESIAN_PAYLOAD_SIZE:
+    if payload_len != POLAR_PAYLOAD_SIZE:
         return None
-    (x, y, z, pitch, yaw, vx, vy, vz, pitch_rate, yaw_rate,
+    (r, theta, z, pitch, yaw, r_dot, theta_dot, vz, pitch_rate, yaw_rate,
      gripper, control_flags, _reserved) = struct.unpack_from(
-        CARTESIAN_PAYLOAD_FMT, data, HEADER_SIZE)
+        POLAR_PAYLOAD_FMT, data, HEADER_SIZE)
     return {
         "seq": seq, "timestamp_us": ts_us,
-        "x": x, "y": y, "z": z, "pitch": pitch, "yaw": yaw,
-        "vx": vx, "vy": vy, "vz": vz,
+        "r": r, "theta": theta, "z": z, "pitch": pitch, "yaw": yaw,
+        "r_dot": r_dot, "theta_dot": theta_dot, "vz": vz,
         "pitch_rate": pitch_rate, "yaw_rate": yaw_rate,
         "gripper": gripper, "control_flags": control_flags,
     }
@@ -106,14 +111,14 @@ def decode_joint(data: bytes):
     }
 
 
-def encode_feedback(seq, seq_echo, timestamp_us, x, y, z, pitch, yaw,
+def encode_feedback(seq, seq_echo, timestamp_us, r, theta, z, pitch, yaw,
                     status_flags, gripper_closed, joint_positions):
     payload_len = FEEDBACK_FIXED_SIZE + 4 * len(joint_positions)
     header = struct.pack(
         HEADER_FMT, PROTOCOL_VERSION, PACKET_TYPE_STATE_FEEDBACK,
         payload_len, seq, timestamp_us)
     fixed = struct.pack(
-        FEEDBACK_FIXED_FMT, seq_echo, x, y, z, pitch, yaw,
+        FEEDBACK_FIXED_FMT, seq_echo, r, theta, z, pitch, yaw,
         status_flags, 1 if gripper_closed else 0, len(joint_positions))
     joints = struct.pack("<%df" % len(joint_positions), *joint_positions) \
         if joint_positions else b""
@@ -135,7 +140,7 @@ def main():
     parser.add_argument("--status-flags", type=lambda v: int(v, 0), default=0,
                         help="常に載せる status_flags (異常系の手動試験用。例: 0x4 = watchdog)")
     parser.add_argument("--tracking-error-limit", type=float, default=0.0,
-                        help="追従誤差[m]がこれを超えたら FLAG_TRACKING_ERROR を立てる "
+                        help="追従誤差(r-z平面の距離[m])がこれを超えたら FLAG_TRACKING_ERROR を立てる "
                              "(0 で無効。--lag と併用すると実機に近い立ち方をする)")
     parser.add_argument("--watchdog-timeout", type=float, default=0.05,
                         help="指令がこの秒数途絶したら FLAG_WATCHDOG を立てて外挿を止める "
@@ -155,12 +160,12 @@ def main():
           f"feedback={args.feedback_rate}Hz)", file=sys.stderr)
 
     # 現在の「実位置」。--lag が 0 なら毎回コマンド値に即座に一致させる
-    current = {"x": 0.0, "y": 0.0, "z": 0.0, "pitch": 0.0, "yaw": 0.0}
+    current = {"r": 0.0, "theta": 0.0, "z": 0.0, "pitch": 0.0, "yaw": 0.0}
     gripper_closed = False
     feedback_seq = 0
     last_recv_seq = None
     last_recv_time = None
-    last_cmd_pos = None      # 追従誤差フラグ用の直近Cartesian指令位置
+    last_cmd_pos = None      # 追従誤差フラグ用の直近の極座標指令位置 (r, θ, z)
     joints = [0.0] * args.joint_count
     client_addr = None       # フィードバックの宛先 (最初に指令をくれた相手)
     rejected_until = 0.0     # seq逆転破棄をbit4で通知しておく期限
@@ -181,7 +186,7 @@ def main():
             processed = False
             if recv_data is not None and not (
                     args.drop_rate > 0.0 and random.random() < args.drop_rate):
-                cmd = decode_cartesian(recv_data)
+                cmd = decode_polar(recv_data)
                 joint_cmd = None if cmd is not None else decode_joint(recv_data)
                 if cmd is None and joint_cmd is None:
                     if not args.quiet:
@@ -206,17 +211,18 @@ def main():
                         processed = True
                         if cmd is not None:
                             gripper_closed = bool(cmd["gripper"])
-                            last_cmd_pos = (cmd["x"], cmd["y"], cmd["z"])
-                            for key in ("x", "y", "z", "pitch", "yaw"):
+                            last_cmd_pos = (cmd["r"], cmd["theta"], cmd["z"])
+                            for key in ("r", "theta", "z", "pitch", "yaw"):
                                 current[key] += (cmd[key] - current[key]) * alpha
                             if not args.quiet:
                                 print(f"[mock_mcu] recv seq={seq:6d} "
-                                      f"pos=({cmd['x']:+.3f},{cmd['y']:+.3f},{cmd['z']:+.3f}) "
+                                      f"pos=(r={cmd['r']:+.3f},th={cmd['theta']:+.3f},"
+                                      f"z={cmd['z']:+.3f}) "
                                       f"gripper={'closed' if gripper_closed else 'open'}",
                                       file=sys.stderr)
                         else:
                             # 0x02 (パターンB): 関節角をエコーバックする。FKを持たないため
-                            # x/y/z/pitch/yaw は更新しない (docstring参照)
+                            # r/theta/z/pitch/yaw は更新しない (docstring参照)
                             gripper_closed = bool(joint_cmd["gripper"])
                             if len(joints) != JOINT_COUNT:
                                 joints = [0.0] * JOINT_COUNT
@@ -250,8 +256,15 @@ def main():
             if now < rejected_until:
                 status_flags |= FLAG_COMMAND_REJECTED
             if args.tracking_error_limit > 0.0 and last_cmd_pos is not None:
+                # 極座標のまま距離を測ると θ [rad] と r/z [m] の単位が混ざるので、
+                # 直交座標へ戻してから誤差を測る
                 error = math.dist(
-                    (current["x"], current["y"], current["z"]), last_cmd_pos)
+                    (current["r"] * math.cos(current["theta"]),
+                     current["r"] * math.sin(current["theta"]),
+                     current["z"]),
+                    (last_cmd_pos[0] * math.cos(last_cmd_pos[1]),
+                     last_cmd_pos[0] * math.sin(last_cmd_pos[1]),
+                     last_cmd_pos[2]))
                 if error > args.tracking_error_limit:
                     status_flags |= FLAG_TRACKING_ERROR
 
@@ -262,7 +275,7 @@ def main():
             packet = encode_feedback(
                 feedback_seq, last_recv_seq if last_recv_seq is not None else 0,
                 time.monotonic_ns() // 1000,
-                current["x"], current["y"], current["z"],
+                current["r"], current["theta"], current["z"],
                 current["pitch"], current["yaw"],
                 status_flags, gripper_closed, joints)
             sock.sendto(packet, client_addr)

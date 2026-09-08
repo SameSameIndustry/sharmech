@@ -77,6 +77,9 @@ private:
   bool gripper_state_{false};              // ラッチしたグリッパ状態
   bool orient_vertical_state_{false};         // ラッチした「縦にする」指示
   uint32_t send_seq_{0};
+  // 直前に送った θ [rad]。次の θ をこの値の近傍へアンラップして連続化する
+  // (±π のまたぎでターンテーブルを逆走させないため)
+  double last_sent_theta_{0.0};
   std::optional<uint32_t> last_recv_seq_;           // 順序逆転の検出用
   std::optional<rclcpp::Time> last_feedback_time_;  // 途絶の検出用
   bool warned_joint_names_{false};

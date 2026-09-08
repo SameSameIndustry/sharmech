@@ -10,7 +10,7 @@ ROS2 トピックと UDP パケットの間の**変換と輸送のみ**を担う
 
 | 方向 | 処理 |
 |---|---|
-| 送信 | Cartesian 指令(または関節指令)+ グリッパ状態を UDP パケットに整形して送る |
+| 送信 | Cartesian 指令(または関節指令)+ グリッパ状態を UDP パケットに整形して送る。**その際 xy 平面を極座標 (r, θ) に直す** (下記) |
 | 受信 | MCU から実状態を受け取り、`/catchrobo/arm/current_pose` と `/joint_states` へ publish |
 
 送信するパケットの種類は **config で切り替える**。
@@ -62,7 +62,7 @@ ROS2 トピックと UDP パケットの間の**変換と輸送のみ**を担う
 | `local_port` | 8889 | 受信待ち受けポート |
 | `feedback_poll_rate` | 200.0 | 受信ポーリング周期 [Hz] |
 | `feedback_timeout` | 0.5 | この時間フィードバックが無ければ警告 [s] |
-| `protocol_version` | 1 | 送出するプロトコル版。受信時の検証にも使う |
+| `protocol_version` | 2 | 送出するプロトコル版。受信時の検証にも使う (2 = xy平面が極座標。1 とは非互換) |
 | `joint_names` | `[]` | `/joint_states` に載せる関節名。順序は MCU の返す配列と一致させる |
 
 ## 処理フロー
@@ -74,9 +74,41 @@ UDP も 100Hz になる。
 
 ```
 onCartesianCommand(msg):
-    packet ← encoder_->encode(msg, gripper_state_, send_seq_++)
+    (r, θ, ṙ, θ̇) ← PolarUtils::toPolar(x, y, vx, vy, last_sent_theta_)
+    last_sent_theta_ ← θ
+    packet ← UdpProtocol::encodePolar(r, θ, z, pitch, yaw, ṙ, θ̇, vz, ..., send_seq_++)
     sendto(sockfd_, packet)
 ```
+
+### xy 平面は送信直前に極座標へ直す
+
+ROS2 層は一貫して直交座標 (`/catchrobo/command/cartesian` の `x, y, z`) で扱うが、
+UDP に載せる直前にここで `r, θ` へ変換する (`utility/polar_utils.hpp`)。
+この機構の xy 平面は「ターンテーブルが θ、肩の対称二軸駆動が r」の r-θ 型
+(CLAUDE.md「ロボット構成」) なので、直交座標のまま渡すと MCU が毎周期
+atan2/hypot をやり直すことになる。`z` は肘/膝機構が直接与えるため変換しない。
+
+| ROS 側 | UDP 側 | 式 |
+|---|---|---|
+| `x, y` | `r, theta` | `r = hypot(x,y)`, `θ = atan2(y,x)` |
+| `vx, vy` | `r_dot, theta_dot` | `ṙ = (x·vx + y·vy)/r`, `θ̇ = (x·vy − y·vx)/r²` |
+
+**θ はアンラップして連続値で送る。** 作業領域は X が -2.045〜+0.941 m なので
+-X 軸 (θ = ±π) を実際にまたぐ。atan2 の生値をそのまま送るとシューティングボックスの
+上で θ が +3.14 → -3.14 に飛び、ターンテーブルが1回転逆走する。直前に送った θ
+(`last_sent_theta_`) の近傍の分岐を選ぶことで連続にしている。**そのぶん送出する θ は
+±π を超えうる**ので、MCU 側で正規化し直さないことが契約 (`mcu_spec.md` §3.2)。
+
+`r ≒ 0` (原点。θ が定義できない) では θ を直前値のまま保持し、`ṙ`・`θ̇` を 0 にする
+(`PolarUtils::kMinRadius`)。NaN と θ̇ の発散を出さないための保護。
+
+**原点付近を通る直線軌道では θ がステップ状に変化する。** これは実装の欠陥ではなく
+r-θ 表現そのものの性質 (原点を通る直線は極座標では θ が不連続)。原点から出発する
+初回移動で特に目立つ (mock_mcu での E2E では θ が 0 → 2.944 rad へ1ステップで飛んだ)。
+MCU 側は常時スルーレート制限をかける契約 (`mcu_spec.md` §4.4) なのでジャンプはしないが、
+**実運用では起動時に `/catchrobo/arm/current_pose` へ目標を同期する**ため原点発進には
+ならない。作業領域が原点を含む以上、原点を通り抜ける軌道を出さないのは上流
+(`motion_generator_node` / 自動シーケンス) 側の運用の問題として残る。
 
 **タイマー方式にしない理由**
 
@@ -104,7 +136,7 @@ onFeedbackTimer():
         検証(下記) → 失敗なら破棄して次へ
         最新のパケットとして保持
     最新パケットがあれば:
-        /catchrobo/arm/current_pose ← Cartesian姿勢
+        /catchrobo/arm/current_pose ← 極座標を直交座標へ戻した姿勢
         /joint_states       ← 関節角
         last_feedback_time_ ← now
 ```
@@ -118,14 +150,14 @@ onFeedbackTimer():
 
 | offset | 型 | 名前 | 説明 |
 |---|---|---|---|
-| 0 | `uint8` | `protocol_version` | 現在 1 |
+| 0 | `uint8` | `protocol_version` | 現在 2 |
 | 1 | `uint8` | `packet_type` | `0x81` = 状態フィードバック |
 | 2 | `uint16` | `payload_length` | `28 + 4 × joint_count` |
 | 4 | `uint32` | `seq` | フィードバック自身の連番 |
 | 8 | `uint64` | `timestamp_us` | MCU 側の送信時刻 [μs] |
 | 16 | `uint32` | `seq_echo` | **最後に受信した指令の `seq`**。往復遅延の測定に使う |
-| 20 | `float32` | `x` | 実位置 [m] |
-| 24 | `float32` | `y` | 実位置 [m] |
+| 20 | `float32` | `r` | 実位置 [m]。指令と同じく xy 平面は極座標 |
+| 24 | `float32` | `theta` | 実位置 [rad]。連続値でなくてよい (`cos`/`sin` で戻すため) |
 | 28 | `float32` | `z` | 実位置 [m] |
 | 32 | `float32` | `pitch` | 実姿勢 [rad] |
 | 36 | `float32` | `yaw` | 実姿勢 [rad] |
@@ -162,6 +194,12 @@ MCU側の要求事項一覧を含め、**契約の正本は `sharmech/docs/mcu_s
 
 こうすることで「ROS2 は運動学を持たない」という原則が保たれ、ROS2 は受け取って publish する
 だけで済む。関節角も併せて返すのは診断と rviz 表示のため。
+
+FK 結果も指令と同じ極座標 (`r`, `theta`) で返す契約にしてあるので、MCU は xy 平面の
+直交座標を一切扱わない。`/catchrobo/arm/current_pose` は VR・シミュレータとの契約で
+base 座標系の直交座標なので、`x = r·cos θ`, `y = r·sin θ` で戻すのは本ノードの責務
+(`PolarUtils::toX`/`toY`)。これは座標「変換」ではなく同じ座標系の表現の戻しなので、
+「座標変換は ROS2 側でやらない」原則には抵触しない。
 
 ## 内部状態
 
@@ -203,7 +241,7 @@ publish しない方が、下流(`motion_generator_node`)が「フィードバ�
 
 ```
 PacketEncoder (抽象)
-  ├─ CartesianPacketEncoder   packet_type = 1   ← 今回実装
+  ├─ PolarPacketEncoder       packet_type = 1   ← 今回実装
   └─ JointPacketEncoder       packet_type = 2   ← 将来追加
 ```
 

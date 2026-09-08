@@ -1,5 +1,6 @@
 #include "sharmech_core/hardware_bridge_node.hpp"
 #include "sharmech_core/utility/orientation_utils.hpp"
+#include "sharmech_core/utility/polar_utils.hpp"
 #include "sharmech_core/utility/udp_protocol.hpp"
 
 #include <rclcpp_components/register_node_macro.hpp>
@@ -129,17 +130,25 @@ void HardwareBridgeNode::onCartesianCommand(
   // 手首は pitch/yaw の2自由度のみ。roll 成分は捨てる
   const auto pitch_yaw = OrientationUtils::toPitchYaw(msg->pose.orientation);
 
+  // xy平面は極座標 (r, θ) で送る契約 (protocol_version 2)。z/pitch/yaw は素通し。
+  // θ は直前に送った値を基準にアンラップし、-x軸をまたいでも +π ⇄ -π に
+  // 飛ばない連続値にする (飛ぶとターンテーブルが1回転逆走する)
+  const auto polar = PolarUtils::toPolar(
+    msg->pose.position.x, msg->pose.position.y,
+    msg->twist.linear.x, msg->twist.linear.y, last_sent_theta_);
+  last_sent_theta_ = polar.theta;
+
   const uint64_t timestamp_us =
     static_cast<uint64_t>(now().nanoseconds() / 1000);
 
-  const auto packet = UdpProtocol::encodeCartesian(
-    static_cast<float>(msg->pose.position.x),
-    static_cast<float>(msg->pose.position.y),
+  const auto packet = UdpProtocol::encodePolar(
+    static_cast<float>(polar.r),
+    static_cast<float>(polar.theta),
     static_cast<float>(msg->pose.position.z),
     static_cast<float>(pitch_yaw.pitch),
     static_cast<float>(pitch_yaw.yaw),
-    static_cast<float>(msg->twist.linear.x),
-    static_cast<float>(msg->twist.linear.y),
+    static_cast<float>(polar.r_dot),
+    static_cast<float>(polar.theta_dot),
     static_cast<float>(msg->twist.linear.z),
     static_cast<float>(msg->twist.angular.y),   // pitch_rate
     static_cast<float>(msg->twist.angular.z),   // yaw_rate
@@ -256,8 +265,10 @@ void HardwareBridgeNode::onFeedbackTimer()
     geometry_msgs::msg::PoseStamped pose_msg;
     pose_msg.header.stamp = *last_feedback_time_;
     pose_msg.header.frame_id = "field";
-    pose_msg.pose.position.x = latest->x;
-    pose_msg.pose.position.y = latest->y;
+    // フィードバックも極座標で届く (0x81)。/catchrobo/arm/current_pose は
+    // VR・シミュレータとの契約で base 座標系の直交座標なのでここで戻す
+    pose_msg.pose.position.x = PolarUtils::toX(latest->r, latest->theta);
+    pose_msg.pose.position.y = PolarUtils::toY(latest->r, latest->theta);
     pose_msg.pose.position.z = latest->z;
     tf2::Quaternion q;
     q.setRPY(0.0, latest->pitch, latest->yaw);

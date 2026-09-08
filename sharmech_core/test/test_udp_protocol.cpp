@@ -1,40 +1,43 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cmath>
 #include <cstring>
+#include <utility>
 #include <vector>
 
+#include "sharmech_core/utility/polar_utils.hpp"
 #include "sharmech_core/utility/udp_protocol.hpp"
 
 using namespace sharmech_core;              // NOLINT
 using namespace sharmech_core::udp_protocol;  // NOLINT
 
-TEST(UdpProtocol, EncodeCartesianProducesExpectedByteLayout)
+TEST(UdpProtocol, EncodePolarProducesExpectedByteLayout)
 {
-  const auto buffer = UdpProtocol::encodeCartesian(
+  const auto buffer = UdpProtocol::encodePolar(
     0.1f, 0.2f, 0.3f, 0.4f, 0.5f,
     0.01f, 0.02f, 0.03f, 0.04f, 0.05f,
     /*gripper_closed=*/ true, /*orient_vertical=*/ false,
     /*seq=*/ 42, /*timestamp_us=*/ 123456789ULL);
 
-  ASSERT_EQ(buffer.size(), sizeof(CartesianPacket));
+  ASSERT_EQ(buffer.size(), sizeof(PolarPacket));
 
-  CartesianPacket packet;
+  PolarPacket packet;
   std::memcpy(&packet, buffer.data(), sizeof(packet));
 
   EXPECT_EQ(packet.header.protocol_version, kProtocolVersion);
-  EXPECT_EQ(packet.header.packet_type, static_cast<uint8_t>(PacketType::kCartesianCommand));
-  EXPECT_EQ(packet.header.payload_length, sizeof(CartesianPayload));
+  EXPECT_EQ(packet.header.packet_type, static_cast<uint8_t>(PacketType::kPolarCommand));
+  EXPECT_EQ(packet.header.payload_length, sizeof(PolarPayload));
   EXPECT_EQ(packet.header.seq, 42u);
   EXPECT_EQ(packet.header.timestamp_us, 123456789ULL);
 
-  EXPECT_FLOAT_EQ(packet.payload.x, 0.1f);
-  EXPECT_FLOAT_EQ(packet.payload.y, 0.2f);
+  EXPECT_FLOAT_EQ(packet.payload.r, 0.1f);
+  EXPECT_FLOAT_EQ(packet.payload.theta, 0.2f);
   EXPECT_FLOAT_EQ(packet.payload.z, 0.3f);
   EXPECT_FLOAT_EQ(packet.payload.pitch, 0.4f);
   EXPECT_FLOAT_EQ(packet.payload.yaw, 0.5f);
-  EXPECT_FLOAT_EQ(packet.payload.vx, 0.01f);
-  EXPECT_FLOAT_EQ(packet.payload.vy, 0.02f);
+  EXPECT_FLOAT_EQ(packet.payload.r_dot, 0.01f);
+  EXPECT_FLOAT_EQ(packet.payload.theta_dot, 0.02f);
   EXPECT_FLOAT_EQ(packet.payload.vz, 0.03f);
   EXPECT_FLOAT_EQ(packet.payload.pitch_rate, 0.04f);
   EXPECT_FLOAT_EQ(packet.payload.yaw_rate, 0.05f);
@@ -42,32 +45,32 @@ TEST(UdpProtocol, EncodeCartesianProducesExpectedByteLayout)
   EXPECT_EQ(packet.payload.control_flags, kControlFlagEnable);
 }
 
-TEST(UdpProtocol, EncodeCartesianGripperOpenIsZero)
+TEST(UdpProtocol, EncodePolarGripperOpenIsZero)
 {
-  const auto buffer = UdpProtocol::encodeCartesian(
+  const auto buffer = UdpProtocol::encodePolar(
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     /*gripper_closed=*/ false, /*orient_vertical=*/ false, 0, 0);
-  CartesianPacket packet;
+  PolarPacket packet;
   std::memcpy(&packet, buffer.data(), sizeof(packet));
   EXPECT_EQ(packet.payload.gripper, 0);
 }
 
-TEST(UdpProtocol, EncodeCartesianOrientVerticalSetsBit1)
+TEST(UdpProtocol, EncodePolarOrientVerticalSetsBit1)
 {
-  const auto buffer = UdpProtocol::encodeCartesian(
+  const auto buffer = UdpProtocol::encodePolar(
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     /*gripper_closed=*/ false, /*orient_vertical=*/ true, 0, 0);
-  CartesianPacket packet;
+  PolarPacket packet;
   std::memcpy(&packet, buffer.data(), sizeof(packet));
   EXPECT_EQ(packet.payload.control_flags, kControlFlagEnable | kControlFlagOrientVertical);
 }
 
-TEST(UdpProtocol, EncodeCartesianOrientVerticalFalseLeavesBit1Clear)
+TEST(UdpProtocol, EncodePolarOrientVerticalFalseLeavesBit1Clear)
 {
-  const auto buffer = UdpProtocol::encodeCartesian(
+  const auto buffer = UdpProtocol::encodePolar(
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     /*gripper_closed=*/ false, /*orient_vertical=*/ false, 0, 0);
-  CartesianPacket packet;
+  PolarPacket packet;
   std::memcpy(&packet, buffer.data(), sizeof(packet));
   EXPECT_EQ(packet.payload.control_flags, kControlFlagEnable);
 }
@@ -99,7 +102,7 @@ TEST(UdpProtocol, EncodeJointProducesExpectedByteLayout)
   EXPECT_EQ(packet.payload.control_flags, kControlFlagEnable);
 }
 
-TEST(UdpProtocol, EncodeJointHasSameSizeAndFlagSemanticsAsCartesian)
+TEST(UdpProtocol, EncodeJointHasSameSizeAndFlagSemanticsAsPolar)
 {
   // ワイヤフォーマットの回帰検出: 0x02 は 0x01 と同じ60バイト・同じフラグ位置。
   // gripper (offset 56) / control_flags (offset 57) が両パケットで同一オフセット
@@ -107,13 +110,13 @@ TEST(UdpProtocol, EncodeJointHasSameSizeAndFlagSemanticsAsCartesian)
   const std::array<float, kJointCount> zeros{};
   const auto joint_buf = UdpProtocol::encodeJoint(
     zeros, zeros, /*gripper_closed=*/ true, /*orient_vertical=*/ true, 0, 0);
-  const auto cart_buf = UdpProtocol::encodeCartesian(
+  const auto polar_buf = UdpProtocol::encodePolar(
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     /*gripper_closed=*/ true, /*orient_vertical=*/ true, 0, 0);
 
-  ASSERT_EQ(joint_buf.size(), cart_buf.size());
-  EXPECT_EQ(joint_buf[56], cart_buf[56]);  // gripper
-  EXPECT_EQ(joint_buf[57], cart_buf[57]);  // control_flags
+  ASSERT_EQ(joint_buf.size(), polar_buf.size());
+  EXPECT_EQ(joint_buf[56], polar_buf[56]);  // gripper
+  EXPECT_EQ(joint_buf[57], polar_buf[57]);  // control_flags
   EXPECT_EQ(joint_buf[57], kControlFlagEnable | kControlFlagOrientVertical);
 }
 
@@ -150,8 +153,8 @@ std::vector<uint8_t> buildFeedbackPacket(
   fixed.header.seq = 7;
   fixed.header.timestamp_us = 99;
   fixed.seq_echo = 6;
-  fixed.x = 0.11f;
-  fixed.y = 0.22f;
+  fixed.r = 0.11f;
+  fixed.theta = 0.22f;
   fixed.z = 0.33f;
   fixed.pitch = 0.44f;
   fixed.yaw = 0.55f;
@@ -181,8 +184,8 @@ TEST(UdpProtocol, DecodeFeedbackRoundTripsWithJoints)
   EXPECT_EQ(fb->seq, 7u);
   EXPECT_EQ(fb->seq_echo, 6u);
   EXPECT_EQ(fb->timestamp_us, 99u);
-  EXPECT_FLOAT_EQ(fb->x, 0.11f);
-  EXPECT_FLOAT_EQ(fb->y, 0.22f);
+  EXPECT_FLOAT_EQ(fb->r, 0.11f);
+  EXPECT_FLOAT_EQ(fb->theta, 0.22f);
   EXPECT_FLOAT_EQ(fb->z, 0.33f);
   EXPECT_FLOAT_EQ(fb->pitch, 0.44f);
   EXPECT_FLOAT_EQ(fb->yaw, 0.55f);
@@ -204,14 +207,14 @@ TEST(UdpProtocol, DecodeFeedbackWithZeroJoints)
 
 TEST(UdpProtocol, DecodeFeedbackRejectsWrongProtocolVersion)
 {
-  const auto buffer = buildFeedbackPacket({}, /*protocol_version=*/ 2);
+  const auto buffer = buildFeedbackPacket({}, /*protocol_version=*/ kProtocolVersion + 1);
   EXPECT_FALSE(UdpProtocol::decodeFeedback(buffer.data(), buffer.size()).has_value());
 }
 
 TEST(UdpProtocol, DecodeFeedbackRejectsWrongPacketType)
 {
   const auto buffer = buildFeedbackPacket(
-    {}, kProtocolVersion, static_cast<uint8_t>(PacketType::kCartesianCommand));
+    {}, kProtocolVersion, static_cast<uint8_t>(PacketType::kPolarCommand));
   EXPECT_FALSE(UdpProtocol::decodeFeedback(buffer.data(), buffer.size()).has_value());
 }
 
@@ -236,6 +239,76 @@ TEST(UdpProtocol, DecodeFeedbackRejectsBufferShorterThanFixedPart)
 {
   const std::vector<uint8_t> tiny(10, 0);
   EXPECT_FALSE(UdpProtocol::decodeFeedback(tiny.data(), tiny.size()).has_value());
+}
+
+
+// ---- xy → r-θ 変換 (PolarUtils) ----
+// UDP に載る値そのものを作る変換なので、ワイヤフォーマットと同じ場所で回帰を見る
+
+TEST(PolarUtils, ConvertsPositionAndVelocityToPolar)
+{
+  // (x, y) = (3, 4) → r = 5, θ = atan2(4,3)
+  // 速度は純粋な半径方向 (単位ベクトル (0.6, 0.8) 方向に 1 m/s) にとると
+  // ṙ = 1, θ̇ = 0 になるはず
+  const auto p = PolarUtils::toPolar(3.0, 4.0, 0.6, 0.8, /*theta_ref=*/ 0.0);
+  EXPECT_NEAR(p.r, 5.0, 1e-9);
+  EXPECT_NEAR(p.theta, std::atan2(4.0, 3.0), 1e-9);
+  EXPECT_NEAR(p.r_dot, 1.0, 1e-9);
+  EXPECT_NEAR(p.theta_dot, 0.0, 1e-9);
+}
+
+TEST(PolarUtils, PureTangentialVelocityGivesZeroRadialRate)
+{
+  // (x, y) = (2, 0) で +y 方向に 1 m/s → ṙ = 0, θ̇ = v/r = 0.5 rad/s
+  const auto p = PolarUtils::toPolar(2.0, 0.0, 0.0, 1.0, 0.0);
+  EXPECT_NEAR(p.r, 2.0, 1e-9);
+  EXPECT_NEAR(p.r_dot, 0.0, 1e-9);
+  EXPECT_NEAR(p.theta_dot, 0.5, 1e-9);
+}
+
+TEST(PolarUtils, UnwrapsThetaAcrossNegativeXAxis)
+{
+  // 作業領域は X が -2.045〜+0.941 なので -x 軸 (θ = ±π) を実際にまたぐ。
+  // atan2 の生値なら +3.14 → -3.14 と飛ぶところを、直前値の近傍へ連続化する
+  const double before = PolarUtils::toPolar(-1.0, 0.05, 0, 0, 0.0).theta;   // ≒ +3.09
+  const double after = PolarUtils::toPolar(-1.0, -0.05, 0, 0, before).theta;
+  EXPECT_GT(after, M_PI);                       // -π 側へ飛ばず π を超えて連続
+  EXPECT_LT(std::abs(after - before), 0.2);     // 1回転ぶんの飛びが無い
+  // cos/sin で戻せば元の直交座標に一致する (アンラップは等価変換)
+  EXPECT_NEAR(PolarUtils::toX(1.0, after), -1.0 / std::hypot(1.0, 0.05), 1e-9);
+  EXPECT_NEAR(PolarUtils::toY(1.0, after), -0.05 / std::hypot(1.0, 0.05), 1e-9);
+}
+
+TEST(PolarUtils, KeepsWindingAfterMultipleTurns)
+{
+  // 何周しても直前値の近傍を選び続ける (θ は ±π に丸められない)
+  double theta = 0.0;
+  for (int i = 1; i <= 40; ++i) {
+    const double a = i * (M_PI / 4.0);
+    theta = PolarUtils::toPolar(std::cos(a), std::sin(a), 0, 0, theta).theta;
+    EXPECT_NEAR(theta, a, 1e-9);
+  }
+}
+
+TEST(PolarUtils, OriginSingularityHoldsThetaAndZeroesRates)
+{
+  // r ≒ 0 では θ が定義できない。NaN を出さず直前の θ を保持し速度を 0 にする
+  const auto p = PolarUtils::toPolar(0.0, 0.0, 1.0, 1.0, /*theta_ref=*/ 1.23);
+  EXPECT_DOUBLE_EQ(p.r, 0.0);
+  EXPECT_DOUBLE_EQ(p.theta, 1.23);
+  EXPECT_DOUBLE_EQ(p.r_dot, 0.0);
+  EXPECT_DOUBLE_EQ(p.theta_dot, 0.0);
+}
+
+TEST(PolarUtils, RoundTripsBackToCartesian)
+{
+  for (const auto & xy : {std::pair<double, double>{0.5, -0.3},
+      {-2.045, 0.675}, {-1.0, 0.0}, {0.941, -0.675}})
+  {
+    const auto p = PolarUtils::toPolar(xy.first, xy.second, 0, 0, 0.0);
+    EXPECT_NEAR(PolarUtils::toX(p.r, p.theta), xy.first, 1e-9);
+    EXPECT_NEAR(PolarUtils::toY(p.r, p.theta), xy.second, 1e-9);
+  }
 }
 
 int main(int argc, char ** argv)
