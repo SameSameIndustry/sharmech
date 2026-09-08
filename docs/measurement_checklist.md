@@ -9,6 +9,12 @@
 このファイルは**アームの現物を前にして順に埋めていくためのシート**である。
 埋めた値の入れ先は各項目に明記してある。
 
+> **2026-09-08 以降、入れ先はすべて `sharmech/params/robot_geometry.yaml` (正本) である。**
+> `config.yaml` や シミュレータ/VR の設定に直接書かない。値を入れたら
+> `python3 sharmech/params/generate.py` で各リポジトリ向けの設定を生成する。
+> 手順の全体は [`parameter_tuning.md`](parameter_tuning.md)。下表の「入れ先」は
+> `robot_geometry.yaml` 内のセクション名で読むこと。
+
 - 単位は全て **[m] / [rad]** (ROS標準)。ノギスの mm は 1000 で割ること
 - 座標系は `field` = ロボットのベース座標系 (原点・軸の向きは
   [`field_dimensions.md`](field_dimensions.md) が正本)
@@ -53,7 +59,7 @@
 
 ### 1.1 肩機構 (水平距離 r を与える)
 
-| 記号 | 入れ先 (`config.yaml` の `kinematics_node`) | 実測値 [m] | 備考 |
+| 記号 | 入れ先 (`robot_geometry.yaml` の `kinematics`) | 実測値 [m] | 備考 |
 |---|---|---|---|
 | a | `shoulder_pivot_half_separation_m` | ______ | **ピボット間距離を測って÷2** |
 | L1 | `shoulder_proximal_link_length_m` | ______ | |
@@ -61,7 +67,7 @@
 
 ### 1.2 肘/膝機構 (高さ z を与える)
 
-| 記号 | 入れ先 (`config.yaml` の `kinematics_node`) | 実測値 [m] | 備考 |
+| 記号 | 入れ先 (`robot_geometry.yaml` の `kinematics`) | 実測値 [m] | 備考 |
 |---|---|---|---|
 | a | `knee_pivot_half_separation_m` | ______ | **÷2を忘れない** |
 | L1 | `knee_proximal_link_length_m` | ______ | |
@@ -82,9 +88,9 @@
 
 | パラメータ | 入れ先 | 実測値 | 定義 |
 |---|---|---|---|
-| `turntable_axis_x_m` | `kinematics_node` | ______ | ターンテーブル回転軸の、ロボット設置エリア中心 (=`field`原点) から見たx |
-| `turntable_axis_y_m` | `kinematics_node` | ______ | 同y。設置エリアの左右中央に据えるなら 0.0 |
-| `knee_base_height_m` | `kinematics_node` | ______ | **肘/膝機構の d=0 が対応する床からの高さ z。** d はこの高さからの相対量として足される |
+| `turntable_axis_x_m` | `robot_geometry.yaml` の `kinematics` | ______ | ターンテーブル回転軸の、ロボット設置エリア中心 (=`field`原点) から見たx。**UDP で送る極座標 (r, θ) の原点でもある** (`mcu_spec.md` §5)。0 でないと分かったら `polar_utils.hpp` に軸位置を引く処理を足す必要がある |
+| `turntable_axis_y_m` | 同上 | ______ | 同y。設置エリアの左右中央に据えるなら 0.0 |
+| `knee_base_height_m` | 同上 | ______ | **肘/膝機構の d=0 が対応する床からの高さ z。** d はこの高さからの相対量として足される |
 
 `knee_base_height_m` は「肘/膝機構の2ピボットを結ぶ線の高さ」に相当する。
 d=0 は幾何的には EE がその線上にある状態だが、実機では到達できない姿勢のことが多い。
@@ -100,17 +106,26 @@ Z は 2026-08-30 のフィールド実測が上面図のみだったため、**X
 確定していない。** ここが仮値のままだと「Zに動かすと全部クランプで却下される」
 「箱に当たる」のどちらかになる。
 
-| パラメータ | 入れ先 (`config.yaml`) | 現在値 | 実測値 | 定義 |
+| パラメータ (`robot_geometry.yaml`) | 生成先 (ROS2 側の名前) | 現在値 | 実測値 | 定義 |
 |---|---|---|---|---|
-| `workspace_z_min` | `motion_generator_node` | 0.00 (仮) | ______ | EEが下がってよい下限。床・治具に当たらない高さ |
-| `workspace_z_max` | `motion_generator_node` | 0.30 (仮) | ______ | 上限。機構の可動上限か、上空の禁止区域の低い方 |
-| `slot_z_red` / `slot_z_blue` | `game_state_manager_node` | 0.05 一律 (仮) | ______ | シューティングボックスにワークを離す高さ。24箇所ぶんだが同じ値でよいはず |
-| `transport_clearance_z` | `game_state_manager_node` | 0.20 (仮) | ______ | 運搬中に上げる高さ。**箱の上端より高く** |
-| `retract_clearance_z` | `game_state_manager_node` | 0.20 (仮) | ______ | 設置後に退避する高さ。同上 |
-| `first_work_z_m` | `field_geometry` | 0.0 (仮) | ______ | 治具上のワーク中心の高さ。土台厚2.3mmは確定済みだが、土台が乗る面の絶対Zが未較正 |
+| `workspace.z_min_m` | `motion_generator_node.workspace_z_min` | 0.00 (仮) | ______ | EEが下がってよい下限。床・治具に当たらない高さ |
+| `workspace.z_max_m` | `motion_generator_node.workspace_z_max` | 0.30 (仮) | ______ | 上限。機構の可動上限か、上空の禁止区域の低い方 |
+| **`shooting_box.top_z_m`** | `game_state_manager_node.box_top_z_m` | 0.156 (CAD) | ______ | **★高さの基準面 (箱の上端)。2026-09-06 以降、Z方向で実測が要るのは実質これ1個。** 下の相対値がすべてこれに追従する |
+| `shooting_box.release_below_top_m` | `slot_release_below_box_top_m` | 0.106 (仮) | ______ | 缶を離す高さ。基準面から何m下か。グリッパ形状が決まらないと定まらない |
+| `shooting_box.transport_clearance_above_top_m` | `transport_clearance_above_box_top_m` | 0.044 (仮) | ______ | 運搬中に上げる高さ。基準面から何m上か。**缶を縦に持つと下端が更に142mm下がる点に注意** |
+| `shooting_box.retract_clearance_above_top_m` | `retract_clearance_above_box_top_m` | 0.044 (仮) | ______ | 設置後に退避する高さ。同上 |
+| `shooting_box.approach_clearance_above_top_m` | `approach_clearance_above_box_top_m` | 0.044 (仮) | ______ | 接近時に水平移動する高さ。**retract と同じ値にする** |
+| `work_placement.first_z_m` | `field_geometry.first_work_z_m` | 0.0 (仮) | ______ | 治具上のワーク中心の高さ。土台厚2.3mmは確定済みだが、土台が乗る面の絶対Zが未較正 |
 
 **併せて測るもの: シューティングボックスの上端高さ** (箱の縁の床からの高さ)。
-`transport_clearance_z` / `retract_clearance_z` はこれを超えている必要がある。
+`transport_clearance_above_box_top_m` / `retract_clearance_above_box_top_m` は 正の値にしておけば基準面より上になる。
+
+> **2026-09-06 以降、これらは実行中に `ros2 param set` で変えられる。**
+> 測ってから再起動する必要はない。ジョグで正しい高さまで動かし、
+> `ros2 topic echo /catchrobo/arm/current_pose --once` で z を読み、
+> `ros2 param set /game_state_manager_node box_top_z_m <値>` で入れて、そのまま試せる。
+> **ただし `ros2 param set` は再起動で消える。** 決まった値は必ず `robot_geometry.yaml` に
+> 書いて `generate.py` を走らせること ([`parameter_tuning.md`](parameter_tuning.md) 手順B)。
 
 箱上端高さ = ______ [m]
 
@@ -141,10 +156,13 @@ ROS2側の `parallel_arm_kinematics.hpp` は「各ピボットで**もう一方�
 
 ## 5. 実測後の検算手順
 
-値を `config.yaml` に入れたら、実機を動かす前に必ず往復確認する。
+値を `robot_geometry.yaml` に入れ (`status` を `measured` に、`date` を当日に)、
+生成してから、実機を動かす前に必ず往復確認する。
 
 ```bash
 cd ~/catchrobo_ros2_ws
+python3 src/sharmech/params/generate.py          # 生成 (未実測が残っていれば一覧が出る)
+python3 src/sharmech/params/generate.py --check  # 生成物が正本と一致していること
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-select sharmech_core
 colcon test --packages-select sharmech_core   # FK/IK往復テストが通ること
@@ -170,7 +188,9 @@ ros2 topic pub --once /catchrobo/arm/target_pose geometry_msgs/msg/PoseStamped \
 
 ## 6. 埋めたあとにすること
 
-1. `config.yaml` の該当キーの `# TODO: 要実測` コメントを消し、実測日を書く
+1. `robot_geometry.yaml` の該当項目の `status` を `unmeasured` → `measured` (または
+   `fitted`) に変え、`source` に測り方、`date` に実測日を書く。`generate.py` を走らせ、
+   生成物 (ROS2 / sim / webxr の3つ) をそれぞれのリポジトリでコミットする
 2. [`../../CLAUDE.md`](../../CLAUDE.md) の「勝手に決めてはいけない未決定事項」から
    該当項目 (4番・5番・6番) を消すか、確定済みに書き換える
 3. `mcu_spec.md` §8 の #1 を「実測済み」に更新し、値をMCU担当者へ渡す

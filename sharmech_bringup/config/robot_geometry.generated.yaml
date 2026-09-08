@@ -1,0 +1,69 @@
+# このファイルは自動生成 (sharmech/params/generate.py)。直接編集しないこと。
+# 値を変えるときは sharmech/params/robot_geometry.yaml を編集して再生成する。
+# 手順: sharmech/docs/parameter_tuning.md
+#
+# sharmech.launch.xml が config.yaml の後に読み込み、同名パラメータを上書きする。
+# 各パラメータの意味は robot_geometry.yaml の note と各ノードの docs/*.md を参照。
+
+field_geometry:
+  ros__parameters:
+    normal_work_rows: 3
+    normal_work_cols: 6
+    common_work_count: 6
+    normal_work_pitch_x_m: 0.2
+    normal_work_pitch_y_m: -0.2
+    common_work_pitch_m: -0.2
+    first_work_x_m: 0.27
+    first_work_y_m: 0.5
+    common_work_x_m: 0.87
+    common_work_first_y_m: 0.5
+    first_work_z_m: 0.0
+    field_origin_offset_x_m: 0.0
+    field_origin_offset_y_m: 0.0
+
+motion_generator_node:
+  ros__parameters:
+    workspace_x_min: -2.045
+    workspace_x_max: 0.941
+    workspace_y_min: -0.675
+    workspace_y_max: 0.675
+    workspace_z_min: 0.0
+    workspace_z_max: 0.3
+    field_origin_offset_x_m: 0.0
+    field_origin_offset_y_m: 0.0
+    field_origin_offset_z_m: 0.0
+
+game_state_manager_node:
+  ros__parameters:
+    box_center_x_red: [-0.081, -0.231, -0.381, -0.531]
+    box_center_y_red: 0.5255
+    box_center_x_blue: [-0.081, -0.231, -0.381, -0.531]
+    box_center_y_blue: 0.5255
+    box_inner_size_x_m: 0.138
+    box_inner_size_y_m: 0.255
+    slot_cols_x: 2
+    slot_rows_y: 3
+    cylinder_diameter_m: 0.071
+    slot_gap_x_m: -0.002
+    slot_gap_y_m: 0.014
+    box_top_z_m: 0.156
+    slot_release_below_box_top_m: 0.106
+    approach_clearance_above_box_top_m: 0.044
+    transport_clearance_above_box_top_m: 0.044
+    retract_clearance_above_box_top_m: 0.044
+    init_pose: [0.0, 0.15, 0.15, 0.0, 0.0]
+    field_origin_offset_x_m: 0.0
+    field_origin_offset_y_m: 0.0
+    field_origin_offset_z_m: 0.0
+
+kinematics_node:
+  ros__parameters:
+    shoulder_pivot_half_separation_m: 0.0
+    shoulder_proximal_link_length_m: 0.0
+    shoulder_distal_link_length_m: 0.0
+    knee_pivot_half_separation_m: 0.0
+    knee_proximal_link_length_m: 0.0
+    knee_distal_link_length_m: 0.0
+    turntable_axis_x_m: 0.0
+    turntable_axis_y_m: 0.0
+    knee_base_height_m: 0.0

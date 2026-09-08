@@ -56,11 +56,13 @@ xyとzを独立に計算する。数式の導出・幾何拘束は
 IKが失敗した場合 (到達不可能・速度特異点) はそのサンプルを**送信せず**破棄し、
 5秒間隔でスロットルした警告を出す (100Hzでのログスパムを避けるため)。
 
-## パラメータ (`config.yaml` の `kinematics_node`)
+## パラメータ (`robot_geometry.yaml` の `kinematics` → 生成物 `robot_geometry.generated.yaml` の `kinematics_node`)
 
 肩・肘/膝それぞれのリンク長・ピボット間距離、ターンテーブル軸位置、肘/膝機構の基準高さ。
 **すべて仮値 (0.0) のまま。** CAD/実測が無いため独断で数値を決めていない。
-`sharmech_bringup/config/config.yaml` の `kinematics_node:` セクションを参照。
+正本は `sharmech/params/robot_geometry.yaml` の `kinematics:` セクション (2026-09-08〜)。
+launch は生成物 `sharmech_bringup/config/robot_geometry.generated.yaml` を読む。
+値の入れ方・再生成の手順は `sharmech/docs/parameter_tuning.md`。
 実測値が入るまで `launch` の `pattern_b` 引数を `false` (既定) にしてある。
 
 ## 内部状態

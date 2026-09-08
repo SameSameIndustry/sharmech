@@ -1,0 +1,378 @@
+# =============================================================================
+# ロボット・フィールドの物理パラメータ (正本。人が編集するのはこのファイルだけ)
+# =============================================================================
+#
+# ここに書いた値から、以下の3つが `python3 sharmech/params/generate.py` で生成される:
+#
+#   sharmech_bringup/config/robot_geometry.generated.yaml   (ROS2 各ノードの上書きパラメータ)
+#   ~/catchrobo_sim_threejs/src/generated/robotParams.js     (シミュレータ)
+#   ~/catchrobo_webxr_controller/src/generated/robotParams.js (VR クライアント)
+#
+# **生成物を直接編集しないこと。** 次に generate.py を走らせた時点で消える。
+# 手順・各パラメータの意味・微調整のやり方は sharmech/docs/parameter_tuning.md。
+#
+# ---- 書き方 ----
+#   <section>:
+#     <param>:
+#       value:  数値 (または数値の配列)。**単位が m/rad/s の値は必ず小数点付き (0 ではなく 0.0)**
+#               ROS2 は 0 を整数と解釈し、double 宣言のパラメータに入らず起動に失敗する
+#       unit:   m / rad / s / count
+#       status: 下記のいずれか (値をどれだけ信じてよいかの印)
+#       source: 由来 (誰が・何から・どうやって)
+#       date:   その値を入れた日 (YYYY-MM-DD)。値を変えたら必ず更新する
+#       note:   補足 (任意)
+#       alternatives: 保留中の別候補 (任意。[{value, source, note}])
+#
+# ---- status の意味 ----
+#   unmeasured : 未実測の仮値。**この値で実機を動かしてはいけない。** generate.py が警告する。
+#                value を勝手に「それらしい値」に変えないこと (0.0 のままにしておけば IK が
+#                解けず動かない、という安全側の性質を意図的に使っている)
+#   estimate   : 目安。実測ではないが「動かして試す」には使ってよい暫定値
+#   cad        : フィールド CAD (field_vol16 STEP) から読んだ値
+#   measured   : 現物を実測した値
+#   fitted     : 実機のデータから最小二乗などで解いた値
+#   decision   : 物理量ではなく運用上の決め事 (余裕・隙間・退避高さなど)。当日調整の主対象
+#
+# ---- 座標系 ----
+#   `field` = ロボットのベース座標系 (完全に同一。変換なし)。原点はロボット設置エリア
+#   (縦300×横700mm) の中心、+X は設置エリアから作業エリアへ、+Y は右から左、+Z は上。
+#   単位は m / rad。正本は sharmech/docs/field_dimensions.md
+#
+schema_version: 1
+
+# -----------------------------------------------------------------------------
+# 機構の幾何 (5軸パラレルリンク: 肩2 + ターンテーブル1 + 肘/膝2)
+# -----------------------------------------------------------------------------
+# 実装は sharmech_core/include/sharmech_core/utility/parallel_arm_kinematics.hpp。
+# 測り方は sharmech/docs/measurement_checklist.md §1〜2 (中心から中心・÷2 に注意)。
+# ROS2 側 (kinematics_node) は IK に使う。シミュレータは表示に使う (unmeasured の間は
+# シミュレータ側が独自の表示用プレースホルダで代替する)。
+# **ターンテーブル軸の位置は、UDP で送る極座標 (r, θ) の原点でもある** (mcu_spec.md §5)。
+kinematics:
+  shoulder_pivot_half_separation_m:
+    value: 0.0
+    unit: m
+    status: unmeasured
+    source: "未実測"
+    note: "肩の2ピボット間距離の **半分**"
+  shoulder_proximal_link_length_m:
+    value: 0.0
+    unit: m
+    status: unmeasured
+    source: "未実測"
+    note: "肩 モータ側リンク (ピボット中心〜中間関節中心)"
+  shoulder_distal_link_length_m:
+    value: 0.0
+    unit: m
+    status: unmeasured
+    source: "未実測"
+    note: "肩 EE側リンク (中間関節中心〜EE合流点中心)"
+  knee_pivot_half_separation_m:
+    value: 0.0
+    unit: m
+    status: unmeasured
+    source: "未実測"
+    note: "肘/膝の2ピボット間距離の **半分**"
+  knee_proximal_link_length_m:
+    value: 0.0
+    unit: m
+    status: unmeasured
+    source: "未実測"
+  knee_distal_link_length_m:
+    value: 0.0
+    unit: m
+    status: unmeasured
+    source: "未実測"
+  turntable_axis_x_m:
+    value: 0.0
+    unit: m
+    status: unmeasured
+    source: "未確認。ベース座標系原点と一致する仮定"
+    note: "極座標 (r, θ) の原点。ずれていると MCU へ送る θ の原点が実機とずれる"
+  turntable_axis_y_m:
+    value: 0.0
+    unit: m
+    status: unmeasured
+    source: "未確認。ベース座標系原点と一致する仮定"
+    note: "2026-09-08 時点でシミュレータ側は独自に 0.175 を置いていた (根拠なし)。本ファイルへ統一"
+  knee_base_height_m:
+    value: 0.0
+    unit: m
+    status: unmeasured
+    source: "未確認"
+    note: "肘/膝機構の d=0 が対応する z。measurement_checklist.md §2 の逆算式を参照"
+
+# -----------------------------------------------------------------------------
+# 作業領域 (motion_generator_node のクランプ範囲。VR/シムの可動域表示も同じ値)
+# -----------------------------------------------------------------------------
+# X/Y は 2026-08-30 の手描きスケッチ実測 (赤フィールド) で確定。
+# X 上限は通常ワーク最奥列までの確定値で、作業エリア自体はそれより奥へ続く可能性あり
+# (実測が増えたら広げる)。X 下限は最奥のシューティングボックスの奥端。Y はフィールドの左右端。
+# Z は上面図のみの実測だったため未確定 (0.00〜0.30 は動かすための仮値)。
+workspace:
+  x_min_m:
+    value: -2.045
+    unit: m
+    status: measured
+    source: "手描きスケッチ実測 (赤)。最奥のシューティングボックスの奥端"
+    date: 2026-08-30
+  x_max_m:
+    value: 0.941
+    unit: m
+    status: measured
+    source: "手描きスケッチ実測 (赤)。通常ワーク最奥列"
+    date: 2026-08-30
+    note: "作業エリアはこれより奥へ続く可能性あり。要拡張の可能性"
+  y_min_m:
+    value: -0.675
+    unit: m
+    status: measured
+    source: "手描きスケッチ実測 (赤)。フィールド右端"
+    date: 2026-08-30
+  y_max_m:
+    value: 0.675
+    unit: m
+    status: measured
+    source: "手描きスケッチ実測 (赤)。フィールド左端"
+    date: 2026-08-30
+  z_min_m:
+    value: 0.0
+    unit: m
+    status: estimate
+    source: "仮値。床・治具に当たらない下限を要実測"
+  z_max_m:
+    value: 0.30
+    unit: m
+    status: estimate
+    source: "仮値。機構の可動上限か上空の禁止区域の低い方を要実測"
+
+# -----------------------------------------------------------------------------
+# ワーク (チップスターS の円柱)
+# -----------------------------------------------------------------------------
+# perception は輪郭ベース検出のため寸法を持たない。使うのは
+# game_state_manager_node (スロット間隔)・VR (掴み判定・表示)・シム (表示)。
+cylinder:
+  radius_m:
+    value: 0.0355
+    unit: m
+    status: cad
+    source: "フィールド CAD 実測 (直径約71mm)"
+    note: "スケッチ実測の直径66mm (半径0.033) が正しいと分かったらそちらへ変える。webxr の REAL_FIELD.width もこの値から生成される"
+    alternatives:
+      - value: 0.033
+        source: "手描きスケッチ実測 (直径66mm)"
+        note: "由来が異なる実測値。どちらが物理的に正しいか未確認 (CLAUDE.md「既知の未解決の食い違い」)"
+  length_m:
+    value: 0.142
+    unit: m
+    status: cad
+    source: "フィールド CAD 実測"
+
+# -----------------------------------------------------------------------------
+# シューティングボックス (game_state_manager_node がスロット座標を生成する元)
+# -----------------------------------------------------------------------------
+# 24箇所の座標を直接書かず、「箱の中心 + 缶の隙間」から起動時に生成する (2026-09-06)。
+#   箱を動かした            → center_x_* / center_y_* を変える
+#   缶が当たる / 入らない    → slot_gap_x_m / slot_gap_y_m を変える  ★当日調整の主役
+#   フィールド全体がずれた   → field_origin_offset (下) を変える
+# 赤・青は「線対称 + field がロボット自身のベース座標系」という前提で同じ数値
+# (ロボット本体の左右組み方まで鏡映なら崩れる。要注意)。
+# スロットID・placement_order の意味は sharmech_core/docs/game_state_manager_node.md。
+shooting_box:
+  center_x_red:
+    value: [-0.081, -0.231, -0.381, -0.531]
+    unit: m
+    status: cad
+    source: "CAD: 箱1の手前端 X=-0.007、外形148mm、箱間の隙間2mm → 中心 -0.081 から 150mm ピッチ"
+    date: 2026-09-06
+    note: "配列の長さ = 箱の数。ルール上、箱の位置は選手が自由に調整してよいので本番の並べ方に合わせて変える"
+  center_y_red:
+    value: 0.5255
+    unit: m
+    status: cad
+    source: "CAD: 箱は Y=0.393〜0.658 → 中心 0.5255 (全箱共通)"
+    date: 2026-09-06
+  center_x_blue:
+    value: [-0.081, -0.231, -0.381, -0.531]
+    unit: m
+    status: cad
+    source: "赤と同じ (線対称の前提)"
+    date: 2026-09-06
+  center_y_blue:
+    value: 0.5255
+    unit: m
+    status: cad
+    source: "赤と同じ (線対称の前提)"
+    date: 2026-09-06
+  inner_size_x_m:
+    value: 0.138
+    unit: m
+    status: cad
+    source: "CAD: 外形148(X)×265(Y)×高150mm、板厚5mm → 内寸138×255"
+    note: "はみ出し警告に使うだけ。座標計算には入らない"
+  inner_size_y_m:
+    value: 0.255
+    unit: m
+    status: cad
+    source: "同上"
+  slot_cols_x:
+    value: 2
+    unit: count
+    status: decision
+    source: "X方向 (箱の短辺138mm) に並べる列数"
+  slot_rows_y:
+    value: 3
+    unit: count
+    status: decision
+    source: "Y方向 (箱の長辺255mm) に並べる行数"
+  slot_gap_x_m:
+    value: -0.002
+    unit: m
+    status: decision
+    source: "内寸を均等割りした値。直径71mmだと2列で142mm必要なのに内寸138mmなので -2mm (干渉)"
+    note: "★当日調整。缶同士が当たる→増やす、箱からはみ出す→減らす。中心間距離 = 2×cylinder.radius_m + この値。直径66mmなら +0.003 で収まる"
+  slot_gap_y_m:
+    value: 0.014
+    unit: m
+    status: decision
+    source: "内寸を均等割りした値"
+    note: "★当日調整。同上"
+  top_z_m:
+    value: 0.156
+    unit: m
+    status: cad
+    source: "CAD: ロボット取り付け面 z=0 として箱の上端 z=0.156"
+    note: "★高さの基準面。当日 Z 方向で実測が要るのは実質これ1個。下の相対値が全て追従する"
+  release_below_top_m:
+    value: 0.106
+    unit: m
+    status: estimate
+    source: "従来値 (絶対 z=0.05) からの逆算。グリッパ形状が決まらないと定まらない"
+    note: "缶を離す高さ。基準面から何m下か"
+  approach_clearance_above_top_m:
+    value: 0.044
+    unit: m
+    status: decision
+    source: "従来値 (絶対 z=0.20) からの逆算"
+    note: "接近時に水平移動する高さ。基準面から何m上か。**retract と同じ値にする** (揃っていれば接近が完全な水平移動になる)"
+  transport_clearance_above_top_m:
+    value: 0.044
+    unit: m
+    status: decision
+    source: "同上"
+    note: "運搬中の高さ。缶を縦に持つと下端が更に142mm下がる点に注意"
+  retract_clearance_above_top_m:
+    value: 0.044
+    unit: m
+    status: decision
+    source: "同上"
+    note: "設置後に退避する高さ。approach と同じ値にする"
+
+# -----------------------------------------------------------------------------
+# ワークの初期配置 (ルールで規定。2026-08-30 手描きスケッチ実測・赤フィールド)
+# -----------------------------------------------------------------------------
+# 縦4行×横6列=24個の均一グリッドのうち、最奥の1行(6個)を共通ワーク、手前3行(18個)を
+# 通常ワークとする (ユーザー確認済み)。現状これを読む ROS2 ノードは無い (perception が
+# 実カメラで検出するため)。VR クライアントの REAL_FIELD (ワークエリアの外形) は
+# ここと cylinder から生成される。
+work_placement:
+  normal_rows:
+    value: 3
+    unit: count
+    status: measured
+    source: "手描きスケッチ実測 (赤)"
+    date: 2026-08-30
+  normal_cols:
+    value: 6
+    unit: count
+    status: measured
+    source: "同上"
+    date: 2026-08-30
+  common_count:
+    value: 6
+    unit: count
+    status: measured
+    source: "同上。最奥の1行"
+    date: 2026-08-30
+  normal_pitch_x_m:
+    value: 0.200
+    unit: m
+    status: measured
+    source: "同上。行間ピッチ (+X方向。1行目がロボットに最も近い)"
+    date: 2026-08-30
+  normal_pitch_y_m:
+    value: -0.200
+    unit: m
+    status: measured
+    source: "同上。列間ピッチ (+Y方向。1列目が最も+Y側=左寄り)"
+    date: 2026-08-30
+  common_pitch_m:
+    value: -0.200
+    unit: m
+    status: measured
+    source: "同上。共通ワーク列内ピッチ (normal_pitch_y_m と同じ向き)"
+    date: 2026-08-30
+  first_x_m:
+    value: 0.270
+    unit: m
+    status: measured
+    source: "同上。通常ワーク1行目 (ロボットに最も近い行) の X"
+    date: 2026-08-30
+  first_y_m:
+    value: 0.500
+    unit: m
+    status: measured
+    source: "同上。通常ワーク1列目 (最も+Y側) の Y"
+    date: 2026-08-30
+  common_x_m:
+    value: 0.870
+    unit: m
+    status: measured
+    source: "同上。共通ワーク行の X (最も奥)"
+    date: 2026-08-30
+  common_first_y_m:
+    value: 0.500
+    unit: m
+    status: measured
+    source: "同上。共通ワーク1列目の Y"
+    date: 2026-08-30
+  first_z_m:
+    value: 0.0
+    unit: m
+    status: unmeasured
+    source: "治具上のワーク中心の高さ。土台厚2.3mmは確定済みだが、土台が乗る面の絶対 Z が未較正"
+
+# -----------------------------------------------------------------------------
+# 本番設置での原点ズレ補正 (現場合わせ)
+# -----------------------------------------------------------------------------
+# ロボット設置エリアの設計中心 (= field 原点) からの実際の設置誤差を吸収する。
+# motion_generator_node (作業領域)・game_state_manager_node (スロット座標)・
+# field_geometry の3箇所へ **同じ値** が生成される (以前は手で揃える必要があった)。
+field_origin_offset:
+  x_m:
+    value: 0.0
+    unit: m
+    status: decision
+    source: "既定 (ズレ無し)"
+  y_m:
+    value: 0.0
+    unit: m
+    status: decision
+    source: "既定 (ズレ無し)"
+  z_m:
+    value: 0.0
+    unit: m
+    status: decision
+    source: "既定 (ズレ無し)"
+    note: "基準面 top_z_m の実測値はそのままに、全体を持ち上げ下げしたいときの逃げ道"
+
+# -----------------------------------------------------------------------------
+# 初期位置 (/catchrobo/game/reset で戻る姿勢。INIT 状態のゴール)
+# -----------------------------------------------------------------------------
+init_pose:
+  xyz_pitch_yaw:
+    value: [0.0, 0.15, 0.15, 0.0, 0.0]
+    unit: m
+    status: estimate
+    source: "仮値。実機の初期位置が決まったら差し替える"
+    note: "[x, y, z, pitch, yaw] (m / rad)。作業領域の内側で、ワーク・治具に干渉しない高さにすること。joy_teleop_node の home_pose (現在コメントアウト) と同じ値を使う想定"
