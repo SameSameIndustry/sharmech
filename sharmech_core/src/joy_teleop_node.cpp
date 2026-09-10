@@ -1,5 +1,7 @@
 #include "sharmech_core/joy_teleop_node.hpp"
 
+#include <algorithm>
+
 #include <rclcpp_components/register_node_macro.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -34,6 +36,14 @@ JoyTeleopNode::JoyTeleopNode(const rclcpp::NodeOptions & options)
   manual_toggle_button_l_stick_ = declare_parameter("manual_toggle_button_l_stick", 11);
   manual_toggle_button_r_stick_ = declare_parameter("manual_toggle_button_r_stick", 12);
   confirm_button_ = declare_parameter("confirm_button", 12);
+  // 操作が受け付けられたことを手に返す振動 (DualSense)。0.0 にすると無効。
+  // joy_node が /joy/set_feedback を購読して鳴らすので、joy:=false のときは何も起きない
+  rumble_intensity_ = declare_parameter("rumble_intensity", 0.4);
+  // 振動の長さ [s]。joy_node は指令を受けると長め (数百ms〜) に鳴らし続け、
+  // 時間を指定する手段が無い (パラメータも JoyFeedback のフィールドも無い)。
+  // そこで一定時間後に intensity=0 を送って止め、短い「コツッ」という感触にする
+  rumble_duration_sec_ = declare_parameter("rumble_duration_sec", 0.06);
+  rumble_enabled_ = rumble_intensity_ > 0.0;
 
   if (!home_pose_.empty() && home_pose_.size() != 5) {
     RCLCPP_FATAL(
@@ -60,6 +70,8 @@ JoyTeleopNode::JoyTeleopNode(const rclcpp::NodeOptions & options)
     "/catchrobo/game/toggle_manual_control", 10);
   confirm_pub_ = create_publisher<std_msgs::msg::Empty>(
     "/catchrobo/game/confirm", 10);
+  feedback_pub_ = create_publisher<sensor_msgs::msg::JoyFeedback>(
+    "/joy/set_feedback", 10);
 
   const auto period = std::chrono::duration<double>(1.0 / publish_rate_);
   publish_timer_ = create_wall_timer(
@@ -82,6 +94,45 @@ JoyTeleopNode::DofMapping JoyTeleopNode::declareDofMapping(
   return mapping;
 }
 
+// 操作が受け付けられたことを手に返す。
+//
+// `joy_node` が `/joy/set_feedback` を購読して DualSense を鳴らす。**振動の停止は
+// joy_node 側が面倒を見るので、こちらは鳴らす指令を1回出すだけでよい**
+// (止める指令を送る必要はない)。
+//
+// `sensor_msgs/JoyFeedback` は単体メッセージで、配列版 (`JoyFeedbackArray`) では
+// ない点に注意 (`ros2 node info /joy_node` で確認済み)。
+//
+// intensity_scale はイベントごとの相対強さ。`rumble_intensity` を 1.0 として掛ける。
+// 自動シーケンスを止める操作 (自由操作トグル) だけ強くして、指先の操作と区別できる
+// ようにしてある。1.0 を超える指定もクランプで安全に扱う
+void JoyTeleopNode::rumble(double intensity_scale)
+{
+  if (!rumble_enabled_) {return;}
+
+  sensor_msgs::msg::JoyFeedback msg;
+  msg.type = sensor_msgs::msg::JoyFeedback::TYPE_RUMBLE;
+  msg.id = 0;
+  msg.intensity = static_cast<float>(
+    std::clamp(rumble_intensity_ * intensity_scale, 0.0, 1.0));
+  feedback_pub_->publish(msg);
+
+  // rumble_duration_sec_ 後に停止指令を出す。前の振動が鳴っている最中に
+  // 次が来たら、タイマーを作り直して新しい方の長さで計り直す
+  // (古いタイマーは shared_ptr の差し替えで破棄される)
+  rumble_stop_timer_ = create_wall_timer(
+    std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::duration<double>(rumble_duration_sec_)),
+    [this]() {
+      sensor_msgs::msg::JoyFeedback stop;
+      stop.type = sensor_msgs::msg::JoyFeedback::TYPE_RUMBLE;
+      stop.id = 0;
+      stop.intensity = 0.0f;
+      feedback_pub_->publish(stop);
+      rumble_stop_timer_->cancel();   // 単発。次の rumble() で作り直す
+    });
+}
+
 void JoyTeleopNode::onJoy(const sensor_msgs::msg::Joy::SharedPtr msg)
 {
   // エッジ検出 (前回のボタン状態と比較)
@@ -101,12 +152,14 @@ void JoyTeleopNode::onJoy(const sensor_msgs::msg::Joy::SharedPtr msg)
     };
 
   if (pressed_edge(gripper_toggle_button_)) {
+    rumble(1.0);        // 開閉が切り替わった手応え
     gripper_state_ = !gripper_state_;
     RCLCPP_INFO(
       get_logger(), "Gripper toggled → %s",
       gripper_state_ ? "close" : "open");
   }
   if (pressed_edge(home_button_)) {
+    rumble(0.6);        // ホーム姿勢へのゴールを送った
     publishHomeGoal();
   }
   if (released_edge(deadman_button_)) {
@@ -124,6 +177,7 @@ void JoyTeleopNode::onJoy(const sensor_msgs::msg::Joy::SharedPtr msg)
     readButton(manual_toggle_button_r_stick_, *msg);
   if (combo_now && !manual_toggle_combo_was_active_) {
     toggle_manual_control_pub_->publish(std_msgs::msg::Empty());
+    rumble(1.5);        // 自動シーケンスの停止/再開。他より強くして区別できるようにする
     RCLCPP_INFO(get_logger(), "Manual control toggle combo detected (L1+R1+L3+R3)");
   }
   manual_toggle_combo_was_active_ = combo_now;
@@ -139,6 +193,7 @@ void JoyTeleopNode::onJoy(const sensor_msgs::msg::Joy::SharedPtr msg)
     readButton(manual_toggle_button_l_stick_, *msg);
   if (pressed_edge(confirm_button_) && !combo_partner_pressed) {
     confirm_pub_->publish(std_msgs::msg::Empty());
+    rumble(1.0);        // 微調整の確定を送った
     RCLCPP_INFO(get_logger(), "Confirm button pressed");
   }
 

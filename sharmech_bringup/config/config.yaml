@@ -82,6 +82,15 @@ joy_teleop_node:
     # 単独で使えるボタン (例: ○=1) に変えればこの制約は無くなる
     confirm_button: 12                # R3。VR側はサムズアップで同じトピックへ送る
 
+    # 操作が受け付けられたことを手に返す振動 [0,1]。0.0 で無効。
+    # joy_node が /joy/set_feedback (sensor_msgs/JoyFeedback) を購読して
+    # DualSense を鳴らすので、joy:=false のときは何も起きない。
+    # イベントごとに相対強さを掛けている:
+    #   グリッパ開閉・微調整の確定 … ×1.0
+    #   ホーム姿勢へ移動           … ×0.6
+    #   自由操作トグル             … ×1.5 (自動シーケンスを止める操作なので強く)
+    rumble_intensity: 0.4
+
 hardware_bridge_node:
   ros__parameters:
     command_mode: "cartesian"   # "cartesian" (パターンA) / "joint" (パターンB。packet_type=0x02)

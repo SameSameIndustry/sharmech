@@ -114,6 +114,7 @@ ROS2 Humble の `joy` (SDL2 ベース) と `joy_linux` でも異なる。
 | `manual_toggle_button_l_stick` | 11 | L3 (左スティック押し込み) |
 | `manual_toggle_button_r_stick` | 12 | R3 (右スティック押し込み) |
 | `confirm_button` | 12 | R3。微調整の確定 (下記「微調整の確定ボタン」) |
+| `rumble_intensity` | 0.4 | 操作を受け付けたときの振動の強さ [0,1]。0.0 で無効 (下記「振動フィードバック」) |
 
 反転は `scale` を負値にすることで表現する(反転フラグは持たない)。
 
@@ -281,3 +282,33 @@ L1 は `deadman_button` と兼用してよい(コンボの一部として押さ�
 コンボと無関係のボタン (例: ○ = 1) を `confirm_button` に割り当てれば、この
 ガードは実質無効になり素直な単独押し判定になる。実機のボタン割り当てが決まったら
 そちらへ移すことを検討してよい。
+
+## 振動フィードバック (DualSense)
+
+**操縦者が画面を見ていなくても「操作が通った」ことが分かるよう、手に返す。**
+`sensor_msgs/JoyFeedback` を `/joy/set_feedback` へ publish し、`joy_node` が
+DualSense を鳴らす。**振動の停止は `joy_node` 側が面倒を見る**ので、本ノードは
+鳴らす指令を1回出すだけでよい (止める指令は要らない)。
+
+使用しているコントローラーは **PS5 の DualSense** (2026-09-08 ユーザー確認)。
+`ros2 node info /joy_node` で `/joy/set_feedback` の購読を、実機の
+`DualSense Wireless Controller` 認識と併せて確認済み。
+
+| 操作 | 相対強さ | 意図 |
+|---|---|---|
+| グリッパ開閉 | ×1.0 | 開閉が切り替わった手応え |
+| 微調整の確定 | ×1.0 | `ADJUSTING_*` から先へ進めた |
+| ホーム姿勢へ移動 | ×0.6 | ゴールを送った (弱め) |
+| 自由操作トグル | ×1.5 | **自動シーケンスを止める/再開する操作**なので、他と区別できるよう強くする |
+
+実際の強さは `rumble_intensity` (既定0.4) にこの倍率を掛けた値で、`[0,1]` に
+クランプされる。`rumble_intensity: 0.0` にすると全て無効になる。
+
+**`joy:=false` で起動したときは `joy_node` が居ないので何も起きない**
+(publish 自体は行われるが受け手が居ないだけで、エラーにはならない)。
+
+### メッセージ型の注意
+
+`sensor_msgs/JoyFeedback` は**単体メッセージ**で、配列版の `JoyFeedbackArray`
+ではない。ROS2 Humble の `joy_node` が購読しているのは単体の方
+(`ros2 node info /joy_node` で確認)。間違えると型が合わず届かない。

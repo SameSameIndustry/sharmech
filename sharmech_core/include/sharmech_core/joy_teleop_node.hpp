@@ -9,6 +9,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <sensor_msgs/msg/joy.hpp>
+#include <sensor_msgs/msg/joy_feedback.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <sharmech_msgs/msg/motion_status.hpp>
@@ -68,6 +69,8 @@ private:
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr cancel_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr toggle_manual_control_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr confirm_pub_;
+  // コントローラーの振動 (DualSense)。joy_node が /joy/set_feedback を購読して鳴らす
+  rclcpp::Publisher<sensor_msgs::msg::JoyFeedback>::SharedPtr feedback_pub_;
   rclcpp::TimerBase::SharedPtr publish_timer_;
 
   // パラメータ
@@ -88,6 +91,16 @@ private:
   // 微調整の確定ボタン。既定は R3 (自由操作トグルの4ボタンと同じ番号なので、
   // 他の3つが押されていないときだけ確定として扱う。下記 onJoy 参照)
   int confirm_button_;
+  // 振動の強さ [0,1]。0 で無効。イベントごとに intensity を変えて区別する
+  double rumble_intensity_;
+  double rumble_duration_sec_;
+  bool rumble_enabled_;
+  // 振動を止めるための単発タイマー。JoyFeedback に長さのフィールドが無く、
+  // joy_node にも時間のパラメータが無いため、こちらから停止指令を出して長さを決める
+  rclcpp::TimerBase::SharedPtr rumble_stop_timer_;
+
+  // 操作が受け付けられたことを手に返す。intensity_scale はイベントごとの相対強さ
+  void rumble(double intensity_scale);
 
   // 内部状態
   std::optional<sensor_msgs::msg::Joy> last_joy_;
