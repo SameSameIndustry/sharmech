@@ -725,6 +725,7 @@ ROS2 が動いている間にベンチ GUI から送ると競合するが、運�
 | `GIM6010_DEG_PER_RAD_SIGN` / `GIM8018_DEG_PER_RAD_SIGN` | ±1 | — (IK の φ の正方向と 5003 deg の正方向が一致するか) | 要確認 |
 | `GIM6010_DEG_OFFSET` / `GIM8018_DEG_OFFSET` | deg | — (φ = 0 のときの 5003 deg) | 要実測 |
 | `GIM6010_INIT_DEG` / `GIM8018_INIT_DEG` | deg | — (電源投入時・bit2 の到達先) | 要決定 |
+| `ARM_INIT_AT_POWER_ON_POSE` | 0/1 | — (1 なら電源投入時の現在位置を初期位置にし、起動時に動かさない) | 1 |
 | `GIM6010_MIN_DEG` / `MAX_DEG`、`GIM8018_MIN_DEG` / `MAX_DEG` | deg | — (bit4 の可動域。GIM6010 は既存クランプ 0〜60 の内側) | 要決定 |
 | `GIM6010_LEFT_NODE` / `GIM8018_LEFT_NODE` | node id | — (`joint_positions` の `*_left` にどちらを載せるか) | 要確認 |
 | `ARM_TRACKING_ERROR_DEG` | deg | — (bit0 の閾値) | 5 |
@@ -757,6 +758,11 @@ uint8_t HLControlUDP_FlushOneAxis(void);
 両 GIM6010 が CLOSED_LOOP かつ両 GIM8018 が正規化済みになったら、新モジュールが
 `*_INIT_DEG` を setter で書き、全軸が `ARM_INIT_TOLERANCE_DEG` 内に入った時点で bit3 を落とす。
 それまで (電源投入から 7〜10 秒程度) は bit3 を立てた 0x81 を送り続ける。
+**これは現状 (起動後は現在位置をホールドするだけ) からの挙動変更**なので、
+`ARM_INIT_AT_POWER_ON_POSE = 1` のときは電源投入時に捕捉した現在位置 (既存の
+`CaptureHold` が記憶する `pos_estimate`) をそのまま初期位置として扱い、起動時に動かさない。
+その場合 bit2 (競技中の初期位置要求) もその位置へ戻る。既定は 1 (現状維持) とし、
+`*_INIT_DEG` を決めた時点で人間が 0 に切り替える。
 
 **0x81 の中身:**
 
@@ -845,7 +851,7 @@ wave motor は既存の `WaveTick()` が起動時にオフセット 0 を送る 
 | `TURNTABLE_ENC_DEG_PER_TABLE_DEG` | — | AS5600 が測っている軸 1° あたりのターンテーブル角。出力軸直付なら 1.0 | 要確認 |
 | `C610_POS_ORIGIN_DEG` (既存、`main.c`) | deg | θ = 0 (+X) のときの `meas_deg`。既存の意味のまま | 要実測 |
 | `TURNTABLE_INIT_DEG` | deg | 電源投入時・bit2 の到達先 (ターンテーブル角) | 要決定 |
-| `TURNTABLE_INIT_AT_POWER_ON_POSE` | 0/1 | 1 なら電源投入時の現在角を INIT にする | 0 |
+| `TURNTABLE_INIT_AT_POWER_ON_POSE` | 0/1 | 1 なら電源投入時の現在角を INIT にする (起動時に動かさない。現状維持) | 1 |
 | `TURNTABLE_MIN_DEG` / `MAX_DEG` | deg | bit4 の可動域 (1 回転未満) | 要決定 |
 | `TURNTABLE_TRACKING_ERROR_DEG` | deg | bit0 の閾値 | 5 |
 | `TURNTABLE_INIT_TOLERANCE_DEG` | deg | bit5 の許容差 | 1 |
