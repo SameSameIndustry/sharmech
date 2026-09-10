@@ -37,19 +37,21 @@ ROS2 トピックと UDP パケットの間の**変換と輸送のみ**を担う
 
 | トピック | 型 | 条件 |
 |---|---|---|
-| `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `command_mode == cartesian` |
+| `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `command_mode == cartesian`。位置・速度に加え `enable` (bit0) / `init_request` (bit2) も同乗している。**joint モードでもフラグのためだけに購読する** (下記「動作許可と初期位置要求」) |
 | `/catchrobo/command/joint` | `sensor_msgs/JointState` | `command_mode == joint` (パターンB)。`name` に5モータ名が揃っていることを要求し、**名前で照合して**ワイヤ上の並び順 (`udp_protocol.hpp` の `kJointOrder`) に詰め替える。欠けていればパケットを破棄して警告 (初回のみ)。`velocity` が無い場合は qdot=0 で送り、警告する (「位置と速度の併送」原則の違反として) |
 | `/catchrobo/command/gripper` | `std_msgs/Bool` | 常時 |
 | `/catchrobo/command/orient_vertical` | `std_msgs/Bool` | 常時。グリッパと同じくラッチして次の指令パケットに詰める (`control_flags` bit1。cartesian/joint 両モード共通) |
 
-**購読するのはどちらか一方のみ。** メッセージ型が異なるため、起動時に config を見て
-対応する購読とエンコーダの組を生成する。
+**位置指令として購読するのはどちらか一方のみ。** メッセージ型が異なるため、起動時に
+config を見て対応する購読とエンコーダの組を生成する (joint モードでは Cartesian を
+フラグ取り出し専用に追加購読する)。
 
 ### Publish
 
 | トピック | 型 | 説明 |
 |---|---|---|
 | `/catchrobo/arm/current_pose` | `geometry_msgs/PoseStamped` | MCU が FK して返した実姿勢 |
+| `/catchrobo/arm/mcu_status` | `sharmech_msgs/McuStatus` | `status_flags`・疎通・`seq`/`seq_echo`。**latched**。`motion_generator_node` が bit3 / bit5 を見るのに使う |
 | `/joint_states` | `sensor_msgs/JointState` | 実測の関節角。`robot_state_publisher` 経由で rviz に表示できる |
 
 ### パラメータ
@@ -178,7 +180,8 @@ onFeedbackTimer():
 | 2 | ウォッチドッグ作動中(指令途絶により最後の目標位置をホールド中) |
 | 3 | 未初期化 / 原点未確定 |
 | 4 | 直近の指令を破棄した (作業領域外・seq逆転等。破棄後しばらく立てておく) |
-| 5-15 | 予約 |
+| 5 | 初期位置に到達・静止中 (`control_flags` bit2 への応答。`McuStatus.FLAG_AT_INIT_POSE`) |
+| 6-15 | 予約 |
 
 ### フィードバックの送信条件 (2026-09-01 確定)
 
@@ -207,6 +210,8 @@ base 座標系の直交座標なので、`x = r·cos θ`, `y = r·sin θ` で戻
 |---|---|
 | `sockfd_` | UDP ソケット。送信と受信で共用 |
 | `gripper_state_` | ラッチしたグリッパ状態 |
+| `enable_state_` / `init_request_state_` | 直近の Cartesian 指令の `enable` / `init_request` (control_flags bit0 / bit2)。既定 false |
+| `last_sent_theta_` / `has_sent_command_` | θ のアンラップ基準。**ROS2 が駆動していない間 (未送信・`enable=false`・`init_request=true`) は MCU の実 θ で上書きする** (下記) |
 | `send_seq_` | 送信パケットの連番。送るたびに +1 |
 | `last_recv_seq_` | 受信済みの最大 `seq`。順序逆転の検出に使う |
 | `last_feedback_time_` | フィードバック途絶の検出に使う |
@@ -248,10 +253,28 @@ PacketEncoder (抽象)
 ノード本体に直書きすると、パターンB 追加時に本体を改造することになる。抽象化しておけば
 **実装クラスを1つ足して config の分岐に1行加えるだけ**で済む。
 
-### `control_flags` の動作許可ビットは常に 1
+### 動作許可 (bit0) と初期位置要求 (bit2) は Cartesian ストリームから写す (2026-09-10)
 
-パケットにフィールドは確保するが、**現時点では制御経路を作らず常に 1 を入れる**。
-サーボ ON/OFF が必要になった時点で、サービスなり topic なりを追加する。
+`control_flags` bit0 (動作許可) は以前「常に 1」だったが、ROS2 を起動しただけで
+アームが原点の仮目標へ動き出す問題 (`motion_generator_node.md`「起動時の同期と初期位置要求」)
+の対策として、`CartesianCommand.enable` をそのまま写すようにした。
+同じく `CartesianCommand.init_request` が bit2 (`kControlFlagInitRequest = 0x04`) になる。
+立っている間 MCU は r/θ/z を無視して**自前の初期関節角**へ行き、到達を `status_flags`
+bit5 で返す。**初期位置の座標はこのノードにも ROS2 のどこにも無い。**
+
+別トピックにせずメッセージに同乗させる理由は、別トピックだと DDS の発見遅れで
+「位置は届くがフラグは既定値」の窓が数百 ms 開くため (mock_mcu で実測)。
+joint モード (パターンB) では `JointState` にフラグが無いので、Cartesian ストリームを
+フラグ取り出し専用に追加購読する。
+
+### θ のアンラップ基準は「ROS2 が駆動していない間」は MCU の実 θ に合わせる
+
+`last_sent_theta_` は直前に**送った** θ で、次の θ をその近傍へアンラップする。
+だが MCU が自力で動く場面 (電源投入時の初期位置移動・bit2 での復帰) では
+送った値と実 θ が無関係になる。例えば MCU が初期位置で θ=+3.0 に居るのに基準が 0 の
+ままだと、同期後の最初の指令が -3.28 側の分岐に落ちてターンテーブルが1回転する。
+そこで**未送信・`enable=false`・`init_request=true` の間はフィードバックの θ で基準を
+上書きし**、駆動を再開した瞬間に基準 = 実 θ になるようにしてある。
 
 ### `control_flags` bit1 = 「縦にする」指示
 
@@ -282,7 +305,7 @@ TCP は再送とヘッドオブラインブロッキングがあり、**古い�
 | 項目 | 内容 |
 |---|---|
 | フィードバック途絶時の停止 | 現状は警告のみ。自動で停止させるべきかは要検討 |
-| 動作許可の制御経路 | サーボ ON/OFF が必要になった時点で追加 |
+| ~~動作許可の制御経路~~ | **2026-09-10 解消。** `CartesianCommand.enable` → bit0。起動時の同期完了まで 0 |
 
 ~~`joint_names` の具体値と順序~~・~~`/catchrobo/command/joint` の型~~ は
 **2026-09-01 に確定**: 型は `sensor_msgs/JointState`、並び順は

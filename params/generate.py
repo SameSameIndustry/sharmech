@@ -181,7 +181,6 @@ def ros_sections(p: Params):
              p.get("shooting_box.transport_clearance_above_top_m")),
             ("retract_clearance_above_box_top_m",
              p.get("shooting_box.retract_clearance_above_top_m")),
-            ("init_pose", p.get("init_pose.xyz_pitch_yaw")),
         ] + origin),
         ("kinematics_node", [
             (name, p.get(f"kinematics.{name}")) for name in (
@@ -317,9 +316,6 @@ export const FIELD_ORIGIN_OFFSET = {obj([
     ("y", p.get("field_origin_offset.y_m")),
     ("z", p.get("field_origin_offset.z_m")),
 ])};
-
-/** 初期位置 [x, y, z, pitch, yaw] */
-export const INIT_POSE = {fmt(p.get('init_pose.xyz_pitch_yaw'))};
 
 /** 各値の信頼度 (robot_geometry.yaml の status)。キーは 'section.param' */
 export const STATUS = {{

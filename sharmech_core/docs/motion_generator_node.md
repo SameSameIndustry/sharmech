@@ -36,9 +36,12 @@
 | `/catchrobo/arm/cmd_twist` | `geometry_msgs/Twist` | 先端の目標速度。**ベース(ロボット固定)座標系基準** |
 | `/catchrobo/arm/gripper` | `std_msgs/Bool` | グリッパ指令 (`true`=閉, `false`=開) |
 | `/catchrobo/arm/orient_vertical` | `std_msgs/Bool` | 「横倒しのワークを縦にする」指令。グリッパと同じ扱いでラッチして中継する |
-| `/catchrobo/arm/cancel` | `std_msgs/Empty` | 実行中のゴールを中断する |
-| `/catchrobo/arm/current_pose` | `geometry_msgs/PoseStamped` | 実姿勢。**状態トピックへの転載にのみ使う** |
+| `/catchrobo/arm/cancel` | `std_msgs/Empty` | 実行中のゴールを中断する。初期位置要求 (INIT) の取り下げも兼ねる |
+| `/catchrobo/arm/init_request` | `std_msgs/Empty` | 初期位置要求。`game_state_manager_node` が `/catchrobo/game/reset` で送る。**座標は持たない** —— UDP `control_flags` bit2 で MCU に「自前の初期関節角へ行け」と頼む (下記「起動時の同期と初期位置要求」) |
+| `/catchrobo/arm/current_pose` | `geometry_msgs/PoseStamped` | 実姿勢。起動時の同期・状態トピックの残距離・INIT 中の追従に使う |
+| `/catchrobo/arm/mcu_status` | `sharmech_msgs/McuStatus` | MCU の `status_flags`。bit3 (未初期化) の間は同期しない、bit5 (初期位置到達) で INIT 完了 |
 | `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | 作業領域クランプの動的上書き。`game_state_manager_node` が PLACING/RETRACTING 前後に送る (詳細は下記) |
+| `/catchrobo/game/jog_limit` | `sharmech_msgs/JogLimit` | ジョグ速度上限の動的上書き。`game_state_manager_node` が微調整中 (ADJUSTING_*) の出入りで送る (詳細は下記) |
 
 `/catchrobo/arm/` 名前空間は「調停前の生の操縦入力」であることを示す。VR と PS4 の両方がここへ publish する。
 **VR クライアントは rosbridge 経由で直接ここへ publish する。中継ノードは無い。**
@@ -49,7 +52,7 @@
 
 | トピック | 型 | 説明 |
 |---|---|---|
-| `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | 位置 + 速度。`control_rate` で定期送信 |
+| `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | 位置 + 速度 + 動作許可 (`enable`) + 初期位置要求 (`init_request`)。`control_rate` で定期送信 |
 | `/catchrobo/command/gripper` | `std_msgs/Bool` | 調停後のグリッパ指令 |
 | `/catchrobo/command/orient_vertical` | `std_msgs/Bool` | 調停後の「縦にする」指令。`hardware_bridge_node` が UDP の `control_flags` bit1 に詰める |
 | `/catchrobo/arm/status` | `sharmech_msgs/MotionStatus` | 現在のモードと進捗。**latched (transient_local)**、10Hz 程度 |
@@ -63,7 +66,7 @@
 ```
 # sharmech_msgs/MotionStatus
 std_msgs/Header header
-uint8   mode                  # 0=IDLE, 1=GOAL, 2=JOG
+uint8   mode                  # 0=IDLE, 1=GOAL, 2=JOG, 3=INIT (MCU が初期位置へ移動中)
 geometry_msgs/Pose goal_pose  # mode==GOAL のときの目標
 float64 distance_remaining    # [m]
 float64 time_remaining        # [s]
@@ -76,7 +79,13 @@ string  message               # 却下理由など
 std_msgs/Header      header    # stamp = この指令の時刻
 geometry_msgs/Pose   pose      # 目標位置 + 姿勢(クォータニオン)
 geometry_msgs/Twist  twist     # 目標速度(並進 + 角速度)
+bool                 enable        # 動作許可 (UDP control_flags bit0)。同期完了まで false
+bool                 init_request  # 初期位置要求 (bit2)。INIT モードの間だけ true
 ```
+
+`enable` / `init_request` を別トピックにせず位置と同じメッセージに載せるのは、
+別トピックだと DDS の発見遅れで「位置は届くがフラグは既定値のまま」という数百 ms の
+窓が開き、起動直後に bit0=1 のまま原点の仮目標へ動き出したため (2026-09-10 mock_mcu で実測)。
 
 `time_from_start` に相当するフィールドは**持たない**。ストリーミング方式のため「届いた瞬間がその点の時刻」であり、時刻は `header.stamp` と UDP ヘッダの `timestamp_us` が担う。
 
@@ -86,7 +95,7 @@ geometry_msgs/Twist  twist     # 目標速度(並進 + 角速度)
 |---|---|---|
 | `control_rate` | 100.0 | ストリーム出力周期 [Hz] |
 | `status_rate` | 10.0 | `/catchrobo/arm/status` の配信周期 [Hz] |
-| `v_max` | 0.10 | 最大並進速度 [m/s]。**軌道生成とジョグで共用** |
+| `v_max` | 0.10 | 最大並進速度 [m/s]。**ゴールの軌道生成専用** (ジョグには効かない。下記 `jog_v_max`) |
 | `a_max` | 0.20 | 最大並進加速度 [m/s²]。**軌道生成とジョグのレート制限で共用** |
 | `w_max` | 1.0 | 最大角速度 (pitch/yaw) [rad/s] |
 | `alpha_max` | 2.0 | 最大角加速度 [rad/s²] |
@@ -94,6 +103,7 @@ geometry_msgs/Twist  twist     # 目標速度(並進 + 角速度)
 | `workspace_y_min` / `y_max` | -0.675 / 0.675 | 作業領域 Y [m]。同上 |
 | `workspace_z_min` / `z_max` | 0.00 / 0.30 | 作業領域 Z [m]。**未確定のまま** (今回の実測は上面図のみでZ情報を含まない) |
 | `field_origin_offset_x_m` / `_y_m` | 0.0 / 0.0 | 本番設置での原点ズレ補正 [m]。上記 workspace_x/y_min/max 全体をこの分だけ平行移動する |
+| `jog_v_max` | 1.0 | **ジョグの並進速度上限 [m/s]。** 受信した `cmd_twist` の大きさをこの値で頭打ちにする (下記) |
 | `twist_timeout` | 0.4 | ジョグのウォッチドッグ [s] (300〜500ms) |
 | `goal_mode` | `goal_priority` | ゴールとジョグの調停方式。`goal_priority` / `twist_priority` / `exclusive` (下記「入力の調停」) |
 
@@ -103,7 +113,42 @@ geometry_msgs/Twist  twist     # 目標速度(並進 + 角速度)
 `w_max` / `alpha_max` が別にあるのは、`v_max` / `a_max` が並進 [m/s] の次元であり
 姿勢 (pitch/yaw) のレート制限と純回転ゴールの所要時間計算に使えないため。
 
-`v_max` / `a_max` を両モードで共用するのは、**ゴール指定とジョグで動作感を揃えるため**。別々にすると同じロボットが操作方法によって違う挙動をする。
+`a_max` をゴール軌道とジョグで共用するのは、**ゴール指定とジョグで動作感を揃えるため**。
+別々にすると同じロボットが操作方法によって違う挙動をする。
+
+速度の上限だけは `v_max` (ゴール) と `jog_v_max` (ジョグ) に分けてある。ゴールは
+ノードが自分で速度プロファイルを決めるのに対し、ジョグは操縦者が随時止められる
+前提の入力で、妥当な上限が違うため。
+
+### ジョグ速度のクランプ (`jog_v_max` / `/catchrobo/game/jog_limit`)
+
+**受信した `cmd_twist` の並進成分の「大きさ」を `active_jog_v_max_` で頭打ちにする**
+(軸ごとに切ると斜め入力で合成速度が最大 √3 倍になるため、比を保って縮める)。
+超過したときは 5 秒に 1 回まで警告ログを出す。
+
+**2026-09-10 追加。それ以前はジョグ側にクランプが一切無く、操縦層が publish した値が
+そのまま目標速度になっていた** (`v_max` はゴールの軌道生成でしか使われていなかった)。
+WebXR クライアントが自前で上限を持ってこれを肩代わりしていたが、
+「誰が publish してもこの上限を超えられない」ことは作業領域クランプと同じく
+このノードの責務なので、こちらへ移した。
+
+`active_jog_v_max_` は通常 `jog_v_max` と同じ値だが、`game_state_manager_node` が
+`sharmech_msgs/JogLimit` で一時的に絞ることができる。
+
+```
+# sharmech_msgs/JogLimit
+bool    reset     # true: active_jog_v_max_ を jog_v_max へ戻す。false なら下記を採用
+float64 v_max     # 並進ジョグの速度上限 [m/s]。0以下は不正として無視する
+```
+
+- 用途は**微調整中 (ADJUSTING_PICK / ADJUSTING_PLACE) だけ遅くすること**。
+  掴む/離す直前は缶に一番近く、行き過ぎるとワーク破損 (競技で-1点) に直結する
+- 上書きは `jog_v_max` より**緩くはできない** (`std::min`)。安全側の設定を
+  ゲーム層のバグで壊せないようにする (作業領域クランプと同じ方針)
+- `v_max <= 0` の上書きは無視する。「ジョグが一切効かない」状態を無言で作らないため
+- **操縦層 (VR / PS4) は何も変えなくてよい。** 今まで通り自分の都合で `cmd_twist` を
+  送ればよく、ROS2 のゲーム状態を知る必要が無い。状態を持っているのは
+  `game_state_manager_node` だけ、という役割分担がこれで保たれる
 
 ### 作業領域クランプの動的上書き (`/catchrobo/game/workspace_clamp`)
 
@@ -132,15 +177,16 @@ float64 z_max
 
 **このノードは「現在の目標姿勢」の唯一の所有者。** 軌道の始点も自分が保持する値を使う。
 
-起動直後の目標姿勢は作業領域内にクランプした初期値。その後、**まだ何も動かしていない
-うちに MCU フィードバックが届いたら、目標姿勢を実姿勢に1度だけ同期する**。
-これが無いと最初の指令で実機が初期値へ飛ぶ。
+起動直後の目標姿勢は作業領域内にクランプした初期値 (原点付近の仮値)。その後、
+**まだ何も動かしていないうちに MCU フィードバックが届いたら、目標姿勢を実姿勢に
+1度だけ同期する**。同期が済むまでは `enable=false` を送り続けるので、仮値が MCU に
+追従されることはない (詳細は下記「起動時の同期と初期位置要求」)。
 
 | 状態 | 説明 |
 |---|---|
 | `target_pose_` | **中核の状態変数。** 現在指令中の目標姿勢 |
 | `target_twist_` | 現在指令中の目標速度 |
-| `mode_` | `IDLE` / `GOAL` / `JOG` |
+| `mode_` | `IDLE` / `GOAL` / `JOG` / `INIT` |
 | `commanded_twist_` | 操縦層から届いた生の Twist(レート制限前) |
 | `last_twist_time_` | ウォッチドッグ判定用 |
 | `current_twist_` | レート制限後の、実際に積分に使う速度 |
@@ -148,6 +194,27 @@ float64 z_max
 | `trajectory_start_time_` | 軌道の開始時刻。**経過時間の基準** |
 | `last_result_` / `status_message_` | 直近のゴールの結果と理由。状態トピックに載せる |
 | `gripper_state_` | ラッチしたグリッパ状態 |
+| `synced_with_feedback_` | 目標姿勢を実姿勢へ同期済みか。**false の間は `enable=false`**。MCU が bit3 (未初期化) を報告したら false に戻す |
+| `latest_mcu_flags_` | 直近の `McuStatus.status_flags`。未受信 (nullopt) なら「MCU 状態不明」で、`current_pose` だけで同期する (mcu_status を出さない古いシムとの後方互換) |
+
+### 起動時の同期と初期位置要求 (2026-09-10)
+
+理想の挙動 (ユーザー確定) は「MCU の電源を入れると MCU が自前の初期位置へ行く →
+ROS2 を起動してもその場から動かない → 目標を与えて初めて動く」。このノードが担う部分:
+
+| 段階 | このノードの挙動 | UDP (hardware_bridge_node 経由) |
+|---|---|---|
+| 起動〜同期前 | ゴールは `not synced with MCU feedback yet` で却下、ジョグは捨てる。目標は仮値のまま | `enable=false` (bit0=0) → MCU は現在位置ホールド |
+| 同期 | `mcu_status` が bit3 (未初期化) を報告していないときに `current_pose` が届いたら、制御タイマー内で目標 ← 実姿勢 (1回だけ) | 以後 `enable=true`。目標 = 実姿勢なので動かない |
+| `/catchrobo/arm/init_request` | `mode_ ← INIT`。実行中のゴール/ジョグは捨てる。**目標は毎周期フィードバックを写す** (bit2 を落とした瞬間に指令と実姿勢が一致するように)。作業領域クランプは掛けない | `init_request=true` (bit2=1) → MCU が自前の初期関節角へ移動 |
+| 到達 | `mcu_status` bit5 (`FLAG_AT_INIT_POSE`) を見て `IDLE` + `SUCCEEDED` ("init pose reached")。`synced_with_feedback_ ← true` | `init_request=false` |
+| INIT 中の `cancel` | `IDLE` + `ABORTED`。MCU が到達を返さない場合の唯一の出口 | bit2 が落ち、MCU は追いかけていた実姿勢 (≒ 現在位置) に留まる |
+| MCU が bit3 を報告 (MCU 再起動) | 同期を取り消し、ゴール/ジョグを `ABORTED` ("MCU uninitialized") | `enable=false` に戻る |
+
+**初期位置の座標はこのノードも `game_state_manager_node` も持たない** (旧 `init_pose`
+パラメータは廃止)。MCU が持つ初期関節角が正本で、sim / mock_mcu もそれぞれ自前の値を持つ。
+`INIT` は `GOAL` と同じく `last_result` で完了を伝えるので、`game_state_manager_node`
+から見ると「ゴール1本」と同じ扱いで済む。
 
 ### 不変条件
 
@@ -249,13 +316,22 @@ gripper_state_ ← msg.data     (publish はタイマー内で行う)
        if t >= 軌道の総所要時間:
            ゴールを succeed、mode_ ← IDLE
 
+   INIT:
+       target_pose_ ← 直近の current_pose (MCU が動かしている。こちらは追いかけるだけ)
+       target_twist_ ← 0
+       if mcu_status bit5 (初期位置到達): succeed、mode_ ← IDLE、synced ← true
+
    IDLE:
        target_pose_ 維持、target_twist_ ← 0
 
 4. publish
-   /catchrobo/command/cartesian ← (target_pose_, target_twist_)
+   /catchrobo/command/cartesian ← (target_pose_, target_twist_,
+                                   enable = synced || INIT, init_request = INIT)
    /catchrobo/command/gripper   ← gripper_state_
 ```
+
+(0. として、同期前 (`synced_with_feedback_ == false`) かつ IDLE かつ MCU が bit3 を
+報告していなければ、制御タイマーの先頭で target_pose_ ← current_pose の同期を行う)
 
 ### ★ ゼロでない Twist のみがゴールを abort する
 
@@ -288,8 +364,12 @@ gripper_state_ ← msg.data     (publish はタイマー内で行う)
 | ジョグ動作中にゴールが来た | `goal_priority` (既定): ジョグを止めて受理 / それ以外: reject |
 | ゴール実行中に**ゼロでない** Twist が来た | `goal_priority` / `exclusive` (既定): 無視してゴール継続 / `twist_priority`: ゴールを abort し、ジョグへ移行 |
 | ゴール実行中にゼロの Twist が来た | **何もしない。** ゴールは継続する |
-| `/catchrobo/arm/cancel` を受信 | その場で停止、姿勢を保持、`mode_` ← `IDLE`、`last_result` ← `aborted` |
-| `/catchrobo/arm/current_pose` が来ない | 到達判定は元々経過時間で行うので影響なし。状態トピックは publish し続ける |
+| `/catchrobo/arm/cancel` を受信 | その場で停止、姿勢を保持、`mode_` ← `IDLE`、`last_result` ← `aborted` (INIT 中も同じ) |
+| `/catchrobo/arm/current_pose` が来ない | **同期できないので `enable=false` のまま。ゴールは却下、ジョグは捨てる** (MCU 未接続で動かないのは意図どおり)。状態トピックは publish し続ける |
+| 同期前にゴール/ジョグが来た | ゴールは `not synced with MCU feedback yet` で却下、ジョグは記録しない |
+| INIT 中にゴール/ジョグが来た | ゴールは `init request in progress` で却下、ジョグは記録しない |
+| INIT 中に `mcu_status` が届かない | 到達を検出できない。5秒ごとに警告 (`cancel` で抜ける) |
+| MCU が bit3 (未初期化) を報告 | 同期を取り消し `enable=false`。実行中のゴール/ジョグは `aborted` ("MCU uninitialized") |
 
 ### ゴールを abort する理由(一時停止ではなく)
 

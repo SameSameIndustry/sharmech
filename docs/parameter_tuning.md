@@ -201,7 +201,6 @@ UDP で送る極座標の原点もずれるので `polar_utils.hpp` の修正が
 | `shooting_box.top_z_m`, `release_below_top_m`, `*_clearance_above_top_m` | `box_top_z_m`, `slot_release_below_box_top_m`, `*_clearance_above_box_top_m` | `SHOOTING_BOX.*` | ○ |
 | `work_placement.*` | `field_geometry.*` (読むノードは無い) | `WORK_PLACEMENT.*`、`REAL_FIELD` (派生: 外形 = 初期配置 + 円柱寸法) | — |
 | `field_origin_offset.x_m / y_m / z_m` | `motion_generator_node`・`game_state_manager_node`・`field_geometry` の `field_origin_offset_*_m` (同じ値) | `FIELD_ORIGIN_OFFSET.{x,y,z}` | ○ |
-| `init_pose.xyz_pitch_yaw` | `game_state_manager_node.init_pose` | `INIT_POSE` | ○ |
 | (全キー) | — | `STATUS['section.param']`、`isPlaceholder(key)` | — |
 
 `REAL_FIELD` (VR がワークエリアを表示する外形) は手で入れる値ではなく、初期配置と円柱半径

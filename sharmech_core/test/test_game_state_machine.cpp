@@ -27,10 +27,6 @@ GameStateMachine::Config makeConfig()
   // 既存のサイクルテストは完全自動モードを対象にする。
   // 微調整あり (true) の動作は ManualConfirm* のテストで別途検証する
   config.require_manual_confirm = false;
-  config.init_pose = CartesianState{};
-  config.init_pose.x = 0.0;
-  config.init_pose.y = 0.15;
-  config.init_pose.z = 0.15;
   return config;
 }
 
@@ -747,9 +743,10 @@ TEST(GameStateMachine, ToggleManualControlWorksFromComplete)
 
 // --- 状態のリセット (/catchrobo/game/reset → INIT) ---------------------------
 
-// どの状態からでも INIT に入り、初期位置へのゴールを1本出す。
+// どの状態からでも INIT に入り、初期位置要求を1回出す (ゴールは出さない —
+// 初期位置の座標は MCU 側が持ち、ROS2 は知らない)。
 // グリッパは開き、縦は解除し、作業領域クランプはデフォルトへ戻す
-TEST(GameStateMachine, ResetEntersInitAndGoesToInitPose)
+TEST(GameStateMachine, ResetEntersInitAndRequestsMcuInitPose)
 {
   GameStateMachine machine(makeConfig());
   advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
@@ -759,11 +756,10 @@ TEST(GameStateMachine, ResetEntersInitAndGoesToInitPose)
   machine.requestInit();
   EXPECT_EQ(machine.state(), GameState::kInit);
 
-  ASSERT_TRUE(machine.hasPendingGoal());
-  const auto goal = machine.consumePendingGoal();
-  EXPECT_DOUBLE_EQ(goal.x, 0.0);
-  EXPECT_DOUBLE_EQ(goal.y, 0.15);
-  EXPECT_DOUBLE_EQ(goal.z, 0.15);
+  EXPECT_FALSE(machine.hasPendingGoal());
+  ASSERT_TRUE(machine.hasPendingInitRequest());
+  EXPECT_TRUE(machine.consumePendingInitRequest());
+  EXPECT_FALSE(machine.hasPendingInitRequest());  // 1回きり (edge-triggered)
 
   ASSERT_TRUE(machine.hasPendingGripper());
   EXPECT_FALSE(machine.consumePendingGripper());          // 開く
@@ -778,7 +774,7 @@ TEST(GameStateMachine, InitReturnsToWaitingForPickOnGoalReached)
 {
   GameStateMachine machine(makeConfig());
   machine.requestInit();
-  machine.consumePendingGoal();
+  machine.consumePendingInitRequest();
 
   machine.onGoalReached(1.0);
   EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
@@ -802,8 +798,8 @@ TEST(GameStateMachine, ResetPullsOutOfManualControl)
 
   machine.requestInit();
   EXPECT_EQ(machine.state(), GameState::kInit);
-  ASSERT_TRUE(machine.hasPendingGoal());
-  EXPECT_DOUBLE_EQ(machine.consumePendingGoal().z, 0.15);  // init_pose
+  EXPECT_FALSE(machine.hasPendingGoal());
+  ASSERT_TRUE(machine.consumePendingInitRequest());
 
   machine.onGoalReached(2.0);
   EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
@@ -814,7 +810,7 @@ TEST(GameStateMachine, InitFallsBackToWaitingForPickWhenGoalRejected)
 {
   GameStateMachine machine(makeConfig());
   machine.requestInit();
-  machine.consumePendingGoal();
+  machine.consumePendingInitRequest();
 
   machine.onGoalRejectedOrAborted();
   EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
@@ -829,7 +825,7 @@ TEST(GameStateMachine, ResetKeepsPlacementProgress)
   ASSERT_EQ(machine.currentSlotId(), 1);  // 1個目を消化済み
 
   machine.requestInit();
-  machine.consumePendingGoal();
+  machine.consumePendingInitRequest();
   machine.onGoalReached(5.0);
   ASSERT_EQ(machine.state(), GameState::kWaitingForPick);
 

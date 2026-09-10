@@ -6,6 +6,7 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <stdexcept>
+#include <string>
 
 namespace sharmech_core
 {
@@ -106,8 +107,12 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
     "/catchrobo/arm/gripper", 10);
   orient_vertical_pub_ = create_publisher<std_msgs::msg::Bool>(
     "/catchrobo/arm/orient_vertical", 10);
+  init_request_pub_ = create_publisher<std_msgs::msg::Empty>(
+    "/catchrobo/arm/init_request", 10);
   workspace_clamp_pub_ = create_publisher<sharmech_msgs::msg::WorkspaceClamp>(
     "/catchrobo/game/workspace_clamp", 10);
+  jog_limit_pub_ = create_publisher<sharmech_msgs::msg::JogLimit>(
+    "/catchrobo/game/jog_limit", 10);
   // latched: 後から接続したVRクライアント・観測用ダッシュボードにも現在状態が即座に届く
   state_pub_ = create_publisher<std_msgs::msg::String>(
     "/catchrobo/game/state", rclcpp::QoS(1).transient_local());
@@ -125,10 +130,6 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
   logSlotGeometry(config, {});
 }
 
-
-// init_pose = [x, y, z, pitch, yaw]。config.yaml で与える (単位は m / rad)。
-// 空なら既定値を使い、要素数が違えば起動時に落とす —— 「リセットしたら
-// 意図しない場所へ動いた」を黙って起こさないため
 // パラメータの宣言。値の取得は buildConfig() 側で行い、ここでは既定値だけを与える
 // (実行中の ros2 param set で組み直せるよう、宣言と読み取りを分けてある)
 void GameStateManagerNode::declareParameters(const std::string & color_suffix)
@@ -172,15 +173,24 @@ void GameStateManagerNode::declareParameters(const std::string & color_suffix)
 
   declare_parameter("slot_clamp_margin_m", 0.03);
   declare_parameter("require_manual_confirm", true);
+  // 微調整中 (ADJUSTING_PICK / ADJUSTING_PLACE) のジョグ速度上限 [m/s]。
+  // この2状態の間だけ motion_generator_node へ /catchrobo/game/jog_limit で伝え、
+  // 抜けたら reset を送って起動時の上限へ戻す。
+  //
+  // **掴む/離す直前は缶に一番近く、行き過ぎるとワーク破損 (競技で-1点) に直結する。**
+  // 既定 0.05 は motion_generator_node の v_max (0.10) の半分。
+  // a_max=0.2 なので 0.25 秒で上限に達し、以降は等速になる —— 「倒した時間に
+  // 比例して進む」予測しやすい挙動になり、離した後の滑りも 6mm 程度に収まる
+  // (上限を上げると、倒し続けている間ずっと加速し続けて行き過ぎやすくなる)。
+  // 実機の手感に合わせて ros2 param set で調整すること
+  declare_parameter("adjusting_jog_v_max", 0.05);
   declare_parameter("grasp_dwell_sec", 0.3);
   declare_parameter("orient_dwell_sec", 0.5);
-
-  // 既定は joy_teleop_node の home_pose と同じ仮値 (docs/game_state_manager_node.md)。
-  // **実機の初期位置が決まったら config.yaml 側で差し替えること (TODO)**
-  declare_parameter("init_pose", std::vector<double>{0.0, 0.15, 0.15, 0.0, 0.0});
+  // 初期位置 (init_pose) のパラメータは **持たない**。/catchrobo/game/reset は
+  // MCU 側で定義した初期関節角へ戻す要求であり、座標は ROS2 側に無い
 }
 
-// overrides に載っているものはその値を、載っていないものは現在値を使って設定を組む。
+// overrides に載っているものはそ担ってるよねの値を、載っていないものは現在値を使って設定を組む。
 // overrides は ros2 param set の「これから設定される値」(Humble には post-set
 // コールバックが無いため、適用前の値をここで先取りして組み立てる)
 GameStateMachine::Config GameStateManagerNode::buildConfig(
@@ -249,18 +259,6 @@ GameStateMachine::Config GameStateManagerNode::buildConfig(
     box_top_z + dbl("retract_clearance_above_box_top_m") + offset_z;
   config.grasp_dwell_sec = dbl("grasp_dwell_sec");
   config.orient_dwell_sec = dbl("orient_dwell_sec");
-
-  const auto init_values = dbl_array("init_pose");
-  if (init_values.size() != 5) {
-    throw std::invalid_argument(
-            "init_pose must be [x, y, z, pitch, yaw] (got " +
-            std::to_string(init_values.size()) + " values)");
-  }
-  config.init_pose.x = init_values[0] + offset_x;
-  config.init_pose.y = init_values[1] + offset_y;
-  config.init_pose.z = init_values[2] + offset_z;
-  config.init_pose.pitch = init_values[3];
-  config.init_pose.yaw = init_values[4];
 
   if (config.slots.empty()) {
     throw std::invalid_argument(
@@ -492,7 +490,8 @@ void GameStateManagerNode::onToggleManualControl(const std_msgs::msg::Empty::Sha
 }
 
 // 状態のリセット要求 (/catchrobo/game/reset)。どの状態からでも INIT へ入り、
-// 初期位置へのゴールを1本出す。到達したら WAITING_FOR_PICK へ戻る。
+// motion_generator_node へ初期位置要求を1回出す (座標は MCU 側が持つ)。
+// 到達 (last_result = SUCCEEDED) したら WAITING_FOR_PICK へ戻る。
 // **配置の進み具合 (box_count のキュー) は消さない** ——
 // 正本は VR 側の通算カウントなので、こちらだけ巻き戻すと食い違う
 // (GameStateMachine::requestInit() のコメント参照)
@@ -502,7 +501,7 @@ void GameStateManagerNode::onResetRequest(const std_msgs::msg::Empty::SharedPtr)
   machine_->requestInit();
   RCLCPP_WARN(
     get_logger(),
-    "Game state reset requested: %s -> INIT (moving to init_pose)",
+    "Game state reset requested: %s -> INIT (requesting MCU init pose)",
     toString(previous).c_str());
   publishPendingOutputs();
   publishState();
@@ -574,6 +573,10 @@ void GameStateManagerNode::publishPendingOutputs()
   if (machine_->hasPendingGoal()) {
     target_pose_pub_->publish(toPoseStampedMsg(machine_->consumePendingGoal()));
   }
+  if (machine_->hasPendingInitRequest()) {
+    machine_->consumePendingInitRequest();
+    init_request_pub_->publish(std_msgs::msg::Empty{});
+  }
 }
 
 void GameStateManagerNode::publishState()
@@ -581,6 +584,60 @@ void GameStateManagerNode::publishState()
   std_msgs::msg::String msg;
   msg.data = toString(machine_->state());
   state_pub_->publish(msg);
+  publishJogLimitIfChanged();
+}
+
+// 状態ごとにジョグの扱いを決めて motion_generator_node へ伝える。
+//
+// **状態を知っているのはこのノードだけ、という役割分担を守るための経路。**
+// 以前は WebXR クライアントが ROS2 の状態名一覧を持ち、状態ごとに
+// 「ジョグを出す / 出さない」「速度に倍率を掛ける」を判断していたが、
+// ROS2 側が状態を増やすたびにクライアントの配列を手で直す必要があり、
+// 実際に ADJUSTING_* が漏れて微調整が効かなくなる事故が起きた (2026-09-08)。
+// ここで一元化したことで、VR も PS4 もシミュレータも同じ挙動になる。
+//
+//   自動シーケンス動作中        → block (操縦者は触らない)
+//   微調整待ち (ADJUSTING_*)    → 上限を adjusting_jog_v_max まで絞る
+//   待機・自由操作・完了        → reset (起動時の jog_v_max)
+//
+// **GRASPING / ORIENTING も block に含める。** ゴールを持たない待機状態
+// (グリッパを閉じる/缶を縦にする時間を待つだけ) なので、goal_priority による
+// 「ゴール実行中は Twist を無視」の保護が効かず、ジョグが素通りしてしまう
+void GameStateManagerNode::publishJogLimitIfChanged()
+{
+  const auto state = machine_->state();
+  JogPolicy policy;
+  switch (state) {
+    case GameState::kAdjustingPick:
+    case GameState::kAdjustingPlace:
+      policy.v_max = get_parameter("adjusting_jog_v_max").as_double();
+      break;
+    case GameState::kWaitingForPick:
+    case GameState::kManualControl:
+    case GameState::kComplete:
+      policy.reset = true;
+      break;
+    default:
+      // kApproaching / kApproachDescend / kGrasping / kTransportLift /
+      // kTransporting / kOrienting / kPlacing / kRetracting / kInit
+      policy.block = true;
+      break;
+  }
+  if (policy == last_jog_policy_) {return;}   // 変化したときだけ送る
+
+  sharmech_msgs::msg::JogLimit msg;
+  msg.reset = policy.reset;
+  msg.block = policy.block;
+  msg.v_max = policy.v_max;
+  jog_limit_pub_->publish(msg);
+  last_jog_policy_ = policy;
+
+  const std::string what = policy.reset ? std::string("reset") :
+    policy.block ? std::string("blocked") :
+    ("-> " + std::to_string(policy.v_max) + " m/s");
+  const std::string state_name = toString(state);
+  RCLCPP_INFO(
+    get_logger(), "Jog %s (state=%s)", what.c_str(), state_name.c_str());
 }
 
 }  // namespace sharmech_core

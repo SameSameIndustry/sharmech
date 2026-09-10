@@ -16,6 +16,7 @@
 #include <sharmech_msgs/msg/cartesian_command.hpp>
 #include <sharmech_msgs/msg/motion_status.hpp>
 #include <sharmech_msgs/msg/workspace_clamp.hpp>
+#include <sharmech_msgs/msg/jog_limit.hpp>
 
 #include "sharmech_core/utility/game_state_machine.hpp"
 
@@ -47,7 +48,7 @@ namespace sharmech_core
 // Sub: /catchrobo/game/toggle_manual_control  DualSenseの特定ボタン同時押し
 //      (L1+R1+L3+R3) で joy_teleop_node が publish する、自由操作の入/切トグル
 // Sub: /catchrobo/game/reset          (std_msgs/Empty) 状態のリセット要求。
-//      どの状態からでも INIT へ入り、init_pose へ戻ってから WAITING_FOR_PICK に復帰する
+//      どの状態からでも INIT へ入り、MCU 側の初期位置へ戻ってから WAITING_FOR_PICK に復帰する
 class GameStateManagerNode : public rclcpp::Node
 {
 public:
@@ -62,7 +63,8 @@ private:
   // VRが使えない場合の脱出ハッチ。どの状態からでも自由操作(手動ジョグのみ)へ
   // トグルする。詳細は GameStateMachine::toggleManualControl() のコメント参照
   void onToggleManualControl(const std_msgs::msg::Empty::SharedPtr msg);
-  // 状態のリセット要求。どの状態からでも INIT へ入り、初期位置へのゴールを1本出す
+  // 状態のリセット要求。どの状態からでも INIT へ入り、motion_generator_node へ
+  // 初期位置要求 (/catchrobo/arm/init_request) を1回出す。座標は持たない
   // (詳細は GameStateMachine::requestInit() のコメント参照)
   void onResetRequest(const std_msgs::msg::Empty::SharedPtr msg);
   // 操縦者の確定 (微調整の完了)。ADJUSTING_PICK / ADJUSTING_PLACE でのみ効く
@@ -73,12 +75,14 @@ private:
 
   void publishPendingOutputs();
   void publishState();
+  // 現在の状態にふさわしいジョグ速度上限を motion_generator_node へ伝える。
+  // **変化した瞬間だけ publish する** (状態は 10Hz で回るので毎回送ると無駄)。
+  // 状態を知っているのはROS2側だけ、という役割分担を保つための経路で、
+  // これがあるおかげで操縦層 (VR/PS4) はゲーム状態を知らなくてよい
+  void publishJogLimitIfChanged();
 
   // slot_x_<color_suffix> / slot_y_<color_suffix> / slot_z_<color_suffix>
   // パラメータ (等長の配列) からスロット姿勢の一覧を組み立てる
-
-  // init_pose パラメータ ([x, y, z, pitch, yaw]) を読む。
-  // 空なら既定値、要素数が5でなければ起動時に落とす (無言で別の場所へ動かさない)
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pick_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr box_count_sub_;
@@ -88,7 +92,9 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr orient_vertical_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr init_request_pub_;
   rclcpp::Publisher<sharmech_msgs::msg::WorkspaceClamp>::SharedPtr workspace_clamp_pub_;
+  rclcpp::Publisher<sharmech_msgs::msg::JogLimit>::SharedPtr jog_limit_pub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr change_state_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr toggle_manual_control_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub_;
@@ -113,6 +119,19 @@ private:
     const std::vector<rclcpp::Parameter> & parameters);
 
   std::string field_color_;
+  // 状態ごとのジョグ方針。publishJogLimitIfChanged() が状態から決める
+  struct JogPolicy
+  {
+    bool reset{false};    // 起動時の上限 (jog_v_max) へ戻す
+    bool block{false};    // ジョグを完全に無効化する
+    double v_max{0.0};    // reset/block でないときの上限 [m/s]
+    bool operator==(const JogPolicy & o) const
+    {
+      return reset == o.reset && block == o.block && v_max == o.v_max;
+    }
+  };
+  // 直近に publish した方針。初期値はどの実方針とも一致しないので必ず1回は送られる
+  JogPolicy last_jog_policy_{false, false, -1.0};
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
   std::unique_ptr<GameStateMachine> machine_;

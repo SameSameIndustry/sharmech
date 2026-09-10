@@ -11,6 +11,8 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <sharmech_msgs/msg/cartesian_command.hpp>
+#include <sharmech_msgs/msg/jog_limit.hpp>
+#include <sharmech_msgs/msg/mcu_status.hpp>
 #include <sharmech_msgs/msg/motion_status.hpp>
 #include <sharmech_msgs/msg/workspace_clamp.hpp>
 
@@ -31,10 +33,14 @@ namespace sharmech_core
 // Sub: /catchrobo/arm/cmd_twist     ジョグ入力 (ベース座標系)
 // Sub: /catchrobo/arm/gripper       グリッパ指令
 // Sub: /catchrobo/arm/orient_vertical  「縦にする」指令 (game_state_manager_node の PLACING 用)
-// Sub: /catchrobo/arm/cancel        ゴール中断
-// Sub: /catchrobo/arm/current_pose  実姿勢 (状態トピックの残距離計算に使用)
+// Sub: /catchrobo/arm/cancel        ゴール中断 (初期位置要求の中断も兼ねる)
+// Sub: /catchrobo/arm/init_request  初期位置要求 (game_state_manager_node の INIT。MCU 側の初期角へ)
+// Sub: /catchrobo/arm/current_pose  実姿勢 (起動時の同期・残距離計算・INIT 中の追従に使用)
+// Sub: /catchrobo/arm/mcu_status    MCU の status_flags (未初期化の間は同期しない / INIT 到達の検出)
 // Sub: /catchrobo/game/workspace_clamp  作業領域クランプの動的上書き (game_state_manager_node)
-// Pub: /catchrobo/command/cartesian 位置 + 速度ストリーム (control_rate)
+// Sub: /catchrobo/game/jog_limit    ジョグ速度上限の動的上書き (同上)
+// Pub: /catchrobo/command/cartesian 位置 + 速度ストリーム (control_rate)。
+//                                   動作許可 (enable) と初期位置要求 (init_request) も同乗
 // Pub: /catchrobo/command/gripper   調停後のグリッパ指令
 // Pub: /catchrobo/command/orient_vertical  調停後の「縦にする」指令
 // Pub: /catchrobo/arm/status        現在状態 (latched, status_rate)
@@ -49,6 +55,10 @@ private:
     kIdle = sharmech_msgs::msg::MotionStatus::MODE_IDLE,
     kGoal = sharmech_msgs::msg::MotionStatus::MODE_GOAL,
     kJog  = sharmech_msgs::msg::MotionStatus::MODE_JOG,
+    // 初期位置要求中。目標姿勢は MCU のフィードバックを追いかけるだけで、
+    // 実際に動かしているのは MCU (自前の初期関節角へ移動)。到達は
+    // McuStatus の FLAG_AT_INIT_POSE で知り、kIdle + SUCCEEDED へ抜ける
+    kInit = sharmech_msgs::msg::MotionStatus::MODE_INIT,
   };
 
   // コールバック: 入力の記録と状態遷移の判定のみ。target_ は書き換えない
@@ -57,7 +67,10 @@ private:
   void onGripper(const std_msgs::msg::Bool::SharedPtr msg);
   void onOrientVertical(const std_msgs::msg::Bool::SharedPtr msg);
   void onCancel(const std_msgs::msg::Empty::SharedPtr msg);
+  void onInitRequest(const std_msgs::msg::Empty::SharedPtr msg);
   void onCurrentPose(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+  void onMcuStatus(const sharmech_msgs::msg::McuStatus::SharedPtr msg);
+  void onJogLimit(const sharmech_msgs::msg::JogLimit::SharedPtr msg);
   void onWorkspaceClamp(const sharmech_msgs::msg::WorkspaceClamp::SharedPtr msg);
 
   // 制御タイマー: target_ を書き換える唯一の場所
@@ -65,6 +78,10 @@ private:
   void onStatusTimer();
 
   void rejectGoal(const std::string & reason);
+  // 直近のフィードバックを CartesianState に直す (無ければ nullopt)
+  std::optional<CartesianState> feedbackState() const;
+  // MCU が「未初期化・原点未確定」を報告中か (status 未受信なら false)
+  bool mcuUninitialized() const;
   bool isInsideWorkspace(double x, double y, double z) const;
   CartesianState clampToWorkspace(const CartesianState & state) const;
 
@@ -73,8 +90,11 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr gripper_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr orient_vertical_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr cancel_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr init_request_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr current_pose_sub_;
+  rclcpp::Subscription<sharmech_msgs::msg::McuStatus>::SharedPtr mcu_status_sub_;
   rclcpp::Subscription<sharmech_msgs::msg::WorkspaceClamp>::SharedPtr workspace_clamp_sub_;
+  rclcpp::Subscription<sharmech_msgs::msg::JogLimit>::SharedPtr jog_limit_sub_;
   rclcpp::Publisher<sharmech_msgs::msg::CartesianCommand>::SharedPtr cartesian_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr orient_vertical_pub_;
@@ -102,6 +122,17 @@ private:
   double workspace_y_min_, workspace_y_max_;
   double workspace_z_min_, workspace_z_max_;
   double twist_timeout_;        // [s] ジョグのウォッチドッグ
+  // ジョグ (cmd_twist) の並進速度上限 [m/s]。**操縦層が送ってくる値を信用せず
+  // ここで頭打ちにする。** v_max_ と分けてあるのは、ゴールの軌道生成 (v_max_) と
+  // 手動ジョグとで妥当な上限が違うため (ジョグは操縦者が随時止められる)。
+  // /catchrobo/game/jog_limit の reset=true で戻る先でもある
+  double jog_v_max_;
+  // 現在有効なジョグ速度上限。通常は jog_v_max_ と同じだが、
+  // game_state_manager_node が微調整中 (ADJUSTING_*) に一時的に絞る
+  double active_jog_v_max_;
+  // ジョグの完全遮断。自動シーケンスの動作中 (ゴールを持たない GRASPING /
+  // ORIENTING を含む) に game_state_manager_node が立てる
+  bool jog_blocked_{false};
   std::string goal_mode_;       // "goal_priority" / "twist_priority" / "exclusive"
 
   // 現在有効な作業領域。通常時は workspace_*_min_/max_ と同じだが、
@@ -126,6 +157,12 @@ private:
   bool gripper_state_{false};
   bool orient_vertical_state_{false};
   std::optional<geometry_msgs::msg::PoseStamped> latest_feedback_;
+  // 直近の MCU status_flags。未受信 (nullopt) は「MCU 状態が分からない」であり、
+  // その場合は current_pose だけで同期する (mcu_status を出さないシミュレータとの後方互換)
+  std::optional<uint16_t> latest_mcu_flags_;
+  // 目標姿勢を MCU の実姿勢へ同期済みか。**false の間は動作許可 (bit0) を 0 で送る**。
+  // 同期前の target_ は原点の仮値なので、これを MCU に追従させると起動しただけで
+  // アームが動く。MCU が未初期化 (bit3) を報告したら false に戻す (MCU 再起動)
   bool synced_with_feedback_{false};
 };
 

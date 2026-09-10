@@ -18,6 +18,16 @@ sharmech_core/include/sharmech_core/utility/udp_protocol.hpp が正本。
 実際の追従遅れを見たいときは --lag で一次遅れを、--drop-rate で
 パケットロスをシミュレートできる。
 
+起動シーケンスと初期位置 (2026-09-10 の契約。mcu_spec.md §4.6):
+  - 起動直後は **自前の初期位置 (--init-pose r,theta,z) に居る** ものとし、
+    --init-duration 秒の間は FLAG_UNINITIALIZED (bit3) を立てて「原点出し中」を
+    再現する。ROS2 側 (motion_generator_node) はこの間同期せず、動作許可 0 を送る
+  - control_flags bit0 (動作許可) が 0 のパケットは **位置を更新しない** (ホールド)
+  - control_flags bit2 (初期位置要求) が立っている間は r/θ/z を無視して
+    --init-pose へ (--lag があれば一次遅れで) 戻り、到達したら
+    FLAG_AT_INIT_POSE (bit5) を立てる。bit2 が落ちたら bit5 も落ちる。
+    **初期位置の座標は ROS2 側に無い** (実機では MCU が初期関節角として持つ)
+
 関節指令 (packet_type=0x02、パターンB) も受理する。この場合は指令された
 関節角をそのままフィードバックの joint_positions にエコーバックする。
 ただし本スクリプトは FK を持たないため、0x02 に対する r/θ/z/pitch/yaw の
@@ -72,6 +82,15 @@ FLAG_DRIVER_FAULT = 1 << 1
 FLAG_WATCHDOG = 1 << 2
 FLAG_UNINITIALIZED = 1 << 3
 FLAG_COMMAND_REJECTED = 1 << 4
+FLAG_AT_INIT_POSE = 1 << 5
+
+# control_flags のビット定義 (udp_protocol.hpp の kControlFlag* と一致させること)
+CONTROL_ENABLE = 0x01
+CONTROL_ORIENT_VERTICAL = 0x02
+CONTROL_INIT_REQUEST = 0x04
+
+# 初期位置「到達」とみなす許容差 (r/z は [m]、θ は [rad] だが仮に同じ閾値)
+INIT_ARRIVAL_TOLERANCE = 1e-3
 
 
 def decode_polar(data: bytes):
@@ -148,8 +167,20 @@ def main():
     parser.add_argument("--feedback-rate", type=float, default=100.0,
                         help="フィードバック(0x81)の自発送信周期 [Hz] (既定: 100。0 で"
                              "旧来のエコー型に戻る)")
+    parser.add_argument("--init-pose", type=str, default="0.30,0.0,0.15",
+                        help="MCU 側で定義した初期位置 'r,theta,z' (m,rad,m)。起動直後の実位置であり、"
+                             "control_flags bit2 (初期位置要求) で戻る先 (既定: 0.30,0.0,0.15)")
+    parser.add_argument("--init-duration", type=float, default=0.5,
+                        help="起動後この秒数は FLAG_UNINITIALIZED を立てて原点出し中を再現する "
+                             "(既定 0.5s。0 で即初期化済み)")
     parser.add_argument("--quiet", action="store_true", help="受信ログを抑制する")
     args = parser.parse_args()
+
+    try:
+        init_r, init_theta, init_z = (float(v) for v in args.init_pose.split(","))
+    except ValueError:
+        parser.error(f"--init-pose は 'r,theta,z' の3値 (got {args.init_pose!r})")
+    init_pose = {"r": init_r, "theta": init_theta, "z": init_z}
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("0.0.0.0", args.listen_port))
@@ -159,8 +190,11 @@ def main():
           f"(drop_rate={args.drop_rate}, lag={args.lag}s, "
           f"feedback={args.feedback_rate}Hz)", file=sys.stderr)
 
-    # 現在の「実位置」。--lag が 0 なら毎回コマンド値に即座に一致させる
-    current = {"r": 0.0, "theta": 0.0, "z": 0.0, "pitch": 0.0, "yaw": 0.0}
+    # 現在の「実位置」。--lag が 0 なら毎回コマンド値に即座に一致させる。
+    # 起動直後は自前の初期位置に居る (実機の電源投入時の原点出し後に相当)
+    current = {"r": init_r, "theta": init_theta, "z": init_z, "pitch": 0.0, "yaw": 0.0}
+    started_at = time.monotonic()
+    init_requested = False   # 直近の指令の control_flags bit2
     gripper_closed = False
     feedback_seq = 0
     last_recv_seq = None
@@ -210,12 +244,30 @@ def main():
                         last_recv_time = now
                         processed = True
                         if cmd is not None:
+                            flags = cmd["control_flags"]
+                            enabled = bool(flags & CONTROL_ENABLE)
+                            init_requested = bool(flags & CONTROL_INIT_REQUEST)
+                            # グリッパ・手首は bit0/bit2 に関係なく反映する
                             gripper_closed = bool(cmd["gripper"])
-                            last_cmd_pos = (cmd["r"], cmd["theta"], cmd["z"])
-                            for key in ("r", "theta", "z", "pitch", "yaw"):
+                            for key in ("pitch", "yaw"):
                                 current[key] += (cmd[key] - current[key]) * alpha
+                            if not enabled:
+                                # 動作許可 0: 現在位置ホールド (ウォッチドッグ発動時と同じ)。
+                                # 追従誤差の判定対象にもしない
+                                last_cmd_pos = None
+                            elif init_requested:
+                                # 初期位置要求: r/θ/z を無視して自前の初期位置へ
+                                last_cmd_pos = None
+                                for key in ("r", "theta", "z"):
+                                    current[key] += (init_pose[key] - current[key]) * alpha
+                            else:
+                                last_cmd_pos = (cmd["r"], cmd["theta"], cmd["z"])
+                                for key in ("r", "theta", "z"):
+                                    current[key] += (cmd[key] - current[key]) * alpha
                             if not args.quiet:
-                                print(f"[mock_mcu] recv seq={seq:6d} "
+                                mode = ("hold" if not enabled else
+                                        "init" if init_requested else "track")
+                                print(f"[mock_mcu] recv seq={seq:6d} {mode:5s} "
                                       f"pos=(r={cmd['r']:+.3f},th={cmd['theta']:+.3f},"
                                       f"z={cmd['z']:+.3f}) "
                                       f"gripper={'closed' if gripper_closed else 'open'}",
@@ -255,6 +307,13 @@ def main():
                 status_flags |= FLAG_WATCHDOG
             if now < rejected_until:
                 status_flags |= FLAG_COMMAND_REJECTED
+            if now - started_at < args.init_duration:
+                # 起動直後の原点出し中 (契約: 完了まで bit3 を立てたまま送る)
+                status_flags |= FLAG_UNINITIALIZED
+            if init_requested and all(
+                    abs(current[k] - init_pose[k]) < INIT_ARRIVAL_TOLERANCE
+                    for k in ("r", "theta", "z")):
+                status_flags |= FLAG_AT_INIT_POSE
             if args.tracking_error_limit > 0.0 and last_cmd_pos is not None:
                 # 極座標のまま距離を測ると θ [rad] と r/z [m] の単位が混ざるので、
                 # 直交座標へ戻してから誤差を測る

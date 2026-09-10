@@ -49,12 +49,40 @@ constexpr std::array<const char *, kJointCount> kJointOrder = {
   "shoulder_left", "shoulder_right", "turntable", "knee_left", "knee_right",
 };
 
-// 動作許可フラグ (control_flags)。現時点では常に kEnable を立てる
+// control_flags のビット定義。いずれも「毎パケットに載る状態 (レベル)」であって
+// イベントではない (仕様の正本: sharmech/docs/mcu_spec.md §3.2)。
+//
+// bit0 動作許可。0 のパケットを受けた MCU は現在位置をホールドする (ウォッチドッグ
+//      発動時と同じ挙動)。motion_generator_node は起動直後、MCU のフィードバックに
+//      目標姿勢を同期し終えるまで 0 を送る —— 同期前の目標姿勢は原点 (0,0,0) の
+//      仮値なので、これを MCU が追従すると起動しただけでアームが動いてしまう
 constexpr uint8_t kControlFlagEnable = 0x01;
-// 横倒しのワークを縦向きにしてから置け、という指示 (game_state_manager_node の
-// PLACING 状態でのみ立てる)。MCU側がどう実現するかは未定義で、ROS2 側はこの
-// フラグを不透明に渡すだけ (グリッパの0/1と同じ扱い)
+// bit1 横倒しのワークを縦向きにしてから置け、という指示 (game_state_manager_node の
+//      PLACING 状態でのみ立てる)。MCU側がどう実現するかは未定義で、ROS2 側はこの
+//      フラグを不透明に渡すだけ (グリッパの0/1と同じ扱い)
 constexpr uint8_t kControlFlagOrientVertical = 0x02;
+// bit2 初期位置要求。立っている間、MCU は r/θ/z と速度を無視して **MCU 側で
+//      定義した初期関節角** へ自前のスルーレート制限で移動し、そこで保持する。
+//      ROS2 側は初期位置の座標を一切知らない (/catchrobo/game/reset の実体)。
+//      到達したことは status_flags の kStatusAtInitPose で返る
+constexpr uint8_t kControlFlagInitRequest = 0x04;
+
+// control_flags を組み立てるための入力。既定値 (動作許可のみ) は
+// 「通常運転で r/θ/z に追従せよ」を意味する
+struct ControlFlags
+{
+  bool enable{true};
+  bool orient_vertical{false};
+  bool init_request{false};
+
+  uint8_t pack() const
+  {
+    return static_cast<uint8_t>(
+      (enable ? kControlFlagEnable : 0) |
+      (orient_vertical ? kControlFlagOrientVertical : 0) |
+      (init_request ? kControlFlagInitRequest : 0));
+  }
+};
 
 #pragma pack(push, 1)
 
@@ -144,6 +172,9 @@ constexpr uint16_t kStatusDriverFault = 1 << 1;       // ドライバ異常
 constexpr uint16_t kStatusWatchdog = 1 << 2;          // ウォッチドッグ作動中
 constexpr uint16_t kStatusUninitialized = 1 << 3;     // 未初期化・原点未確定
 constexpr uint16_t kStatusCommandRejected = 1 << 4;   // 直近の指令を破棄した (作業領域外・seq逆転等)
+// 初期位置要求 (kControlFlagInitRequest) に応答して初期位置へ到達し、静止している。
+// bit2 が立っている間だけ意味を持つ (ROS2 側はこれを見て bit2 を落とす)
+constexpr uint16_t kStatusAtInitPose = 1 << 5;
 
 // デコード済みフィードバック。r/theta は極座標のまま
 // (直交座標へ戻すのは hardware_bridge_node の責務)
@@ -172,7 +203,8 @@ public:
   static std::vector<uint8_t> encodePolar(
     float r, float theta, float z, float pitch, float yaw,
     float r_dot, float theta_dot, float vz, float pitch_rate, float yaw_rate,
-    bool gripper_closed, bool orient_vertical, uint32_t seq, uint64_t timestamp_us)
+    bool gripper_closed, const udp_protocol::ControlFlags & flags,
+    uint32_t seq, uint64_t timestamp_us)
   {
     udp_protocol::PolarPacket packet{};
     packet.header.protocol_version = udp_protocol::kProtocolVersion;
@@ -193,8 +225,7 @@ public:
     packet.payload.pitch_rate = pitch_rate;
     packet.payload.yaw_rate = yaw_rate;
     packet.payload.gripper = gripper_closed ? 1 : 0;
-    packet.payload.control_flags = udp_protocol::kControlFlagEnable |
-      (orient_vertical ? udp_protocol::kControlFlagOrientVertical : 0);
+    packet.payload.control_flags = flags.pack();
     packet.payload.reserved = 0;
 
     std::vector<uint8_t> buffer(sizeof(packet));
@@ -207,7 +238,8 @@ public:
   static std::vector<uint8_t> encodeJoint(
     const std::array<float, udp_protocol::kJointCount> & q,
     const std::array<float, udp_protocol::kJointCount> & qdot,
-    bool gripper_closed, bool orient_vertical, uint32_t seq, uint64_t timestamp_us)
+    bool gripper_closed, const udp_protocol::ControlFlags & flags,
+    uint32_t seq, uint64_t timestamp_us)
   {
     udp_protocol::JointPacket packet{};
     packet.header.protocol_version = udp_protocol::kProtocolVersion;
@@ -222,8 +254,7 @@ public:
       packet.payload.qdot[i] = qdot[i];
     }
     packet.payload.gripper = gripper_closed ? 1 : 0;
-    packet.payload.control_flags = udp_protocol::kControlFlagEnable |
-      (orient_vertical ? udp_protocol::kControlFlagOrientVertical : 0);
+    packet.payload.control_flags = flags.pack();
     packet.payload.reserved = 0;
 
     std::vector<uint8_t> buffer(sizeof(packet));

@@ -56,7 +56,7 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 | `/catchrobo/game/box_count` | `std_msgs/Int32` | VR の指定箱にワークを離した**通算個数**(1始まり)。`N` は「`placement_order[N-1]` のスロットへ置きに行く」を意味する。**置きに行くべきスロットのキュー**として扱い、`place_request` 相当の「置け」指示も兼ねる(下記) |
 | `/catchrobo/arm/status` | `sharmech_msgs/MotionStatus` | `motion_generator_node` の状態。`last_result` の変化でゴール到達/却下を検知する |
 | `/catchrobo/game/toggle_manual_control` | `std_msgs/Empty` | `joy_teleop_node` が DualSense の4ボタン同時押しを検知して publish。**どの状態からでもトグルできる** (下記「自由操作」節) |
-| `/catchrobo/game/reset` | `std_msgs/Empty` | 状態のリセット要求(VRメニューの「ステートリセット」)。**どの状態からでも** `kInit` へ入り、`init_pose` へのゴールを1本出す。到達したら `kWaitingForPick` へ復帰する(下記「状態のリセット」) |
+| `/catchrobo/game/reset` | `std_msgs/Empty` | 状態のリセット要求(VRメニューの「ステートリセット」)。**どの状態からでも** `kInit` へ入り、`motion_generator_node` へ初期位置要求 (`/catchrobo/arm/init_request`) を1回出す。**座標は持たない** (MCU が自前の初期関節角へ動く)。到達したら `kWaitingForPick` へ復帰する(下記「状態のリセット」) |
 | `/catchrobo/game/confirm` | `std_msgs/Empty` | **微調整の確定。** `kAdjustingPick` / `kAdjustingPlace` でのみ有効で、それ以外の状態では無視する。`joy_teleop_node` の確定ボタン (既定R3) と VR のサムズアップが、どちらもここへ publish する契約 |
 | `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `motion_generator_node` が100Hzで出す現在の目標姿勢。**微調整でジョグした結果を知るために購読する** (publish はしない)。直後の垂直移動の起点に使う |
 | `/catchrobo/debug/change_state` | `std_msgs/String` | デバッグ専用。状態名 (`"APPROACHING"` 等) を受けて `forceState()` で強制的にその状態へ飛ばす。ゴール・グリッパ・クランプは一切 publish しない (その状態の見た目だけを確認したいとき用)。未知の状態名は無視して警告ログを出す |
@@ -73,6 +73,7 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 | `/catchrobo/arm/gripper` | `std_msgs/Bool` | 自動シーケンスのグリッパ指令 |
 | `/catchrobo/arm/orient_vertical` | `std_msgs/Bool` | PLACING 中のみ `true` |
 | `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | PLACING/RETRACTING 前後の作業領域クランプ上書き。詳細は [`motion_generator_node.md`](motion_generator_node.md) |
+| `/catchrobo/game/jog_limit` | `sharmech_msgs/JogLimit` | **微調整中 (ADJUSTING_*) のジョグ速度上限。** 下記「微調整中はジョグを遅くする」 |
 | `/catchrobo/game/state` | `std_msgs/String` | 現在のゲームステート。**latched (transient_local)**、`state_publish_rate` (既定10Hz) |
 
 ### パラメータ
@@ -99,7 +100,7 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 | `grasp_dwell_sec` | 0.3 | GRASPING状態でグリッパを閉じてから待つ時間 [s] (グリッパの実フィードバックが無いための暫定措置。下記) |
 | `orient_dwell_sec` | 0.5 | ORIENTING状態でワークを縦にし切るまで待つ時間 [s]。**ピッチ機構の速度が未実測なので0.5は仮値**。短すぎると缶が斜めのまま箱へ降下する (下記「縦にするタイミング」) |
 | `state_publish_rate` | 10.0 | `/catchrobo/game/state` の配信周期 [Hz] |
-| `init_pose` | `[0.0, 0.15, 0.15, 0.0, 0.0]` | `/catchrobo/game/reset` で戻る初期位置 `[x, y, z, pitch, yaw]` (m / rad)。**`joy_teleop_node` の `home_pose` と同じ仮値。実機の初期位置が決まったら両方差し替えること (TODO)**。要素数が5でなければ起動時に落とす |
+| ~~`init_pose`~~ | — | **2026-09-10 廃止。** 初期位置の正本は MCU 側の初期関節角で、ROS2 は座標を持たない (UDP `control_flags` bit2 で要求するだけ。`sharmech/docs/mcu_spec.md` §4.6) |
 | `field_origin_offset_x_m` / `_y_m` | 0.0 / 0.0 | 本番設置での原点ズレ補正 [m]。読み込んだスロット座標全体をこの分だけ平行移動する。`motion_generator_node` と同じ値を使う想定 |
 
 > **名前について。** 本ドキュメントの状態遷移の説明に出てくる
@@ -108,6 +109,33 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 > ROS パラメータ側は 2026-09-06 に基準面からの相対
 > (`*_above_box_top_m`) へ変わっており、内部の絶対値は
 > `box_top_z_m + *_above_box_top_m + field_origin_offset_z_m` として組み立てられる。
+
+### 微調整中はジョグを遅くする (2026-09-10)
+
+`ADJUSTING_PICK` / `ADJUSTING_PLACE` に入っている間だけ、`/catchrobo/game/jog_limit` で
+`motion_generator_node` のジョグ速度上限を `adjusting_jog_v_max` (既定 0.05 m/s) に絞る。
+状態を抜けたら `reset = true` を送って起動時の上限へ戻す。
+
+**変化した瞬間だけ publish する** (状態は `state_publish_rate` で回っているので毎回送ると無駄)。
+
+なぜこのノードがやるのか:
+
+- **ゲームの状態を知っているのはこのノードだけ**だから。`motion_generator_node` は
+  ゲーム進行を知らない輸送・生成層で、`/catchrobo/game/state` も購読していない。
+  作業領域クランプ (`workspace_clamp`) と全く同じ構図
+- **操縦層 (VR / PS4) に状態依存のロジックを置かなくて済む。** 以前は WebXR
+  クライアントが ROS2 の状態名の一覧を持ち、状態ごとに速度倍率を掛けていた。
+  ROS2 側が状態を1つ増やすたびにクライアント側の配列を手で直す必要があり、
+  実際に `ADJUSTING_*` が漏れて微調整のジョグが出なくなる事故が起きた (2026-09-08)
+- VR も PS4 もシミュレータも、何も変えずに同じ挙動になる
+
+掴む/離す直前は缶に一番近く、行き過ぎるとワーク破損 (競技で-1点) に直結する。
+`a_max` (既定 0.2 m/s²) があるので上限 0.05 m/s には 0.25 秒で到達し、以降は等速になる。
+「倒した時間に比例して進む」予測しやすい挙動になり、離した後の滑りも 6mm 程度に収まる
+(上限が高いと、倒し続けている間ずっと加速し続けて行き過ぎやすい)。
+
+**実機の手感に合わせて `ros2 param set /game_state_manager_node adjusting_jog_v_max <値>`
+で調整すること** (再起動不要。次に ADJUSTING へ入った時点から効く)。
 
 ### スロット座標の決まり方 (2026-09-06 に生成方式へ変更)
 
@@ -206,8 +234,8 @@ stateDiagram-v2
 | 9 | `kApproaching`/`kApproachDescend`/`kGrasping`/`kTransportLift`/`kTransporting`/`kOrienting`/`kPlacing`/`kRetracting`/`kInit` → `kWaitingForPick` | `last_result = REJECTED`/`ABORTED` | 安全側フォールバック。`kWaitingForPick`/`kComplete`/`kManualControl` 中は対象外。グリッパを開き直す処理・ピッチを横へ戻す処理は無い (「既知の未対応」参照) |
 | 10 | 任意の状態 ⇄ `kManualControl` | `/catchrobo/game/toggle_manual_control` | `kComplete` からも可。復帰時は退避先の状態へ。クランプは必ずデフォルトへ |
 | 11 | 任意の状態 → 任意の状態 (デバッグ専用) | `/catchrobo/debug/change_state` | ゴール/グリッパ/クランプは一切publishしない。未知の状態名は無視+警告 |
-| 12 | 任意の状態 → `kInit` | `/catchrobo/game/reset` | `kManualControl`/`kComplete` からも可。`init_pose` へのゴール1本 + グリッパ開 + 縦解除 + クランプ解除を同時発行。**配置の進み具合(`box_count` のキュー)は消さない** |
-| 13 | `kInit` → `kWaitingForPick` | `last_result = SUCCEEDED` | 初期位置に着いたら通常どおり `pick_request` を受けられる。却下・中断は #9 と同じ扱い |
+| 12 | 任意の状態 → `kInit` | `/catchrobo/game/reset` | `kManualControl`/`kComplete` からも可。初期位置要求 (`/catchrobo/arm/init_request`) 1回 + グリッパ開 + 縦解除 + クランプ解除を同時発行。**配置の進み具合(`box_count` のキュー)は消さない** |
+| 13 | `kInit` → `kWaitingForPick` | `last_result = SUCCEEDED` | MCU が初期位置到達 (bit5) を返し `motion_generator_node` が `SUCCEEDED` を出したら、通常どおり `pick_request` を受けられる。却下・中断 (cancel) は #9 と同じ扱い |
 
 **状態遷移の条件が変わったら、上の図と表を書き直すこと。** 正本は
 [`game_state_machine.hpp`](../include/sharmech_core/utility/game_state_machine.hpp) と
@@ -228,7 +256,7 @@ stateDiagram-v2
 | `kRetracting` | グリッパを開き、同じ xy で `retract_clearance_z` まで直線で退避。作業領域クランプをデフォルトに戻す。**縦のまま抜く** (横へ戻すのは次の `kApproaching`) |
 | `kComplete` | `placement_order` を使い切った。以降 `pick_request` は無視される(実質的な終了状態)。ただし `box_count` が巻き戻ると `kWaitingForPick` へ復帰する |
 | `kManualControl` | 自動シーケンス停止。**どの状態からでもトグルで入り、再度トグルで元の状態に戻る**(下記「自由操作」節) |
-| `kInit` | `init_pose` へ直線1本で戻っている最中。グリッパは開・縦は解除・作業領域クランプはデフォルト。到達したら `kWaitingForPick` へ(下記「状態のリセット」節) |
+| `kInit` | MCU が自前の初期関節角へ戻っている最中 (`motion_generator_node` の `INIT` モード)。グリッパは開・縦は解除・作業領域クランプはデフォルト。到達したら `kWaitingForPick` へ(下記「状態のリセット」節) |
 
 **すべての状態遷移のゴールは直線1本のみ。** 経由点を持つ軌道は作らない、という
 `sharmech/README.md` の既存方針をこの自動シーケンスにもそのまま適用している。
@@ -416,8 +444,13 @@ VR復旧後に不整合が疑われる場合は運用側で判断すること。
 ## 状態のリセット (`INIT`)
 
 **`/catchrobo/game/reset` (`std_msgs/Empty`) を受けると、どの状態からでも `kInit` に
-入り、`init_pose` へ直線1本で戻る。** 到達 (`last_result = SUCCEEDED`) したら
-`kWaitingForPick` へ復帰し、そのまま次の `pick_request` を受けられる。
+入り、`motion_generator_node` へ初期位置要求 (`/catchrobo/arm/init_request`) を出す。**
+初期位置の座標はこのノードにも ROS2 のどこにも無い。要求は UDP `control_flags` bit2 として
+MCU へ届き、**MCU が自前で定義した初期関節角へ動く** (電源投入時に自力で行くのと同じ
+位置。`sharmech/docs/mcu_spec.md` §4.6)。MCU が到達 (`status_flags` bit5) を返すと
+`motion_generator_node` が `last_result = SUCCEEDED` を出し、`kWaitingForPick` へ復帰して
+そのまま次の `pick_request` を受けられる。実機の無い環境では sim / mock_mcu がそれぞれ
+自前の初期位置へ動いて同じ契約で応答する。
 送るのは VR クライアント (`catchrobo_webxr_controller`) の操作メニューにある
 「ステートリセット」ボタン。
 
@@ -426,7 +459,7 @@ VR復旧後に不整合が疑われる場合は運用側で判断すること。
 
 | 同時発行するもの | 値 | 理由 |
 |---|---|---|
-| `target_pose` | `init_pose` | 初期位置へ戻る唯一のゴール |
+| `init_request` | (Empty) | 初期位置へ戻る要求。ゴール (`target_pose`) は出さない |
 | `gripper` | `false` (開) | ワークを掴んだままリセットされると、その後どこで落ちるか分からない |
 | `orient_vertical` | `false` (横) | 縦のまま広い範囲を動かさない |
 | `workspace_clamp` | `reset = true` | `kOrienting`〜`kRetracting` の絞り込みが残っていると初期位置へ戻れない |
@@ -435,7 +468,8 @@ VR復旧後に不整合が疑われる場合は運用側で判断すること。
   VR は生きている (`kManualControl` は「VRが使えないときの脱出ハッチ」)。
   自由操作から引き出して初期位置へ戻す方が、ボタンが無反応になるより分かりやすい
 - **却下・中断されたときは #9 と同じ扱い**で `kWaitingForPick` へ落ちる。
-  理由はノードが警告ログに出す (作業領域外の `init_pose` を設定していれば毎回これになる)
+  理由はノードが警告ログに出す (MCU が到達を返さないまま `/catchrobo/arm/cancel` で
+  抜けた場合など)
 - **配置の進み具合 (`order_index_` / `authorized_count_`) は消さない。**
   「何個目まで置いたか」の正本は VR 側の `box_count` にあり、こちらだけ巻き戻すと、
   次に届いた `box_count` で既に置いたスロットへもう一度置きに行くことになる。

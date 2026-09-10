@@ -51,7 +51,6 @@ game_state_manager_node:
     approach_clearance_above_box_top_m: 0.044
     transport_clearance_above_box_top_m: 0.044
     retract_clearance_above_box_top_m: 0.044
-    init_pose: [0.0, 0.15, 0.15, 0.0, 0.0]
     field_origin_offset_x_m: 0.0
     field_origin_offset_y_m: 0.0
     field_origin_offset_z_m: 0.0

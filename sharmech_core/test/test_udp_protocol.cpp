@@ -17,7 +17,7 @@ TEST(UdpProtocol, EncodePolarProducesExpectedByteLayout)
   const auto buffer = UdpProtocol::encodePolar(
     0.1f, 0.2f, 0.3f, 0.4f, 0.5f,
     0.01f, 0.02f, 0.03f, 0.04f, 0.05f,
-    /*gripper_closed=*/ true, /*orient_vertical=*/ false,
+    /*gripper_closed=*/ true, ControlFlags{},
     /*seq=*/ 42, /*timestamp_us=*/ 123456789ULL);
 
   ASSERT_EQ(buffer.size(), sizeof(PolarPacket));
@@ -49,7 +49,7 @@ TEST(UdpProtocol, EncodePolarGripperOpenIsZero)
 {
   const auto buffer = UdpProtocol::encodePolar(
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    /*gripper_closed=*/ false, /*orient_vertical=*/ false, 0, 0);
+    /*gripper_closed=*/ false, ControlFlags{}, 0, 0);
   PolarPacket packet;
   std::memcpy(&packet, buffer.data(), sizeof(packet));
   EXPECT_EQ(packet.payload.gripper, 0);
@@ -59,7 +59,7 @@ TEST(UdpProtocol, EncodePolarOrientVerticalSetsBit1)
 {
   const auto buffer = UdpProtocol::encodePolar(
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    /*gripper_closed=*/ false, /*orient_vertical=*/ true, 0, 0);
+    /*gripper_closed=*/ false, ControlFlags{true, true, false}, 0, 0);
   PolarPacket packet;
   std::memcpy(&packet, buffer.data(), sizeof(packet));
   EXPECT_EQ(packet.payload.control_flags, kControlFlagEnable | kControlFlagOrientVertical);
@@ -69,10 +69,45 @@ TEST(UdpProtocol, EncodePolarOrientVerticalFalseLeavesBit1Clear)
 {
   const auto buffer = UdpProtocol::encodePolar(
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    /*gripper_closed=*/ false, /*orient_vertical=*/ false, 0, 0);
+    /*gripper_closed=*/ false, ControlFlags{}, 0, 0);
   PolarPacket packet;
   std::memcpy(&packet, buffer.data(), sizeof(packet));
   EXPECT_EQ(packet.payload.control_flags, kControlFlagEnable);
+}
+
+TEST(UdpProtocol, EncodePolarInitRequestSetsBit2)
+{
+  // 初期位置要求 (bit2)。MCU はこれが立っている間 r/θ/z を無視して自前の初期角へ行く
+  const auto buffer = UdpProtocol::encodePolar(
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /*gripper_closed=*/ false, ControlFlags{true, false, true}, 0, 0);
+  PolarPacket packet;
+  std::memcpy(&packet, buffer.data(), sizeof(packet));
+  EXPECT_EQ(packet.payload.control_flags, kControlFlagEnable | kControlFlagInitRequest);
+  EXPECT_EQ(kControlFlagInitRequest, 0x04);
+}
+
+TEST(UdpProtocol, EncodePolarEnableFalseClearsBit0)
+{
+  // 動作許可 0 (起動直後・同期前)。他のビットはそのまま載る
+  const auto buffer = UdpProtocol::encodePolar(
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /*gripper_closed=*/ false, ControlFlags{false, false, false}, 0, 0);
+  PolarPacket packet;
+  std::memcpy(&packet, buffer.data(), sizeof(packet));
+  EXPECT_EQ(packet.payload.control_flags, 0);
+  EXPECT_EQ(
+    (ControlFlags{false, true, true}).pack(),
+    kControlFlagOrientVertical | kControlFlagInitRequest);
+}
+
+TEST(UdpProtocol, StatusAtInitPoseIsBit5)
+{
+  // フィードバック側の「初期位置到達」ビット。既存ビットと重ならない
+  EXPECT_EQ(kStatusAtInitPose, 1 << 5);
+  EXPECT_EQ(
+    kStatusAtInitPose & (kStatusTrackingError | kStatusDriverFault |
+    kStatusWatchdog | kStatusUninitialized | kStatusCommandRejected), 0);
 }
 
 TEST(UdpProtocol, EncodeJointProducesExpectedByteLayout)
@@ -80,7 +115,7 @@ TEST(UdpProtocol, EncodeJointProducesExpectedByteLayout)
   const std::array<float, kJointCount> q{0.1f, 0.2f, 0.3f, 0.4f, 0.5f};
   const std::array<float, kJointCount> qdot{0.01f, 0.02f, 0.03f, 0.04f, 0.05f};
   const auto buffer = UdpProtocol::encodeJoint(
-    q, qdot, /*gripper_closed=*/ true, /*orient_vertical=*/ false,
+    q, qdot, /*gripper_closed=*/ true, ControlFlags{},
     /*seq=*/ 42, /*timestamp_us=*/ 123456789ULL);
 
   ASSERT_EQ(buffer.size(), sizeof(JointPacket));
@@ -109,10 +144,10 @@ TEST(UdpProtocol, EncodeJointHasSameSizeAndFlagSemanticsAsPolar)
   // であることをバイト列レベルで確認する (MCU側が共通処理にできる根拠)
   const std::array<float, kJointCount> zeros{};
   const auto joint_buf = UdpProtocol::encodeJoint(
-    zeros, zeros, /*gripper_closed=*/ true, /*orient_vertical=*/ true, 0, 0);
+    zeros, zeros, /*gripper_closed=*/ true, ControlFlags{true, true, false}, 0, 0);
   const auto polar_buf = UdpProtocol::encodePolar(
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    /*gripper_closed=*/ true, /*orient_vertical=*/ true, 0, 0);
+    /*gripper_closed=*/ true, ControlFlags{true, true, false}, 0, 0);
 
   ASSERT_EQ(joint_buf.size(), polar_buf.size());
   EXPECT_EQ(joint_buf[56], polar_buf[56]);  // gripper

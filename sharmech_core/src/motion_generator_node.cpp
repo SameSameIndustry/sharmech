@@ -67,6 +67,12 @@ MotionGeneratorNode::MotionGeneratorNode(const rclcpp::NodeOptions & options)
   declare_parameter("workspace_z_min", 0.00);
   declare_parameter("workspace_z_max", 0.30);
   declare_parameter("twist_timeout", 0.4);
+  // ジョグの並進速度上限 [m/s]。**操縦層が送ってくる cmd_twist の大きさを
+  // ここで頭打ちにする。** 従来はクランプが無く、送られた値がそのまま目標速度に
+  // なっていた (VRクライアントが自前で上限を持って肩代わりしていた)。
+  // 既定 1.0 はWebXRクライアントの通常時の上限と同じで、現状の挙動を変えない。
+  // MANUAL_CONTROL 中にVRが送る 10 m/s はここで 1.0 に落ちる
+  declare_parameter("jog_v_max", 1.0);
   declare_parameter("goal_mode", std::string("goal_priority"));
 
   // 本番設置での原点ズレ補正 (sharmech/docs/field_dimensions.md 参照)。既定0.0。
@@ -86,6 +92,9 @@ MotionGeneratorNode::MotionGeneratorNode(const rclcpp::NodeOptions & options)
 
   param_callback_handle_ = add_on_set_parameters_callback(
     std::bind(&MotionGeneratorNode::onSetParameters, this, std::placeholders::_1));
+
+  // 起動直後は有効なジョグ上限 = 起動時パラメータ
+  active_jog_v_max_ = jog_v_max_;
 
   // 起動直後は有効な作業領域 = config.yaml のデフォルト
   active_workspace_x_min_ = workspace_x_min_;
@@ -113,12 +122,23 @@ MotionGeneratorNode::MotionGeneratorNode(const rclcpp::NodeOptions & options)
   cancel_sub_ = create_subscription<std_msgs::msg::Empty>(
     "/catchrobo/arm/cancel", 10,
     std::bind(&MotionGeneratorNode::onCancel, this, std::placeholders::_1));
+  init_request_sub_ = create_subscription<std_msgs::msg::Empty>(
+    "/catchrobo/arm/init_request", 10,
+    std::bind(&MotionGeneratorNode::onInitRequest, this, std::placeholders::_1));
   current_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
     "/catchrobo/arm/current_pose", 10,
     std::bind(&MotionGeneratorNode::onCurrentPose, this, std::placeholders::_1));
+  // hardware_bridge_node 側が latched なので、こちらも transient_local で受ける
+  // (後から起動しても最後の MCU 状態が届く)
+  mcu_status_sub_ = create_subscription<sharmech_msgs::msg::McuStatus>(
+    "/catchrobo/arm/mcu_status", rclcpp::QoS(1).transient_local(),
+    std::bind(&MotionGeneratorNode::onMcuStatus, this, std::placeholders::_1));
   workspace_clamp_sub_ = create_subscription<sharmech_msgs::msg::WorkspaceClamp>(
     "/catchrobo/game/workspace_clamp", 10,
     std::bind(&MotionGeneratorNode::onWorkspaceClamp, this, std::placeholders::_1));
+  jog_limit_sub_ = create_subscription<sharmech_msgs::msg::JogLimit>(
+    "/catchrobo/game/jog_limit", 10,
+    std::bind(&MotionGeneratorNode::onJogLimit, this, std::placeholders::_1));
 
   cartesian_pub_ = create_publisher<sharmech_msgs::msg::CartesianCommand>(
     "/catchrobo/command/cartesian", 10);
@@ -162,6 +182,16 @@ void MotionGeneratorNode::onTargetPose(
     rejectGoal("goal outside workspace");
     return;
   }
+  // 同期前は target_ が原点の仮値なので、ここから軌道を引くと始点が実姿勢と
+  // 無関係になる。動作許可も 0 で送っている間なので、受理しても動かない
+  if (!synced_with_feedback_) {
+    rejectGoal("not synced with MCU feedback yet");
+    return;
+  }
+  if (mode_ == Mode::kInit) {
+    rejectGoal("init request in progress");
+    return;
+  }
   if (mode_ == Mode::kJog) {
     if (goal_mode_ != "goal_priority") {
       rejectGoal("jog active");
@@ -193,12 +223,36 @@ void MotionGeneratorNode::onTargetPose(
 
 void MotionGeneratorNode::onCmdTwist(const geometry_msgs::msg::Twist::SharedPtr msg)
 {
+  // 自動シーケンスの動作中は操縦層の入力を捨てる。
+  // **ゼロも含めて記録しない** —— ここで記録すると mode_ が kJog へ落ちてしまう。
+  // 既に動いている分は onControlTimer 側で commanded_twist_ が空のまま
+  // レート制限に従って減速する
+  if (jog_blocked_) {return;}
+  // 同期前・初期位置要求中も同じ理由で捨てる (記録すると mode_ が kJog へ落ちる)
+  if (!synced_with_feedback_ || mode_ == Mode::kInit) {return;}
+
   CartesianState twist;
   twist.x = msg->linear.x;
   twist.y = msg->linear.y;
   twist.z = msg->linear.z;
   twist.pitch = msg->angular.y;
   twist.yaw = msg->angular.z;
+
+  // 並進の「大きさ」を上限で頭打ちにする (向きは変えない)。
+  // **軸ごとに切ると斜め入力で合成速度が最大 √3 倍になる**ため、比を保って縮める。
+  // 操縦層が上限を守ってくれることを前提にしない ——「誰が publish しても
+  // この上限を超えられない」ことがこのノードの責務 (作業領域クランプと同じ)
+  const double speed = std::sqrt(twist.x * twist.x + twist.y * twist.y + twist.z * twist.z);
+  if (speed > active_jog_v_max_) {
+    const double ratio = active_jog_v_max_ / speed;
+    twist.x *= ratio;
+    twist.y *= ratio;
+    twist.z *= ratio;
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "cmd_twist %.2f m/s exceeds jog limit %.2f m/s; scaled down",
+      speed, active_jog_v_max_);
+  }
 
   // ゼロでない Twist のみがゴールに干渉する。
   // joy_teleop_node はニュートラルでもゼロ Twist を送り続けるため、
@@ -243,30 +297,82 @@ void MotionGeneratorNode::onCancel(const std_msgs::msg::Empty::SharedPtr)
     last_result_ = sharmech_msgs::msg::MotionStatus::RESULT_ABORTED;
     status_message_ = "cancelled";
     RCLCPP_INFO(get_logger(), "Goal cancelled");
+  } else if (mode_ == Mode::kInit) {
+    // 初期位置要求を取り下げる。target_ は INIT 中ずっと実姿勢を追いかけて
+    // いるので、bit2 が落ちた MCU はその場 (≒ 現在位置) に留まる。
+    // MCU が到達を返さない (未対応ファーム等) ときの唯一の出口でもある
+    mode_ = Mode::kIdle;
+    last_result_ = sharmech_msgs::msg::MotionStatus::RESULT_ABORTED;
+    status_message_ = "init request cancelled";
+    RCLCPP_WARN(get_logger(), "Init request cancelled");
   }
+}
+
+// 初期位置要求 (/catchrobo/game/reset の実体)。**初期位置の座標はこのノードも
+// game_state_manager_node も知らない。** control_flags bit2 を立てて MCU に
+// 「自前の初期関節角へ行け」と頼み、到達 (McuStatus FLAG_AT_INIT_POSE) を待つだけ。
+// 実機無しでも sim / mock_mcu が同じ契約でそれぞれの初期位置へ動く
+void MotionGeneratorNode::onInitRequest(const std_msgs::msg::Empty::SharedPtr)
+{
+  if (mode_ == Mode::kGoal) {
+    RCLCPP_INFO(get_logger(), "Goal aborted: preempted by init request");
+  } else if (mode_ == Mode::kJog) {
+    RCLCPP_INFO(get_logger(), "Jog preempted by init request");
+  }
+  commanded_twist_ = CartesianState{};
+  current_twist_ = CartesianState{};
+  mode_ = Mode::kInit;
+  last_result_ = sharmech_msgs::msg::MotionStatus::RESULT_NONE;
+  status_message_ = "moving to MCU init pose";
+  RCLCPP_INFO(get_logger(), "Init request accepted (control_flags bit2)");
 }
 
 void MotionGeneratorNode::onCurrentPose(
   const geometry_msgs::msg::PoseStamped::SharedPtr msg)
 {
+  // 記録のみ。同期の判定は制御タイマー側で行う (mcu_status と揃えて評価するため)
   latest_feedback_ = *msg;
+}
 
-  // 起動後、まだ何も動かしていなければ目標姿勢を実姿勢に同期する。
-  // これが無いと最初の指令で「初期値 (原点付近)」へ実機が飛ぶ
-  if (!synced_with_feedback_ && mode_ == Mode::kIdle) {
-    const auto pitch_yaw = OrientationUtils::toPitchYaw(msg->pose.orientation);
-    CartesianState fb;
-    fb.x = msg->pose.position.x;
-    fb.y = msg->pose.position.y;
-    fb.z = msg->pose.position.z;
-    fb.pitch = pitch_yaw.pitch;
-    fb.yaw = pitch_yaw.yaw;
-    target_ = clampToWorkspace(fb);
-    synced_with_feedback_ = true;
-    RCLCPP_INFO(
-      get_logger(),
-      "Target synced to MCU feedback: (%.3f, %.3f, %.3f)", fb.x, fb.y, fb.z);
+void MotionGeneratorNode::onMcuStatus(const sharmech_msgs::msg::McuStatus::SharedPtr msg)
+{
+  latest_mcu_flags_ = msg->status_flags;
+
+  // MCU が未初期化 (原点未確定) を報告したら同期を取り消す。起動直後のほか、
+  // MCU だけが再起動した場合もここを通る。その間の目標姿勢は信用できないので
+  // 実行中のゴール/ジョグは中断し、動作許可も 0 に戻る (制御タイマー)
+  if ((msg->status_flags & sharmech_msgs::msg::McuStatus::FLAG_UNINITIALIZED) != 0) {
+    if (synced_with_feedback_) {
+      RCLCPP_WARN(get_logger(), "MCU reports uninitialized; target sync revoked");
+    }
+    synced_with_feedback_ = false;
+    if (mode_ == Mode::kGoal || mode_ == Mode::kJog) {
+      mode_ = Mode::kIdle;
+      commanded_twist_ = CartesianState{};
+      current_twist_ = CartesianState{};
+      last_result_ = sharmech_msgs::msg::MotionStatus::RESULT_ABORTED;
+      status_message_ = "MCU uninitialized";
+    }
   }
+}
+
+std::optional<CartesianState> MotionGeneratorNode::feedbackState() const
+{
+  if (!latest_feedback_) {return std::nullopt;}
+  const auto pitch_yaw = OrientationUtils::toPitchYaw(latest_feedback_->pose.orientation);
+  CartesianState fb;
+  fb.x = latest_feedback_->pose.position.x;
+  fb.y = latest_feedback_->pose.position.y;
+  fb.z = latest_feedback_->pose.position.z;
+  fb.pitch = pitch_yaw.pitch;
+  fb.yaw = pitch_yaw.yaw;
+  return fb;
+}
+
+bool MotionGeneratorNode::mcuUninitialized() const
+{
+  return latest_mcu_flags_ &&
+         (*latest_mcu_flags_ & sharmech_msgs::msg::McuStatus::FLAG_UNINITIALIZED) != 0;
 }
 
 // パラメータ (overrides があればそちらを優先) を実際のメンバへ反映する。
@@ -320,10 +426,12 @@ rcl_interfaces::msg::SetParametersResult MotionGeneratorNode::applyParameters(
   const double w_max = dbl("w_max");
   const double alpha_max = dbl("alpha_max");
   const double twist_timeout = dbl("twist_timeout");
+  const double jog_v_max = dbl("jog_v_max");
   if (v_max <= 0.0 || a_max <= 0.0 || w_max <= 0.0 || alpha_max <= 0.0 ||
-    twist_timeout <= 0.0)
+    twist_timeout <= 0.0 || jog_v_max <= 0.0)
   {
-    result.reason = "v_max / a_max / w_max / alpha_max / twist_timeout must be positive";
+    result.reason =
+      "v_max / a_max / w_max / alpha_max / twist_timeout / jog_v_max must be positive";
     return result;
   }
 
@@ -333,6 +441,12 @@ rcl_interfaces::msg::SetParametersResult MotionGeneratorNode::applyParameters(
   w_max_ = w_max;
   alpha_max_ = alpha_max;
   twist_timeout_ = twist_timeout;
+  // 上限を下げたら、現在有効な上限もそれを超えないように追従させる
+  // (作業領域クランプと同じ考え方。上書き中の値が起動時の上限を超えないこと)
+  const bool jog_limit_was_default = (active_jog_v_max_ == jog_v_max_);
+  jog_v_max_ = jog_v_max;
+  active_jog_v_max_ =
+    jog_limit_was_default ? jog_v_max_ : std::min(active_jog_v_max_, jog_v_max_);
   workspace_x_min_ = x_min;
   workspace_x_max_ = x_max;
   workspace_y_min_ = y_min;
@@ -372,6 +486,36 @@ rcl_interfaces::msg::SetParametersResult MotionGeneratorNode::onSetParameters(
   return result;
 }
 
+// ジョグ速度上限の動的上書き (game_state_manager_node)。
+// 微調整中 (ADJUSTING_*) だけ遅くする、といった場面ごとの調整に使う。
+// **起動時パラメータ jog_v_max より緩くはできない** (上書きで安全側の設定を
+// 壊せないようにする。作業領域クランプと同じ方針)
+void MotionGeneratorNode::onJogLimit(const sharmech_msgs::msg::JogLimit::SharedPtr msg)
+{
+  if (msg->reset) {
+    active_jog_v_max_ = jog_v_max_;
+    jog_blocked_ = false;
+    RCLCPP_INFO(get_logger(), "Jog limit reset to %.3f m/s", active_jog_v_max_);
+    return;
+  }
+  if (msg->block) {
+    // 現在のジョグも止める (指令を空にしてレート制限で減速させる)
+    jog_blocked_ = true;
+    commanded_twist_ = CartesianState{};
+    RCLCPP_INFO(get_logger(), "Jog blocked (automated sequence in progress)");
+    return;
+  }
+  jog_blocked_ = false;
+  if (!(msg->v_max > 0.0)) {
+    // 0 や NaN を通すと「ジョグが一切効かない」状態を無言で作ってしまう
+    RCLCPP_WARN(
+      get_logger(), "Ignoring jog limit with non-positive v_max (%.3f)", msg->v_max);
+    return;
+  }
+  active_jog_v_max_ = std::min(msg->v_max, jog_v_max_);
+  RCLCPP_INFO(get_logger(), "Jog limit overridden to %.3f m/s", active_jog_v_max_);
+}
+
 void MotionGeneratorNode::onWorkspaceClamp(
   const sharmech_msgs::msg::WorkspaceClamp::SharedPtr msg)
 {
@@ -406,6 +550,21 @@ void MotionGeneratorNode::onControlTimer()
 {
   const double dt = 1.0 / control_rate_;
   const auto current_time = now();
+
+  // 0. 起動時の同期: まだ何も動かしていなければ目標姿勢を実姿勢に合わせる。
+  // これが済むまで動作許可 (bit0) は 0 で送るので MCU は動かない。
+  // **MCU が未初期化 (bit3) を報告している間は同期しない** —— 原点出し中の
+  // 仮の値に同期すると、確定後の実姿勢とずれた目標から動き出すことになる
+  if (!synced_with_feedback_ && mode_ == Mode::kIdle && !mcuUninitialized()) {
+    if (const auto fb = feedbackState()) {
+      target_ = clampToWorkspace(*fb);
+      synced_with_feedback_ = true;
+      RCLCPP_INFO(
+        get_logger(),
+        "Target synced to MCU feedback: (%.3f, %.3f, %.3f); motion enabled",
+        fb->x, fb->y, fb->z);
+    }
+  }
 
   // 1. ウォッチドッグ: Twist が途絶したら速度指令を 0 とみなす
   if (last_twist_time_ &&
@@ -462,6 +621,31 @@ void MotionGeneratorNode::onControlTimer()
         }
         break;
       }
+    case Mode::kInit: {
+        // 動かしているのは MCU。こちらは実姿勢を追いかけて、bit2 が落ちた瞬間に
+        // 指令と実姿勢が一致している状態を作る (落とした途端に飛ばないため)。
+        // 作業領域クランプは掛けない —— MCU の初期位置が ROS2 側の作業領域の
+        // 外にあっても、そこに居る事実は変えられない
+        if (const auto fb = feedbackState()) {target_ = *fb;}
+        target_vel_ = CartesianState{};
+        const bool at_init = latest_mcu_flags_ &&
+          (*latest_mcu_flags_ & sharmech_msgs::msg::McuStatus::FLAG_AT_INIT_POSE) != 0;
+        if (at_init) {
+          mode_ = Mode::kIdle;
+          synced_with_feedback_ = true;
+          last_result_ = sharmech_msgs::msg::MotionStatus::RESULT_SUCCEEDED;
+          status_message_ = "init pose reached";
+          RCLCPP_INFO(
+            get_logger(), "MCU init pose reached: (%.3f, %.3f, %.3f)",
+            target_.x, target_.y, target_.z);
+        } else if (!latest_mcu_flags_) {
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 5000,
+            "Init request pending but no /catchrobo/arm/mcu_status received; "
+            "cannot detect arrival (cancel with /catchrobo/arm/cancel)");
+        }
+        break;
+      }
     case Mode::kIdle:
       target_vel_ = CartesianState{};
       break;
@@ -477,6 +661,11 @@ void MotionGeneratorNode::onControlTimer()
   cmd.twist.linear.z = target_vel_.z;
   cmd.twist.angular.y = target_vel_.pitch;
   cmd.twist.angular.z = target_vel_.yaw;
+  // 動作許可: 同期済みか、初期位置要求中 (MCU が自力で動く必要がある) のみ true。
+  // 初期位置要求: INIT モードの間だけ true (レベル。毎周期送る)。
+  // 位置と同じメッセージに載せる理由は CartesianCommand.msg のコメント参照
+  cmd.enable = synced_with_feedback_ || mode_ == Mode::kInit;
+  cmd.init_request = (mode_ == Mode::kInit);
   cartesian_pub_->publish(cmd);
 
   std_msgs::msg::Bool gripper_msg;

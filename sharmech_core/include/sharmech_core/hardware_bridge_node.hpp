@@ -12,6 +12,8 @@
 #include <sharmech_msgs/msg/cartesian_command.hpp>
 #include <sharmech_msgs/msg/mcu_status.hpp>
 
+#include "sharmech_core/utility/udp_protocol.hpp"
+
 #include <netinet/in.h>
 
 namespace sharmech_core
@@ -44,6 +46,11 @@ private:
   void onJointCommand(const sensor_msgs::msg::JointState::SharedPtr msg);
   void onGripperCommand(const std_msgs::msg::Bool::SharedPtr msg);
   void onOrientVerticalCommand(const std_msgs::msg::Bool::SharedPtr msg);
+  // joint モード (パターンB) では位置は /catchrobo/command/joint から来るが、
+  // 動作許可・初期位置要求は Cartesian ストリームにしか無いのでそこからラッチする
+  void onCartesianFlagsOnly(const sharmech_msgs::msg::CartesianCommand::SharedPtr msg);
+  // ラッチ済みの各フラグから control_flags を組む
+  udp_protocol::ControlFlags controlFlags() const;
 
   // 受信: タイマーでソケットに溜まったデータグラムを読み切る
   void onFeedbackTimer();
@@ -57,6 +64,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr gripper_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr orient_vertical_sub_;
+  rclcpp::Subscription<sharmech_msgs::msg::CartesianCommand>::SharedPtr cartesian_flags_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr current_pose_pub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_states_pub_;
   rclcpp::Publisher<sharmech_msgs::msg::McuStatus>::SharedPtr mcu_status_pub_;
@@ -76,10 +84,19 @@ private:
   sockaddr_in mcu_addr_{};
   bool gripper_state_{false};              // ラッチしたグリッパ状態
   bool orient_vertical_state_{false};         // ラッチした「縦にする」指示
+  // 動作許可 (control_flags bit0) と初期位置要求 (bit2)。Cartesian ストリームの
+  // 同名フィールドを毎パケット写す。**既定 false** —— 上流から何も届いていない間に
+  // 送る理由は無く、届いた瞬間から値は常にストリーム側が決める
+  bool enable_state_{false};
+  bool init_request_state_{false};
   uint32_t send_seq_{0};
   // 直前に送った θ [rad]。次の θ をこの値の近傍へアンラップして連続化する
-  // (±π のまたぎでターンテーブルを逆走させないため)
+  // (±π のまたぎでターンテーブルを逆走させないため)。
+  // **ROS2 が駆動していない間 (未送信・動作許可 0・初期位置要求中) は MCU の実 θ で
+  // 上書きする。** MCU が自力で θ=+3.0 に居るのにこちらの基準が 0 のままだと、
+  // 同期後の最初の指令が -3.28 側の分岐に落ちてターンテーブルが1回転してしまう
   double last_sent_theta_{0.0};
+  bool has_sent_command_{false};
   std::optional<uint32_t> last_recv_seq_;           // 順序逆転の検出用
   std::optional<rclcpp::Time> last_feedback_time_;  // 途絶の検出用
   bool warned_joint_names_{false};

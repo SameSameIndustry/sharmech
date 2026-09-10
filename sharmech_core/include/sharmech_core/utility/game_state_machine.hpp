@@ -19,7 +19,8 @@ namespace sharmech_core
 //
 // 各状態での動作:
 //   kInit           初期位置へ戻している最中。/catchrobo/game/reset を受けると
-//                   **どの状態からでも**ここへ入り、init_pose へ直線1本で移動する
+//                   **どの状態からでも**ここへ入り、motion_generator_node へ初期位置要求を
+//                   出す (座標はこちらでは持たない。MCU が自前の初期関節角へ動く)
 //                   (グリッパは開・縦は解除・作業領域クランプはデフォルトへ)。
 //                   到達したら kWaitingForPick へ戻る (requestInit() のコメント参照)
 //   kWaitingForPick 次に運ぶワークの選択待ち。VR からの pick_request を受理する
@@ -155,9 +156,9 @@ public:
     // false なら止まらずそのまま掴む/離す (完全自動)。
     // 実機で位置合わせの精度が出るまでは true を推奨
     bool require_manual_confirm{true};
-    // /catchrobo/game/reset で戻る初期位置 (kInit のゴール)。
-    // 既定は原点。実際の値は game_state_manager_node の init_pose パラメータで与える
-    CartesianState init_pose{};
+    // 初期位置 (kInit の行き先) は **持たない**。/catchrobo/game/reset の実体は
+    // motion_generator_node への初期位置要求で、座標は MCU 側が定義する
+    // (control_flags bit2。docs/game_state_manager_node.md「状態のリセット」)
   };
 
   explicit GameStateMachine(Config config)
@@ -199,9 +200,11 @@ public:
   // (kManualControl・kComplete を含む)。試合中に手順が崩れたときの立て直しや、
   // 練習のやり直しのために、VR / PS4 のどちらからでも押せる1つの出口として置く。
   //
-  // 「リセット」は**アームを初期位置へ戻すところまで**を指す。ゴールを1本出し、
-  // 到達したら kWaitingForPick へ戻る (onGoalReached)。却下・中断されたときは
-  // 他の自動シーケンスと同じ扱いで kWaitingForPick へ落ちる
+  // 「リセット」は**アームを初期位置へ戻すところまで**を指す。ただし初期位置の
+  // 座標はこのクラスも ROS2 側も持たず、motion_generator_node への「初期位置要求」
+  // (→ UDP control_flags bit2) を1回出すだけ。MCU が自前の初期関節角へ動き、
+  // 到達 (last_result = SUCCEEDED) で kWaitingForPick へ戻る (onGoalReached)。
+  // 却下・中断されたときは他の自動シーケンスと同じ扱いで kWaitingForPick へ落ちる
   // (onGoalRejectedOrAborted。理由はノード側が警告ログに出す)。
   //
   // **配置の進み具合 (order_index_ / authorized_count_) は消さない。**
@@ -212,7 +215,8 @@ public:
   void requestInit()
   {
     state_ = GameState::kInit;
-    pending_goal_ = config_.init_pose;
+    pending_goal_.reset();             // ゴールは出さない (座標を持たない)
+    pending_init_request_ = true;
     pending_gripper_ = false;          // 掴んだままにしない
     pending_orient_vertical_ = false;  // 縦にしていたら横へ戻す
     WorkspaceClampCommand reset_clamp;
@@ -392,6 +396,7 @@ public:
   {
     state_ = state;
     pending_goal_.reset();
+    pending_init_request_ = false;
     pending_gripper_.reset();
     pending_orient_vertical_.reset();
     pending_clamp_.reset();
@@ -425,6 +430,7 @@ public:
       state_ = GameState::kManualControl;
     }
     pending_goal_.reset();
+    pending_init_request_ = false;
     pending_gripper_.reset();
     pending_orient_vertical_.reset();
     WorkspaceClampCommand reset_clamp;
@@ -436,6 +442,15 @@ public:
   }
 
   // --- 保留中の指令。状態遷移直後にのみセットされる (edge-triggered) ---
+
+  // 初期位置要求 (kInit 進入時に1回だけ真)。消費すると偽に戻る
+  bool hasPendingInitRequest() const {return pending_init_request_;}
+  bool consumePendingInitRequest()
+  {
+    const bool v = pending_init_request_;
+    pending_init_request_ = false;
+    return v;
+  }
 
   bool hasPendingGoal() const {return pending_goal_.has_value();}
   CartesianState consumePendingGoal()
@@ -578,6 +593,7 @@ private:
   std::optional<CartesianState> current_pose_;
 
   std::optional<CartesianState> pending_goal_;
+  bool pending_init_request_{false};
   std::optional<bool> pending_gripper_;
   std::optional<bool> pending_orient_vertical_;
   std::optional<WorkspaceClampCommand> pending_clamp_;

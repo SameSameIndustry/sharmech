@@ -37,6 +37,15 @@ motion_generator_node:
     # 作業領域 workspace_x/y/z_min/max と原点ズレ補正 field_origin_offset_x/y/z_m は
     # robot_geometry.yaml (workspace / field_origin_offset セクション) から生成される
     twist_timeout: 0.4       # ジョグのウォッチドッグ [s]
+    # ジョグ (/catchrobo/arm/cmd_twist) の並進速度上限 [m/s]。
+    # **操縦層が送ってくる値をここで頭打ちにする。** v_max はゴールの軌道生成専用で、
+    # ジョグには効かない (2026-09-10 まではジョグ側にクランプが無く、VRクライアントが
+    # 自前の上限を持って肩代わりしていた)。
+    # 既定 1.0 は WebXR の通常時の上限と同値で、現状の挙動を変えないための値。
+    # MANUAL_CONTROL 中に WebXR が送る 10 m/s はここで 1.0 に落ちる。
+    # **微調整中 (ADJUSTING_*) はさらに game_state_manager_node が
+    # /catchrobo/game/jog_limit で一時的に絞る** (下記 adjusting_jog_v_max)
+    jog_v_max: 1.0
     # ゴール(target_pose)とジョグ(cmd_twist)の調停。
     #   goal_priority  … ゴール実行中の cmd_twist は無視し、ジョグ中に来たゴールはジョグを止めて受理する
     #   twist_priority … ゼロでない cmd_twist がゴールを abort する (旧既定)
@@ -53,8 +62,9 @@ joy_teleop_node:
     deadzone: 0.15           # スティックのデッドゾーン
     use_deadman: true        # デッドマンスイッチ (押している間だけジョグが効く)
     # home_pose: [0.0, 0.15, 0.15, 0.0, 0.0]  # [x, y, z, pitch, yaw]。機構確定後に設定。
-    #                                          # 有効にするなら robot_geometry.yaml の
-    #                                          # init_pose と同じ値を使うこと (生成対象に加える)
+    #                                          # 注: 初期位置の正本は MCU 側 (/catchrobo/game/reset
+    #                                          # → control_flags bit2)。PS4 のホームボタンも将来は
+    #                                          # reset へ寄せる想定で、Cartesian の home_pose は暫定
     # 軸・ボタン番号はドライバ依存。実機で `ros2 topic echo /joy` を見て合わせること
     vx_axis: 1               # 左スティック縦 → 前後
     vx_scale: 0.10
@@ -114,8 +124,9 @@ game_state_manager_node:
     # ---- シューティングボックスのスロット座標 ----
     # 箱の中心 (box_center_x/y_red|blue)・内寸・スロット格子 (slot_cols_x/rows_y)・
     # 缶の直径・缶の隙間 (slot_gap_x/y_m)・高さの基準面 (box_top_z_m) と各相対高さ・
-    # init_pose・field_origin_offset_x/y/z_m は **すべて robot_geometry.yaml の
-    # shooting_box / cylinder / init_pose / field_origin_offset セクションから生成される。**
+    # field_origin_offset_x/y/z_m は **すべて robot_geometry.yaml の
+    # shooting_box / cylinder / field_origin_offset セクションから生成される。**
+    # (初期位置 init_pose は 2026-09-10 に廃止。MCU 側の初期関節角へ bit2 で戻す)
     # 当日調整の手順は sharmech/docs/parameter_tuning.md。
     # いずれも実行中に ros2 param set で即反映できる (不正値は却下され直前の設定のまま)。
     #
@@ -138,6 +149,14 @@ game_state_manager_node:
     # (斜めに動くと、行き掛けは隣のワークを薙ぎ払い、帰りは缶を引きずるため)。
     # その「水平に動く高さ」と「缶を離す高さ」は robot_geometry.yaml の shooting_box
     # セクションで、基準面 top_z_m からの相対値として与える
+    # 微調整中 (ADJUSTING_PICK / ADJUSTING_PLACE) のジョグ速度上限 [m/s]。
+    # この2状態の間だけ /catchrobo/game/jog_limit で motion_generator_node へ伝え、
+    # 抜けたら reset を送って jog_v_max へ戻す。**操縦層 (VR/PS4) は何も変えなくてよい**
+    # (ゲーム状態を知っているのはROS2側だけ、という役割分担のための経路)。
+    # 掴む/離す直前は缶に一番近く、行き過ぎるとワーク破損 (-1点) に直結するため絞る。
+    # a_max=0.2 なら 0.25秒で上限に達し以降は等速になるので、「倒した時間に比例して
+    # 進む」予測しやすい挙動になる。実機の手感に合わせて ros2 param set で調整すること
+    adjusting_jog_v_max: 0.05
     grasp_dwell_sec: 0.3          # GRASPING状態でグリッパを閉じてから待つ時間 [s]
     # ORIENTING状態(スロット上空で静止したままワークを縦にする)の待機時間 [s]。
     # ピッチ機構が横→縦を回し切るのに要する時間に合わせること。短すぎると

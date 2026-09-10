@@ -46,6 +46,10 @@ HardwareBridgeNode::HardwareBridgeNode(const rclcpp::NodeOptions & options)
     joint_sub_ = create_subscription<sensor_msgs::msg::JointState>(
       "/catchrobo/command/joint", 10,
       std::bind(&HardwareBridgeNode::onJointCommand, this, std::placeholders::_1));
+    // 動作許可・初期位置要求は JointState に無いので Cartesian ストリームから拾う
+    cartesian_flags_sub_ = create_subscription<sharmech_msgs::msg::CartesianCommand>(
+      "/catchrobo/command/cartesian", 10,
+      std::bind(&HardwareBridgeNode::onCartesianFlagsOnly, this, std::placeholders::_1));
   } else {
     RCLCPP_FATAL(get_logger(), "Unknown command_mode: %s", command_mode_.c_str());
     throw std::invalid_argument("unknown command_mode");
@@ -127,6 +131,10 @@ void HardwareBridgeNode::onCartesianCommand(
 {
   if (sockfd_ < 0) {return;}
 
+  // 動作許可・初期位置要求は位置と同じメッセージで届く (取りこぼしても次で回復)
+  enable_state_ = msg->enable;
+  init_request_state_ = msg->init_request;
+
   // 手首は pitch/yaw の2自由度のみ。roll 成分は捨てる
   const auto pitch_yaw = OrientationUtils::toPitchYaw(msg->pose.orientation);
 
@@ -152,7 +160,8 @@ void HardwareBridgeNode::onCartesianCommand(
     static_cast<float>(msg->twist.linear.z),
     static_cast<float>(msg->twist.angular.y),   // pitch_rate
     static_cast<float>(msg->twist.angular.z),   // yaw_rate
-    gripper_state_, orient_vertical_state_, send_seq_++, timestamp_us);
+    gripper_state_, controlFlags(), send_seq_++, timestamp_us);
+  has_sent_command_ = true;
 
   const auto sent = ::sendto(
     sockfd_, packet.data(), packet.size(), 0,
@@ -206,7 +215,8 @@ void HardwareBridgeNode::onJointCommand(const sensor_msgs::msg::JointState::Shar
   const uint64_t timestamp_us =
     static_cast<uint64_t>(now().nanoseconds() / 1000);
   const auto packet = UdpProtocol::encodeJoint(
-    q, qdot, gripper_state_, orient_vertical_state_, send_seq_++, timestamp_us);
+    q, qdot, gripper_state_, controlFlags(), send_seq_++, timestamp_us);
+  has_sent_command_ = true;
 
   const auto sent = ::sendto(
     sockfd_, packet.data(), packet.size(), 0,
@@ -229,6 +239,23 @@ void HardwareBridgeNode::onOrientVerticalCommand(const std_msgs::msg::Bool::Shar
 {
   // グリッパと同様、別トピックで届くためラッチして次の Cartesian パケットに詰める
   orient_vertical_state_ = msg->data;
+}
+
+void HardwareBridgeNode::onCartesianFlagsOnly(
+  const sharmech_msgs::msg::CartesianCommand::SharedPtr msg)
+{
+  // joint モード用。位置は使わずフラグだけラッチする
+  enable_state_ = msg->enable;
+  init_request_state_ = msg->init_request;
+}
+
+udp_protocol::ControlFlags HardwareBridgeNode::controlFlags() const
+{
+  udp_protocol::ControlFlags flags;
+  flags.enable = enable_state_;
+  flags.orient_vertical = orient_vertical_state_;
+  flags.init_request = init_request_state_;
+  return flags;
 }
 
 void HardwareBridgeNode::onFeedbackTimer()
@@ -261,6 +288,12 @@ void HardwareBridgeNode::onFeedbackTimer()
 
   if (latest) {
     last_feedback_time_ = now();
+
+    // ROS2 がまだ駆動していない間は、θ のアンラップ基準を MCU の実 θ に合わせておく
+    // (ヘッダの last_sent_theta_ のコメント参照)。駆動中は送信値が基準
+    if (!has_sent_command_ || !enable_state_ || init_request_state_) {
+      last_sent_theta_ = latest->theta;
+    }
 
     geometry_msgs::msg::PoseStamped pose_msg;
     pose_msg.header.stamp = *last_feedback_time_;

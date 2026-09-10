@@ -14,6 +14,7 @@ uint16 FLAG_DRIVER_FAULT=2     # ドライバ異常
 uint16 FLAG_WATCHDOG=4         # ウォッチドッグ作動中
 uint16 FLAG_UNINITIALIZED=8    # 未初期化・原点未確定
 uint16 FLAG_COMMAND_REJECTED=16 # 直近の指令を破棄した (可動域外・seq逆転等)
+uint16 FLAG_AT_INIT_POSE=32     # 初期位置要求 (control_flags bit2) に応答して初期位置へ到達・静止中
 
 std_msgs/Header header
 
