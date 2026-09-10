@@ -325,6 +325,57 @@ TEST(PolarUtils, KeepsWindingAfterMultipleTurns)
   }
 }
 
+// ---- ターンテーブル軸がベース原点からずれている場合 (origin_x/y) ----
+
+TEST(PolarUtils, PolarIsMeasuredFromTurntableAxisNotBaseOrigin)
+{
+  // 軸が (0.10, -0.05) にある。点 (0.40, 0.35) は軸から見て (0.30, 0.40) → r=0.5
+  const auto p = PolarUtils::toPolar(0.40, 0.35, 0.0, 0.0, 0.0, 0.10, -0.05);
+  EXPECT_NEAR(p.r, 0.5, 1e-12);
+  EXPECT_NEAR(p.theta, std::atan2(0.40, 0.30), 1e-12);
+
+  // オフセット無しなら別の値になる (回帰: オフセットが無視されていないこと)
+  const auto q = PolarUtils::toPolar(0.40, 0.35, 0.0, 0.0, 0.0);
+  EXPECT_NEAR(q.r, std::hypot(0.40, 0.35), 1e-12);
+  EXPECT_GT(std::abs(p.r - q.r), 1e-3);
+}
+
+TEST(PolarUtils, VelocityIsAlsoTakenAboutTurntableAxis)
+{
+  // 軸 (1.0, 0.0)。点 (2.0, 0.0) が +y に 1 m/s → 軸から見て r=1 の純接線速度
+  const auto p = PolarUtils::toPolar(2.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0);
+  EXPECT_NEAR(p.r, 1.0, 1e-12);
+  EXPECT_NEAR(p.r_dot, 0.0, 1e-12);
+  EXPECT_NEAR(p.theta_dot, 1.0, 1e-12);
+}
+
+TEST(PolarUtils, RoundTripWithAxisOffsetRestoresBaseCoordinates)
+{
+  const double ax = -0.0123, ay = 0.0456;
+  const double xs[] = {0.3, -1.5, 0.0, -0.0123};
+  const double ys[] = {0.2, 0.05, -0.6, 0.0456 + 0.2};
+  for (int i = 0; i < 4; ++i) {
+    const auto p = PolarUtils::toPolar(xs[i], ys[i], 0.0, 0.0, 0.0, ax, ay);
+    EXPECT_NEAR(PolarUtils::toX(p.r, p.theta, ax), xs[i], 1e-12) << "case " << i;
+    EXPECT_NEAR(PolarUtils::toY(p.r, p.theta, ay), ys[i], 1e-12) << "case " << i;
+  }
+}
+
+TEST(PolarUtils, SingularityIsAtTurntableAxisNotBaseOrigin)
+{
+  // ベース原点 (0,0) は軸 (0.1, 0) から r=0.1 なので特異点ではない
+  const auto at_base = PolarUtils::toPolar(0.0, 0.0, 1.0, 0.0, 0.0, 0.1, 0.0);
+  EXPECT_NEAR(at_base.r, 0.1, 1e-12);
+  // 軸から見て真後ろ = ±π。基準 0 からは両方等距離なのでどちらの分岐でもよい
+  EXPECT_NEAR(std::abs(at_base.theta), M_PI, 1e-12);
+  // 軸の真上が特異点: θ は直前値を保持し速度は 0
+  const auto at_axis = PolarUtils::toPolar(0.1, 0.0, 1.0, 0.0, 0.7, 0.1, 0.0);
+  EXPECT_NEAR(at_axis.r, 0.0, 1e-12);
+  EXPECT_NEAR(at_axis.theta, 0.7, 1e-12);
+  EXPECT_NEAR(at_axis.r_dot, 0.0, 1e-12);
+  EXPECT_NEAR(at_axis.theta_dot, 0.0, 1e-12);
+}
+
 TEST(PolarUtils, OriginSingularityHoldsThetaAndZeroesRates)
 {
   // r ≒ 0 では θ が定義できない。NaN を出さず直前の θ を保持し速度を 0 にする

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <iterator>
 #include <arpa/inet.h>
@@ -30,6 +31,20 @@ HardwareBridgeNode::HardwareBridgeNode(const rclcpp::NodeOptions & options)
   feedback_poll_rate_ = declare_parameter("feedback_poll_rate", 200.0);
   feedback_timeout_ = declare_parameter("feedback_timeout", 0.5);
   joint_names_ = declare_parameter("joint_names", std::vector<std::string>{});
+  // 極座標の原点 (ターンテーブル軸)。robot_geometry.yaml → 生成物で上書きされる
+  turntable_axis_x_ = declare_parameter("turntable_axis_x_m", 0.0);
+  turntable_axis_y_ = declare_parameter("turntable_axis_y_m", 0.0);
+  if (!std::isfinite(turntable_axis_x_) || !std::isfinite(turntable_axis_y_)) {
+    RCLCPP_FATAL(get_logger(), "turntable_axis_x_m / y_m must be finite");
+    throw std::invalid_argument("turntable_axis_x_m / y_m must be finite");
+  }
+  if (turntable_axis_x_ != 0.0 || turntable_axis_y_ != 0.0) {
+    RCLCPP_INFO(
+      get_logger(), "Polar origin (turntable axis) offset from base origin: (%.4f, %.4f) m",
+      turntable_axis_x_, turntable_axis_y_);
+  }
+  param_callback_handle_ = add_on_set_parameters_callback(
+    std::bind(&HardwareBridgeNode::onSetParameters, this, std::placeholders::_1));
 
   if (!openUdpSocket()) {
     // ソケットが開けなくてもノード自体は起動させる (送信時に警告が出る)
@@ -139,11 +154,14 @@ void HardwareBridgeNode::onCartesianCommand(
   const auto pitch_yaw = OrientationUtils::toPitchYaw(msg->pose.orientation);
 
   // xy平面は極座標 (r, θ) で送る契約 (protocol_version 2)。z/pitch/yaw は素通し。
+  // 原点はターンテーブル軸 (turntable_axis_x/y_m)。ベース原点からずれていても
+  // ここで引くだけで上流・MCU とも影響を受けない。
   // θ は直前に送った値を基準にアンラップし、-x軸をまたいでも +π ⇄ -π に
   // 飛ばない連続値にする (飛ぶとターンテーブルが1回転逆走する)
   const auto polar = PolarUtils::toPolar(
     msg->pose.position.x, msg->pose.position.y,
-    msg->twist.linear.x, msg->twist.linear.y, last_sent_theta_);
+    msg->twist.linear.x, msg->twist.linear.y, last_sent_theta_,
+    turntable_axis_x_, turntable_axis_y_);
   last_sent_theta_ = polar.theta;
 
   const uint64_t timestamp_us =
@@ -249,6 +267,37 @@ void HardwareBridgeNode::onCartesianFlagsOnly(
   init_request_state_ = msg->init_request;
 }
 
+rcl_interfaces::msg::SetParametersResult HardwareBridgeNode::onSetParameters(
+  const std::vector<rclcpp::Parameter> & params)
+{
+  rcl_interfaces::msg::SetParametersResult result;
+  result.successful = true;
+  double nx = turntable_axis_x_;
+  double ny = turntable_axis_y_;
+  for (const auto & p : params) {
+    if (p.get_name() == "turntable_axis_x_m" || p.get_name() == "turntable_axis_y_m") {
+      if (p.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE ||
+        !std::isfinite(p.as_double()))
+      {
+        result.successful = false;
+        result.reason = p.get_name() + " must be a finite double";
+        return result;
+      }
+      (p.get_name() == "turntable_axis_x_m" ? nx : ny) = p.as_double();
+    }
+  }
+  if (nx != turntable_axis_x_ || ny != turntable_axis_y_) {
+    // 原点が変わると同じ (x,y) でも r,θ が変わる = MCU から見ると目標が跳ぶ。
+    // MCU のスルーレート制限で追従はするが、変更は停止中に行うこと (docs 参照)
+    turntable_axis_x_ = nx;
+    turntable_axis_y_ = ny;
+    RCLCPP_INFO(
+      get_logger(), "Polar origin (turntable axis) updated: (%.4f, %.4f) m",
+      turntable_axis_x_, turntable_axis_y_);
+  }
+  return result;
+}
+
 udp_protocol::ControlFlags HardwareBridgeNode::controlFlags() const
 {
   udp_protocol::ControlFlags flags;
@@ -300,8 +349,9 @@ void HardwareBridgeNode::onFeedbackTimer()
     pose_msg.header.frame_id = "field";
     // フィードバックも極座標で届く (0x81)。/catchrobo/arm/current_pose は
     // VR・シミュレータとの契約で base 座標系の直交座標なのでここで戻す
-    pose_msg.pose.position.x = PolarUtils::toX(latest->r, latest->theta);
-    pose_msg.pose.position.y = PolarUtils::toY(latest->r, latest->theta);
+    // (送信時と同じターンテーブル軸オフセットを足す)
+    pose_msg.pose.position.x = PolarUtils::toX(latest->r, latest->theta, turntable_axis_x_);
+    pose_msg.pose.position.y = PolarUtils::toY(latest->r, latest->theta, turntable_axis_y_);
     pose_msg.pose.position.z = latest->z;
     tf2::Quaternion q;
     q.setRPY(0.0, latest->pitch, latest->yaw);

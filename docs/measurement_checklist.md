@@ -88,7 +88,7 @@
 
 | パラメータ | 入れ先 | 実測値 | 定義 |
 |---|---|---|---|
-| `turntable_axis_x_m` | `robot_geometry.yaml` の `kinematics` | ______ | ターンテーブル回転軸の、ロボット設置エリア中心 (=`field`原点) から見たx。**UDP で送る極座標 (r, θ) の原点でもある** (`mcu_spec.md` §5)。0 でないと分かったら `polar_utils.hpp` に軸位置を引く処理を足す必要がある |
+| `turntable_axis_x_m` | `robot_geometry.yaml` の `kinematics` | ______ | ターンテーブル回転軸の、ロボット設置エリア中心 (=`field`原点) から見たx。**UDP で送る極座標 (r, θ) の原点でもある** (`mcu_spec.md` §5)。値を入れれば `hardware_bridge_node` が送受信の両方で自動的に引く/足す (2026-09-10 実装済み。実行中は `ros2 param set /hardware_bridge_node turntable_axis_x_m <値>` でも反映可) |
 | `turntable_axis_y_m` | 同上 | ______ | 同y。設置エリアの左右中央に据えるなら 0.0 |
 | `knee_base_height_m` | 同上 | ______ | **肘/膝機構の d=0 が対応する床からの高さ z。** d はこの高さからの相対量として足される |
 

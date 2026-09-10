@@ -182,6 +182,11 @@ def ros_sections(p: Params):
             ("retract_clearance_above_box_top_m",
              p.get("shooting_box.retract_clearance_above_top_m")),
         ] + origin),
+        # UDP 極座標 (r, θ) の原点 = ターンテーブル軸。送受信の両方でこの値を使う
+        ("hardware_bridge_node", [
+            ("turntable_axis_x_m", p.get("kinematics.turntable_axis_x_m")),
+            ("turntable_axis_y_m", p.get("kinematics.turntable_axis_y_m")),
+        ]),
         ("kinematics_node", [
             (name, p.get(f"kinematics.{name}")) for name in (
                 "shoulder_pivot_half_separation_m",

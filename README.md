@@ -106,8 +106,8 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 | ノード | パッケージ | 役割 |
 |---|---|---|
 | `joy_teleop_node` | `sharmech_core` | `/joy` (PS4) を購読し、ゴール/速度指令に正規化 |
-| `motion_generator_node` | `sharmech_core` | **中核**。軌道生成・速度積分・両モードの合流と調停・作業領域クランプ・ウォッチドッグ |
-| `hardware_bridge_node` | `sharmech_core` | UDP 送受信、パケット組立 |
+| `motion_generator_node` | `sharmech_core` | **中核**。軌道生成・速度積分・両モードの合流と調停・作業領域クランプ・ジョグ速度上限 (`jog_v_max`)・ウォッチドッグ・起動時の実姿勢同期 |
+| `hardware_bridge_node` | `sharmech_core` | UDP 送受信、パケット組立。送信直前に xy を極座標 (r, θ) へ変換し、フィードバックを直交座標へ戻す |
 | `kinematics_node` | `sharmech_core` | パターンB用。**実装済み**。詳細は [`sharmech_core/docs/kinematics_node.md`](sharmech_core/docs/kinematics_node.md) |
 | `game_state_manager_node` | `sharmech_core` | **実装済み**。「掴む→運ぶ→置く→退避」の自動配置シーケンスとゲーム全体の状態を管理。詳細は [`sharmech_core/docs/game_state_manager_node.md`](sharmech_core/docs/game_state_manager_node.md) |
 | `cylinder_detector_node` | `catchrobo_perception` | フィールド上の物体位置を画像認識し `PoseArray` で配信。`scan_interval_sec` 周期の間欠スキャン + 手動トリガー |
@@ -143,7 +143,8 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 | `/catchrobo/game/toggle_manual_control` | `std_msgs/Empty` | `joy_teleop_node` (4ボタン同時押し) / WebXR → `game_state_manager_node`。自由操作 (`MANUAL_CONTROL`) のトグル | ○ |
 | `/catchrobo/game/confirm` | `std_msgs/Empty` | `joy_teleop_node` (確定ボタン) / WebXR (サムズアップ) → `game_state_manager_node`。微調整 (`ADJUSTING_PICK`/`ADJUSTING_PLACE`) の確定 | ○ |
 | `/catchrobo/game/reset` | `std_msgs/Empty` | WebXR → `game_state_manager_node`。状態のリセット要求。どの状態からでも `INIT` へ入り、**MCU 側で定義した初期位置**へ戻ってから `WAITING_FOR_PICK` に復帰する (ROS2 は座標を持たない) | ○ |
-| `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | `game_state_manager_node` → `motion_generator_node` | |
+| `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | `game_state_manager_node` → `motion_generator_node`。PLACING/RETRACTING 中にスロット周辺へ作業領域を絞る | |
+| `/catchrobo/game/jog_limit` | `sharmech_msgs/JogLimit` | `game_state_manager_node` → `motion_generator_node`。場面ごとのジョグ速度上限 (微調整中は減速、自動シーケンス中は遮断)。2026-09-10 追加 | |
 | `/catchrobo/debug/change_state` | `std_msgs/String` | デバッグ用 → `game_state_manager_node`。ステートを強制遷移させる (その状態の目標姿勢は配信しない) | ○ |
 | `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `motion_generator_node` → 下流。位置 + 速度 + `enable` (動作許可 bit0。起動時の同期完了まで false) + `init_request` (初期位置要求 bit2) | |
 | `/catchrobo/command/joint` | `sensor_msgs/JointState` (`name`=5モータ個別名) | `kinematics_node` → `hardware_bridge_node` (`command_mode: "joint"`、packet_type=0x02。2026-09-01 接続済み。`pattern_b:=true` 時のみ流れる) | |
@@ -203,10 +204,20 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 
 ### 独自メッセージ (`sharmech_msgs`・新規パッケージ)
 
+5 種類。正本は `sharmech_msgs/msg/*.msg` のコメント。
+
+| メッセージ | 用途 |
+|---|---|
+| `MotionStatus` | `motion_generator_node` の状態 (latched)。`mode` = IDLE / GOAL / JOG / INIT、`last_result` = none / succeeded / aborted / rejected |
+| `CartesianCommand` | 確定指令のストリーム1サンプル。位置 + 速度 + `enable` + `init_request` |
+| `WorkspaceClamp` | 作業領域クランプの実行時上書き (`game_state_manager_node` → `motion_generator_node`) |
+| `JogLimit` | ジョグ速度上限の実行時上書き・遮断 (同上。2026-09-10 追加) |
+| `McuStatus` | MCU フィードバックの姿勢以外 (疎通・`status_flags`・連番)。latched |
+
 ```
 # MotionStatus.msg
 std_msgs/Header header
-uint8   mode                  # 0=IDLE, 1=GOAL, 2=JOG
+uint8   mode                  # 0=IDLE, 1=GOAL, 2=JOG, 3=INIT (初期位置要求中)
 geometry_msgs/Pose goal_pose
 float64 distance_remaining
 float64 time_remaining
@@ -219,7 +230,13 @@ string  message
 std_msgs/Header header
 geometry_msgs/Pose  pose
 geometry_msgs/Twist twist
+bool enable                   # 動作許可 (UDP control_flags bit0)。実姿勢に同期するまで false
+bool init_request             # 初期位置要求 (bit2)。/catchrobo/game/reset の実体
 ```
+
+`enable` / `init_request` を別トピックにせず位置と同じメッセージに載せるのは、
+別トピックだと DDS の発見遅れで「位置は届くがフラグは既定値」の窓が数百 ms 開き、
+起動直後に動作許可のまま原点の仮目標へ動き出したため (2026-09-10 mock_mcu で実測)。
 
 `geometry_msgs/PoseStamped` ではなく独自型にするのは、**速度を一緒に運ぶため**。
 `motion_generator_node` は速度を既に知っている(軌道生成なら速度プロファイルから、ジョグなら Twist そのもの)ので、捨てずに流す。下流での数値微分を避けられる。
@@ -416,8 +433,10 @@ UDPフィードバックの3箇所で1つの順序。定義は `udp_protocol.hpp
     (エッジ)ではない**。パケットを取りこぼしても次のパケットで正しい状態に回復する。
     「開→閉に変わった瞬間」を検出したい場合はMCU側で前回値と比較する
 12. `control_flags` bit0 (動作許可) が 0 のパケットを受けたら、ウォッチドッグ発動時と
-    同じ挙動(最後の目標位置をホールド)を取ること。**現状 ROS2 は常に 1 を送る**
-    (将来のソフト側サーボ停止経路としての予約)
+    同じ挙動(最後の目標位置をホールド)を取ること。**ROS2 は起動直後、フィードバックに
+    目標姿勢を同期し終えるまで 0 を送る** (2026-09-10〜。それ以前は常に 1 だった)。
+    bit2 (初期位置要求) が 1 の間は r/θ/z を無視して MCU 側の初期関節角へ移動し、
+    到達を `status_flags` bit5 で返すこと (`docs/mcu_spec.md` §4.6)
 
 ### 要求2(補間)が必要な理由
 
@@ -503,13 +522,14 @@ ROS2 グラフへの直接の窓なので、クライアントを「ROS2 ノー�
 残る差分はゴール指定に Action を使うかどうかだけだったが、これは
 [Action を使わない](#action-を使わない)ことで消えた。
 
-### ジョグ操作に固有の3つの対処
+### ジョグ操作に固有の4つの対処
 
 ゴール指定には無く、速度入力にのみ必要。
 
 1. **加速度制限** — スティックを一気に倒すと速度が不連続に跳ぶ(加速度無限大)。ゴール指定時の台形プロファイルに相当する保護が無いため、ROS2 側でレート制限をかける。**`a_max` はゴール指定と共用**し、両モードの動作感を揃える
 2. **作業領域クランプ** — 積分は何も知らずに進み続けるため、毎周期クランプし境界方向の速度成分を捨てる
 3. **ウォッチドッグ** — 通信断・電池切れ・ブラウザのフリーズで入力が止まったとき、**最後の速度で走り続けてはならない**。300〜500ms(既定 400ms 程度)Twist が届かなければ速度を 0 とみなす
+4. **速度上限のクランプ** (`jog_v_max`。2026-09-10 追加) — `cmd_twist` に誰が何を publish しても、この上限を超えない。それ以前は上限が無く WebXR クライアントが肩代わりしていた。場面ごとの上限は `game_state_manager_node` が `/catchrobo/game/jog_limit` で上書きする (状態を操縦層に知らせない)
 
 ### パターンB を将来追加するための備え
 
@@ -519,25 +539,23 @@ ROS2 グラフへの直接の窓なので、クライアントを「ROS2 ノー�
 |---|---|---|
 | Cartesian ストリームをトピックとして公開 | `kinematics_node` が後から購読するだけで繋がる | 完了。`kinematics_node` が実際に購読している |
 | `packet_type` をヘッダに持つ | プロトコル変更が追加的になる | 定義済み (`packet_type = 0x02`) |
-| パケット組立をエンコーダとして抽象化 | 実装クラスを1つ足すだけで済む | 未着手 (`UdpProtocol::encodeJoint` がまだ無い) |
+| パケット組立をエンコーダとして抽象化 | 実装クラスを1つ足すだけで済む | 完了 (`UdpProtocol::encodeJoint`、`hardware_bridge_node` の `command_mode: "joint"`。2026-09-01。mock_mcu で疎通確認済み) |
 
 `motion_generator_node` は**パターンA/Bのどちらでも変更不要**。両モードを1本のストリームに合流させた設計の副産物。
 
 2026-08-27、ロボット構成 (5軸パラレルリンク。座標のみ確定) がユーザーから確認され、
 `kinematics_node` を実装した (詳細は [`sharmech_core/docs/kinematics_node.md`](sharmech_core/docs/kinematics_node.md))。
-残る作業は `UdpProtocol::encodeJoint` の追加と `hardware_bridge_node` の `command_mode: "joint"`
-実装のみ。またロボットのリンク長等の実測値がまだ無いため、launch では `pattern_b` 引数で
-既定無効にしてある。
+MCU までの経路は 2026-09-01 に繋がった (`packet_type = 0x02`)。残るのはロボットの
+リンク長等の実測のみで、それが無い間は IK が解けないため launch では `pattern_b` 引数で
+既定無効にしてある (`pattern_b:=true` で起動可能)。
 
 ## 未決定事項
 
 | 項目 | 内容 | 影響 |
 |---|---|---|
 | ウォッチドッグ発動時の減速度 | `a_max` で減速すると全速から停止まで 0.5s / 2.5cm 進む。即時 0 にすると加加速度が無限大 | 安全性と機構への負担のトレードオフ |
-| `joint_names` の値と順序 | MCU が返す `joint_positions` の並びと一致させる必要がある | 関節構成の確定待ち |
-| フィードバック途絶時の停止 | 現状は警告のみ。自動停止させるべきか | 安全 |
-| 動作許可の制御経路 | パケットにフィールドは確保済みだが、**現時点では常に 1 を入れる**。サーボ ON/OFF が必要になった時点でサービス等を追加 | プロトコル |
-| `/catchrobo/command/joint` の型 | 関節構成の確定待ち | パターンB |
+| フィードバック途絶時の停止 | 現状は警告のみ。自動停止させるべきか。なお 2026-09-10 以降、起動時にフィードバックが無ければ同期できず `enable=false` のまま動かない | 安全 |
+| 機構の幾何パラメータ・Z 方向の高さ | `robot_geometry.yaml` の `status: unmeasured` (リンク長・ピボット間隔・ターンテーブル軸・肘/膝基準高さ・ワーク高さ)。測り方は `docs/measurement_checklist.md` | **実機稼働の前提**。無いと IK が解けない |
 | `motion_generator_node` の作業領域パラメータ (`workspace_z_min/max`) | X/Yは2026-08-30の実測(赤フィールド)で確定済み(詳細は `sharmech/docs/field_dimensions.md`)。**Zのみ未確定のまま** | 安全・実用性。VR/PS4からの実際の指令がこの範囲外だと全て却下される |
 | 「相手チームエリア・進入禁止エリアへの侵入禁止」ルールへの対応 | ルールブック上、上空含め侵入すると違反・失格の対象。今の作業領域クランプ(軸並行の箱)だけで守れるかは要検討 | 「禁止区域」機能([主要な設計判断](#主要な設計判断とその理由)で検討済みの拡張)が実際に必要になる可能性がある |
 
@@ -555,10 +573,10 @@ ROS2 グラフへの直接の窓なので、クライアントを「ROS2 ノー�
 |---|---|
 | `motion_generator_node` | 実装済み。旧 `state_manager_node` + `trajectory_generator_node` を置き換え |
 | `joy_teleop_node` | 実装済み (新規) |
-| `hardware_bridge_node` | 実装済み (プロトコル v1・送受信対応) |
-| `kinematics_node` | パターンB。実装済み (IKのみ。`hardware_bridge_node`側`joint`モード未実装のため実機未接続) |
+| `hardware_bridge_node` | 実装済み (プロトコル v2 = xy 極座標・送受信対応。`command_mode: cartesian/joint`) |
+| `kinematics_node` | パターンB。実装済み。`hardware_bridge_node` の `joint` モード (0x02) まで接続済み (2026-09-01)。リンク長が仮値のため実機では未使用 (`pattern_b:=true` で起動) |
 | `game_state_manager_node` | 実装済み (新規)。自動配置シーケンス・ゲームステート管理。シューティングボックスのスロット座標は要CAD実測の仮値のまま |
-| `sharmech_msgs` | 実装済み (`CartesianCommand` / `MotionStatus` / `WorkspaceClamp`) |
+| `sharmech_msgs` | 実装済み (`CartesianCommand` / `MotionStatus` / `WorkspaceClamp` / `JogLimit` / `McuStatus`) |
 
 旧構成のノード (`vr_interface_node` / `state_manager_node` / `trajectory_generator_node` /
 旧 `kinematics_node`) と `coordinate_converter.hpp` / `trajectory_utils.hpp` は削除済み。
@@ -566,21 +584,28 @@ ROS2 グラフへの直接の窓なので、クライアントを「ROS2 ノー�
 実際に `kinematics_node` が使う運動学は別ヘッダー `parallel_arm_kinematics.hpp`
 (2026-08-27 ロボット構成確認後に新規追加。厳密解)。
 
-残作業:
+残作業 (2026-09-10 時点):
 
-- MCU 側ファームウェアの対応 (別担当者)。それまで `/catchrobo/arm/current_pose` は流れない
-- `home_pose` と PS4 の軸・ボタン番号の実機合わせ (config.yaml)
-- パターンB実機接続 (`UdpProtocol::encodeJoint` の追加、`hardware_bridge_node` の
-  `command_mode: "joint"` 実装) と、`kinematics_node` のリンク長等の実測
-- `game_state_manager_node` のシューティングボックスのスロット座標 (赤/青とも仮値) の
-  CAD実測、およびグリッパの実フィードバック配線 (現状は grasp判定が時間待ちの暫定実装。
+- **実測で決まるもの (最優先)**: `robot_geometry.yaml` の `status: unmeasured` 全項目
+  (機構の幾何 9 値・ワーク高さ)、作業領域と箱の Z (`workspace_z_*`・`box_top_z_m`)、
+  円柱半径 35.5mm / 33mm の決着、箱内 6 スロットの実位置、`orient_dwell_sec`。
+  手順は [`docs/measurement_checklist.md`](docs/measurement_checklist.md)・
+  [`docs/parameter_tuning.md`](docs/parameter_tuning.md)
+- PS4 の軸・ボタン番号の実機合わせ (`config.yaml`。`ros2 topic echo /joy` で確認)。
+  `home_pose` は未設定 (初期位置の正本が MCU 側へ移ったため、ホームボタンも将来は
+  `/catchrobo/game/reset` へ寄せる想定)
+- MCU 側ファームウェアの `docs/mcu_spec.md` 対応 (別担当者)。それまで
+  `/catchrobo/arm/current_pose` は流れず、`motion_generator_node` は同期できないため
+  `enable=false` のままゴールを却下する (mock_mcu / シミュレータで代替可能)
+- グリッパ・ピッチの実フィードバック配線 (現状は grasp / orient とも時間待ちの暫定実装。
   詳細は [`sharmech_core/docs/game_state_manager_node.md`](sharmech_core/docs/game_state_manager_node.md))
 - `control_flags` bit1 (「縦にする」指示) を実際に受けてワークを立てる機構自体が
   MCU側で未確定・未実装
-- VR側 (`catchrobo_webxr_controller`) の `/catchrobo/game/pick_request`
-  `/catchrobo/field/rescan_request` の送信ロジック実装 (本リポジトリのスコープ外)。
-  `/catchrobo/game/box_count` はVR側実装済み。ただし `pick_request` が無いと
-  自動シーケンスが始まらないため、box_countだけでは実機は動かない
+- URDF (`sharmech_description`) が旧 5 節リンク設計のままで関節名が契約と一致せず、
+  RViz のモデルは実機の姿勢で動かない。`rviz/sharmech.rviz` も未作成。可視化のみの問題で、
+  リンク長の実測後に作り直す
+- 上記のうち ROS2 側の未決定事項は「未決定事項」節を参照。VR 側 (`pick_request` /
+  `rescan_request` / `confirm` の送信) は 2026-09-05〜08 に実装済みを確認
 
 ## ビルドと起動
 

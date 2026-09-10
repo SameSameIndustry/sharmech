@@ -88,7 +88,7 @@ kinematics:
     unit: m
     status: unmeasured
     source: "未確認。ベース座標系原点と一致する仮定"
-    note: "極座標 (r, θ) の原点。ずれていると MCU へ送る θ の原点が実機とずれる"
+    note: "UDP 極座標 (r, θ) の原点。hardware_bridge_node が送受信の両方でこの分を引く/足す (2026-09-10〜) ので、実測値を入れるだけでよい。kinematics_node (パターンB) にも同じ値が生成される"
   turntable_axis_y_m:
     value: 0.0
     unit: m

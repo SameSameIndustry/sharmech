@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -57,6 +58,9 @@ private:
 
   bool openUdpSocket();
   void publishFeedback();
+  // ターンテーブル軸位置の実行中変更 (ros2 param set)。有限値のみ受理する
+  rcl_interfaces::msg::SetParametersResult onSetParameters(
+    const std::vector<rclcpp::Parameter> & params);
   // フィードバックの有無に関わらず定期的に疎通状態を配信する
   void publishMcuStatus(bool connected, double silence_sec);
 
@@ -78,6 +82,13 @@ private:
   double feedback_poll_rate_;        // [Hz]
   double feedback_timeout_;          // [s]
   std::vector<std::string> joint_names_;
+  // ターンテーブル回転軸のベース座標系での位置 [m] = UDP 極座標 (r, θ) の原点。
+  // 正本は robot_geometry.yaml の kinematics.turntable_axis_x/y_m (人間が実測して入れる)。
+  // 生成物 robot_geometry.generated.yaml 経由で届き、実行中に ros2 param set でも変えられる。
+  // 送信 (x,y → r,θ) と受信 (r,θ → x,y) の両方で同じ値を使う
+  double turntable_axis_x_{0.0};
+  double turntable_axis_y_{0.0};
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
   // 内部状態
   int sockfd_{-1};

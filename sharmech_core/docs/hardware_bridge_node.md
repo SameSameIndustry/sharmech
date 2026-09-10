@@ -66,6 +66,7 @@ config を見て対応する購読とエンコーダの組を生成する (joint
 | `feedback_timeout` | 0.5 | この時間フィードバックが無ければ警告 [s] |
 | `protocol_version` | 2 | 送出するプロトコル版。受信時の検証にも使う (2 = xy平面が極座標。1 とは非互換) |
 | `joint_names` | `[]` | `/joint_states` に載せる関節名。順序は MCU の返す配列と一致させる |
+| `turntable_axis_x_m` / `turntable_axis_y_m` | 0.0 / 0.0 | **UDP 極座標 (r, θ) の原点 = ターンテーブル回転軸**のベース座標系での位置 [m]。正本は `sharmech/params/robot_geometry.yaml` の `kinematics.turntable_axis_x/y_m` (人間が実測して入れる。生成物 `robot_geometry.generated.yaml` 経由で届く)。実行中に `ros2 param set` で変更可 (有限値のみ)。**変えた瞬間にアームがオフセットの差分だけ実際に動く** (ROS2 は直交座標の目標を保持したまま極座標の原点だけが変わるため、MCU から見ると目標が跳ぶ。2026-09-10 mock_mcu で確認)。周囲に何も無い姿勢で止めてから変えること |
 
 ## 処理フロー
 
@@ -90,10 +91,17 @@ UDP に載せる直前にここで `r, θ` へ変換する (`utility/polar_utils
 (CLAUDE.md「ロボット構成」) なので、直交座標のまま渡すと MCU が毎周期
 atan2/hypot をやり直すことになる。`z` は肘/膝機構が直接与えるため変換しない。
 
-| ROS 側 | UDP 側 | 式 |
+| ROS 側 | UDP 側 | 式 (`x' = x − ax`, `y' = y − ay`。`(ax, ay)` = `turntable_axis_x/y_m`) |
 |---|---|---|
-| `x, y` | `r, theta` | `r = hypot(x,y)`, `θ = atan2(y,x)` |
-| `vx, vy` | `r_dot, theta_dot` | `ṙ = (x·vx + y·vy)/r`, `θ̇ = (x·vy − y·vx)/r²` |
+| `x, y` | `r, theta` | `r = hypot(x',y')`, `θ = atan2(y',x')` |
+| `vx, vy` | `r_dot, theta_dot` | `ṙ = (x'·vx + y'·vy)/r`, `θ̇ = (x'·vy − y'·vx)/r²` |
+| (受信) `r, theta` | `x, y` | `x = ax + r·cos θ`, `y = ay + r·sin θ` |
+
+**極座標の原点はターンテーブル回転軸であって、ベース座標系原点 (設置エリア中心) では
+ない** (2026-09-10〜)。両者がずれている場合の補正はここ 1 箇所で完結し、上流 (VR・
+`motion_generator_node`・作業領域クランプ) も下流 (MCU) もオフセットを知らない。
+軸の位置は人間が実測して `robot_geometry.yaml` に入れる (`measurement_checklist.md` §1.4)。
+軸の**向き** (θ = 0 が +X を向くこと) はここでは扱わず、MCU 側のエンコーダ零点で合わせる契約。
 
 **θ はアンラップして連続値で送る。** 作業領域は X が -2.045〜+0.941 m なので
 -X 軸 (θ = ±π) を実際にまたぐ。atan2 の生値をそのまま送るとシューティングボックスの

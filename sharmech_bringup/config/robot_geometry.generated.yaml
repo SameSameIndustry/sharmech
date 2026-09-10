@@ -55,6 +55,11 @@ game_state_manager_node:
     field_origin_offset_y_m: 0.0
     field_origin_offset_z_m: 0.0
 
+hardware_bridge_node:
+  ros__parameters:
+    turntable_axis_x_m: 0.0
+    turntable_axis_y_m: 0.0
+
 kinematics_node:
   ros__parameters:
     shoulder_pivot_half_separation_m: 0.0

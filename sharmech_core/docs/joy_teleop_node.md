@@ -88,7 +88,7 @@ ROS2 の `joy` ノードは既定で**状態が変化したときだけ** publis
 | `joy_timeout` | 0.5 | この時間 `/joy` が無ければ全入力をニュートラル扱い [s] |
 | `deadzone` | 0.15 | スティックのデッドゾーン。**必須**(ドリフトで微速動作し続けるのを防ぐ) |
 | `use_deadman` | `true` | デッドマンスイッチを使うか |
-| `home_pose` | — | ホーム姿勢 `[x, y, z, pitch, yaw]` |
+| `home_pose` | (空 = 無効) | ホーム姿勢 `[x, y, z, pitch, yaw]`。**暫定・未設定。** 初期位置の正本は MCU 側 (`/catchrobo/game/reset` → `control_flags` bit2) なので、ホームボタンも将来は reset へ寄せる想定 |
 
 ### 軸・ボタン割り当て
 
@@ -263,7 +263,7 @@ L1 は `deadman_button` と兼用してよい(コンボの一部として押さ�
 
 | 項目 | 内容 |
 |---|---|
-| `home_pose` の具体値 | 機構の確定待ち |
+| `home_pose` の扱い | 未設定 (空なら無効)。初期位置の正本が MCU 側へ移った (2026-09-10) ため、Cartesian の `home_pose` を持ち続けるか、ホームボタンを `/catchrobo/game/reset` の発行に置き換えるかは未決定 |
 | 軸・ボタン番号の既定値 | 実機の `ros2 topic echo /joy` で要確認 |
 | 速度スケールの切り替え | 低速モード / 高速モードをボタンで切り替えたいか |
 

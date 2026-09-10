@@ -128,7 +128,10 @@ ros2 param set /game_state_manager_node box_top_z_m 0.161
 ```
 
 再起動が要るもの (実行中に変えられないもの): `kinematics_node` のリンク長・軸位置
-(パターンB。起動時に一度だけ読む)。
+(パターンB。起動時に一度だけ読む)。ターンテーブル軸位置は `hardware_bridge_node` 側
+(極座標の原点) には実行中に `ros2 param set /hardware_bridge_node turntable_axis_x_m <値>`
+で入るが、**変えた瞬間にアームがオフセットの差分だけ動く** (ROS2 の直交座標の目標は
+そのままで、MCU から見た r,θ だけが変わるため)。周囲に何も無い姿勢で止めてから行うこと。
 
 ---
 
@@ -160,7 +163,8 @@ ros2 param set /game_state_manager_node box_top_z_m 0.161
 
 機構パラメータを埋めたら、**MCU 担当者にも同じ値を渡す** (`mcu_spec.md` §8 #1。
 MCU 側も IK/FK に同じ値が要る)。ターンテーブル軸が原点からずれていた場合は、
-UDP で送る極座標の原点もずれるので `polar_utils.hpp` の修正が要る (`mcu_spec.md` §9)。
+`turntable_axis_x/y_m` を入れるだけで `hardware_bridge_node` が UDP 極座標の原点を
+その位置へずらす (2026-09-10 実装済み。MCU 側の対応は不要。`mcu_spec.md` §5)。
 
 ---
 
@@ -193,7 +197,8 @@ UDP で送る極座標の原点もずれるので `polar_utils.hpp` の修正が
 
 | `robot_geometry.yaml` | ROS2 (生成物 `robot_geometry.generated.yaml`) | JS (`generated/robotParams.js`) | 実行中変更 |
 |---|---|---|---|
-| `kinematics.shoulder_*` / `knee_*` / `turntable_axis_*` / `knee_base_height_m` | `kinematics_node.<同名>` | `PARALLEL_ARM.shoulder.{pivotHalfSeparation, proximalLinkLength, distalLinkLength}` 等 | × (再起動) |
+| `kinematics.shoulder_*` / `knee_*` / `knee_base_height_m` | `kinematics_node.<同名>` | `PARALLEL_ARM.shoulder.{pivotHalfSeparation, proximalLinkLength, distalLinkLength}` 等 | × (再起動) |
+| `kinematics.turntable_axis_x_m / y_m` | `hardware_bridge_node.<同名>` (UDP 極座標の原点) と `kinematics_node.<同名>` (パターンB) の**両方**へ同じ値 | `PARALLEL_ARM.turntableAxisX / Y` | ○ `hardware_bridge_node` (停止中に) / × `kinematics_node` |
 | `workspace.x_min_m` … `z_max_m` | `motion_generator_node.workspace_x_min` … | `WORKSPACE.{xMin … zMax}` | ○ |
 | `cylinder.radius_m` / `length_m` | `game_state_manager_node.cylinder_diameter_m` (= 2 × radius) | `CYLINDER.{radius, length}`、`REAL_FIELD` (派生) | ○ |
 | `shooting_box.center_x_red` 等 | `game_state_manager_node.box_center_x_red` 等 | `SHOOTING_BOX.centerXRed` 等 | ○ |
