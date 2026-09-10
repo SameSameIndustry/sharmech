@@ -385,6 +385,14 @@ UDPフィードバックの3箇所で1つの順序。定義は `udp_protocol.hpp
 関節数 6 なら合計 68 バイト。バイトオフセットの詳細は
 [`sharmech_core/docs/hardware_bridge_node.md`](sharmech_core/docs/hardware_bridge_node.md) を参照。
 
+**MCU は 2 枚構成 (2026-09-10 確定)。** r/z 基板 (192.168.1.100、肩・肘/膝) と θ 基板
+(192.168.1.101、ターンテーブル + エンドエフェクタ) は互いに通信できないため、ROS2 は同じ
+指令を両方へ送り、各基板は自分の担当フィールドだけ埋めた 0x81 を返す。`hardware_bridge_node`
+が送信元 IP で見分けて 1 本に合成する (`status_flags` は bit0〜4 が OR、bit5 が AND)。
+分担の契約は [`docs/mcu_spec.md`](docs/mcu_spec.md) §2.2、合成規則は
+[`sharmech_core/docs/hardware_bridge_node.md`](sharmech_core/docs/hardware_bridge_node.md)
+「2 基板のフィードバック合成」。
+
 **MCU 側が FK を行う。** 到達判定と VR への表示に必要なのは Cartesian 姿勢だが、MCU が持っているのは
 エンコーダ由来の関節角。パターンA では MCU が既に運動学 (IK) を持っているので FK も MCU 側で行い、
 「ROS2 は運動学を持たない」という原則を保つ。

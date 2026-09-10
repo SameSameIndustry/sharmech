@@ -47,6 +47,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_udp_protocol test/test_udp_protocol.cpp)
   target_include_directories(test_udp_protocol PRIVATE include)
 
+  # 2 基板構成のフィードバック合成 (r/z 基板 + θ 基板 → 1 本)
+  ament_add_gtest(test_feedback_merge test/test_feedback_merge.cpp)
+  target_include_directories(test_feedback_merge PRIVATE include)
+
   ament_add_gtest(test_parallel_arm_kinematics test/test_parallel_arm_kinematics.cpp)
   target_include_directories(test_parallel_arm_kinematics PRIVATE include)
 

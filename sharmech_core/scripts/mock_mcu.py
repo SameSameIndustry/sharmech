@@ -34,9 +34,15 @@ sharmech_core/include/sharmech_core/utility/udp_protocol.hpp が正本。
 フィードバックは最後の値のまま更新されない (実機のMCUはFKして返す契約。
 hardware_bridge_node 側のプロトコル疎通確認用と割り切ること)。
 
+2 枚構成 (2026-09-10。mcu_spec.md §2.2): --board arm / --board theta で「自分の担当
+フィールドだけ埋めて他は 0」を再現する。r/z 基板役と θ 基板役を別ポートで 2 つ立て、
+launch の mock_mcu_two_boards:=true (config/mock_mcu_two_boards.yaml) で繋ぐ。
+
 使い方:
     python3 mock_mcu.py
     python3 mock_mcu.py --listen-port 8888 --drop-rate 0.01 --lag 0.05
+    python3 mock_mcu.py --listen-port 8888 --board arm     # 2枚構成: r/z 基板役
+    python3 mock_mcu.py --listen-port 8890 --board theta   # 2枚構成: θ 基板役
 """
 import argparse
 import math
@@ -60,6 +66,7 @@ assert POLAR_PAYLOAD_SIZE == 44
 # JointPayload (44B): q[5] + qdot[5] + gripper + control_flags + reserved。
 # 並び順は [shoulder_left, shoulder_right, turntable, knee_left, knee_right]
 JOINT_COUNT = 5
+TURNTABLE_JOINT_INDEX = 2   # --board theta が埋めるスロット (feedback_merge.hpp と一致)
 JOINT_PAYLOAD_FMT = "<10fBBH"
 JOINT_PAYLOAD_SIZE = struct.calcsize(JOINT_PAYLOAD_FMT)
 assert JOINT_PAYLOAD_SIZE == 44
@@ -173,8 +180,15 @@ def main():
     parser.add_argument("--init-duration", type=float, default=0.5,
                         help="起動後この秒数は FLAG_UNINITIALIZED を立てて原点出し中を再現する "
                              "(既定 0.5s。0 で即初期化済み)")
+    parser.add_argument("--board", choices=("all", "arm", "theta"), default="all",
+                        help="2枚構成の役割。arm = r/z 基板 (r, z, 肩・肘/膝の関節角だけ"
+                             "埋めて他は 0)、theta = θ 基板 (θ, ターンテーブル角, pitch/yaw,"
+                             " gripper だけ埋める)。all = 1枚構成 (既定、全部埋める)。"
+                             "arm/theta では --joint-count 0 を 5 に読み替える")
     parser.add_argument("--quiet", action="store_true", help="受信ログを抑制する")
     args = parser.parse_args()
+    if args.board != "all" and args.joint_count == 0:
+        args.joint_count = JOINT_COUNT
 
     try:
         init_r, init_theta, init_z = (float(v) for v in args.init_pose.split(","))
@@ -330,13 +344,26 @@ def main():
             if args.drop_rate > 0.0 and random.random() < args.drop_rate:
                 continue  # 送信側のパケットロスをシミュレート
 
+            # 2枚構成の役割に応じて、担当外のフィールドは 0 で送る
+            # (契約: 各基板は自分の担当フィールドだけ埋める。hardware_bridge_node が合成)
+            fb_r, fb_theta, fb_z = current["r"], current["theta"], current["z"]
+            fb_pitch, fb_yaw, fb_gripper = current["pitch"], current["yaw"], gripper_closed
+            fb_joints = list(joints)
+            if args.board == "arm":
+                fb_theta, fb_pitch, fb_yaw, fb_gripper = 0.0, 0.0, 0.0, False
+                if len(fb_joints) > TURNTABLE_JOINT_INDEX:
+                    fb_joints[TURNTABLE_JOINT_INDEX] = 0.0
+            elif args.board == "theta":
+                fb_r, fb_z = 0.0, 0.0
+                fb_joints = [v if i == TURNTABLE_JOINT_INDEX else 0.0
+                             for i, v in enumerate(fb_joints)]
+
             feedback_seq += 1
             packet = encode_feedback(
                 feedback_seq, last_recv_seq if last_recv_seq is not None else 0,
                 time.monotonic_ns() // 1000,
-                current["r"], current["theta"], current["z"],
-                current["pitch"], current["yaw"],
-                status_flags, gripper_closed, joints)
+                fb_r, fb_theta, fb_z, fb_pitch, fb_yaw,
+                status_flags, fb_gripper, fb_joints)
             sock.sendto(packet, client_addr)
     except KeyboardInterrupt:
         print("\n[mock_mcu] stopped", file=sys.stderr)

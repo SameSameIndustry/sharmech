@@ -10,8 +10,8 @@ ROS2 トピックと UDP パケットの間の**変換と輸送のみ**を担う
 
 | 方向 | 処理 |
 |---|---|
-| 送信 | Cartesian 指令(または関節指令)+ グリッパ状態を UDP パケットに整形して送る。**その際 xy 平面を極座標 (r, θ) に直す** (下記) |
-| 受信 | MCU から実状態を受け取り、`/catchrobo/arm/current_pose` と `/joint_states` へ publish |
+| 送信 | Cartesian 指令(または関節指令)+ グリッパ状態を UDP パケットに整形して送る。**その際 xy 平面を極座標 (r, θ) に直す** (下記)。**MCU は 2 枚構成なので同じパケットを両基板へ送る** |
+| 受信 | MCU から実状態を受け取り、`/catchrobo/arm/current_pose` と `/joint_states` へ publish。**2 枚の基板から届く 0x81 を送信元 IP で見分けて 1 本に合成する** (「2 基板のフィードバック合成」) |
 
 送信するパケットの種類は **config で切り替える**。
 
@@ -59,9 +59,11 @@ config を見て対応する購読とエンコーダの組を生成する (joint
 | パラメータ | 既定値 | 説明 |
 |---|---|---|
 | `command_mode` | `cartesian` | `cartesian` / `joint` |
-| `mcu_ip` | `192.168.1.100` | MCU の IP アドレス (`STM32_UDP2CAN_controller` の `gWIZNETINFO.ip` と一致させる)。疑似MCUは launch の `mock_mcu:=true` で `config/mock_mcu.yaml` により上書き |
-| `mcu_port` | 8888 | 送信先ポート |
-| `local_port` | 8889 | 受信待ち受けポート |
+| `mcu_ip` | `192.168.1.100` | **r/z 基板** (肩・肘/膝の GIM ×4) の IP。`STM32_UDP2CAN_controller` の `ip_100_section` ブランチの `gWIZNETINFO.ip` と一致させる。疑似MCUは launch の `mock_mcu:=true` で `config/mock_mcu.yaml` により上書き |
+| `mcu_port` | 8888 | 送信先ポート (両基板共通) |
+| `mcu_theta_ip` | `192.168.1.101` | **θ 基板** (ターンテーブル + エンドエフェクタ。`enndeffector_UDP` ブランチ) の IP。**空文字なら 1 枚構成** (mcu_ip の基板が全フィールドを返す前提で合成しない) |
+| `mcu_theta_port` | -1 | θ 基板の送信先ポート。負なら `mcu_port` と同じ。localhost に mock を 2 つ立てるときだけ変える (送信元の区別に使う) |
+| `local_port` | 8889 | 受信待ち受けポート (両基板ともここへ返す) |
 | `feedback_poll_rate` | 200.0 | 受信ポーリング周期 [Hz] |
 | `feedback_timeout` | 0.5 | この時間フィードバックが無ければ警告 [s] |
 | `protocol_version` | 2 | 送出するプロトコル版。受信時の検証にも使う (2 = xy平面が極座標。1 とは非互換) |
@@ -144,11 +146,17 @@ MCU 側は常時スルーレート制限をかける契約 (`mcu_spec.md` §4.4)
 onFeedbackTimer():
     while recvfrom(MSG_DONTWAIT) が成功する限り:
         検証(下記) → 失敗なら破棄して次へ
-        最新のパケットとして保持
-    最新パケットがあれば:
-        /catchrobo/arm/current_pose ← 極座標を直交座標へ戻した姿勢
-        /joint_states       ← 関節角
-        last_feedback_time_ ← now
+        送信元 IP (同一 IP が複数ならポート) で基板を特定 → 未知なら破棄
+        基板ごとの seq 逆転チェック → 古ければ破棄
+        その基板の最新パケットとして保持
+    いずれかの基板が更新されていれば:
+        全基板が一度以上届き、かつ全部 feedback_timeout 以内 なら:
+            merged ← FeedbackMerge::merge(r/z 基板, θ 基板)   (1 枚構成ならそのまま)
+            /catchrobo/arm/current_pose ← 極座標を直交座標へ戻した姿勢
+            /joint_states       ← 関節角
+            /catchrobo/arm/mcu_status ← connected=true
+            last_feedback_time_ ← now
+        そうでなければ current_pose は出さない (mcu_status は connected=false)
 ```
 
 ブロッキング recv 用のスレッドを立てる方式もあるが、コンポーネント内でのスレッド安全性を
@@ -191,6 +199,39 @@ onFeedbackTimer():
 | 5 | 初期位置に到達・静止中 (`control_flags` bit2 への応答。`McuStatus.FLAG_AT_INIT_POSE`) |
 | 6-15 | 予約 |
 
+### 2 基板のフィードバック合成 (2026-09-10)
+
+MCU は 2 枚あり、基板同士は通信できない (デイジーチェーンではない。ユーザー確定)。
+そのため **ROS2 が同じ指令パケットを両基板へ送り、各基板は自分の担当フィールドだけ埋めた
+0x81 を同じ `local_port` へ返し、本ノードが合成する** (`utility/feedback_merge.hpp`)。
+基板側の分担の契約は `sharmech/docs/mcu_spec.md` §3.4。
+
+| フィールド | 取り元 |
+|---|---|
+| `r`, `z`, `joint_positions` の肩・肘/膝 (index 0,1,3,4) | r/z 基板 (`mcu_ip`) |
+| `theta`, `joint_positions[2]` (turntable) | θ 基板 (`mcu_theta_ip`) |
+| `pitch`, `yaw`, `gripper_state` | θ 基板 (どれも指令値のエコー) |
+| `status_flags` bit0〜4 | **OR** |
+| `status_flags` bit5 (初期位置到達) | **AND** |
+| `seq`, `seq_echo` (`McuStatus`) | r/z 基板の値 (逆転検出は基板ごと) |
+| `McuStatus.connected` | 全基板が `feedback_timeout` 以内 |
+| `McuStatus.out_of_order_count` | 全基板の合計 |
+
+- **bit3 を OR にする理由**: `motion_generator_node` は bit3 が落ちた瞬間に目標を実姿勢へ
+  同期して `enable=1` を送る。片方だけ原点出しが済んだ時点で同期すると、もう片方が
+  原点出しの途中で動き出す
+- **bit5 を AND にする理由**: 両基板が初期位置に着くまで `INIT` モードを抜けない。
+  mock 2 台 (θ 側に 2 秒の一次遅れ) で、bit5 が θ 側の到達まで約 10 秒立たないことを確認済み
+- **片方しか届いていない間は `current_pose` を出さない**。半端な姿勢 (θ だけ 0 など) に
+  下流が同期してしまうのを防ぐ (「フィードバックが無いときにエコーしない」と同じ理由)。
+  片方が `feedback_timeout` を超えて途絶した場合も同様に出さず、`connected=false` にする
+- **途絶後の再開は MCU の再起動とみなし、その基板の `seq` 基準を捨てる**。MCU は再起動で
+  `seq` を 0 から振り直すので、前回の最大値を覚えたままだと追いつくまで全パケットを
+  順序逆転として捨ててしまう (mock で `seq 6302 → 1` の復帰を確認済み。1 枚構成のときから
+  潜在していた問題)
+- 送信元の識別は IP。同じ IP の基板が複数ある (localhost の mock ×2) ときだけポートも見る。
+  実機の送信元ポートは契約に含めていない
+
 ### フィードバックの送信条件 (2026-09-01 確定)
 
 **指令の受信と無関係に、MCU起動直後から100Hzで自発送信する** (エコー型にしない)。
@@ -220,10 +261,9 @@ base 座標系の直交座標なので、`x = r·cos θ`, `y = r·sin θ` で戻
 | `gripper_state_` | ラッチしたグリッパ状態 |
 | `enable_state_` / `init_request_state_` | 直近の Cartesian 指令の `enable` / `init_request` (control_flags bit0 / bit2)。既定 false |
 | `last_sent_theta_` / `has_sent_command_` | θ のアンラップ基準。**ROS2 が駆動していない間 (未送信・`enable=false`・`init_request=true`) は MCU の実 θ で上書きする** (下記) |
-| `send_seq_` | 送信パケットの連番。送るたびに +1 |
-| `last_recv_seq_` | 受信済みの最大 `seq`。順序逆転の検出に使う |
-| `last_feedback_time_` | フィードバック途絶の検出に使う |
-| `encoder_` | `command_mode` に応じて生成されたエンコーダ |
+| `send_seq_` | 送信パケットの連番。送るたびに +1 (全基板に同じ seq を送る) |
+| `boards_` | 基板ごとの宛先アドレス・直近フィードバック・受信時刻・受信済み最大 `seq`・逆転回数。`[0]` = r/z 基板、`[1]` = θ 基板 (1 枚構成なら無し) |
+| `last_feedback_time_` | 全基板が揃って合成フィードバックを出した最後の時刻。途絶の検出に使う |
 
 ## 異常系
 
@@ -232,8 +272,10 @@ base 座標系の直交座標なので、`x = r·cos θ`, `y = r·sin θ` で戻
 | `protocol_version` が不一致 | 破棄し、警告ログ(スロットリング付き) |
 | `packet_type` が未知 | 破棄し、警告ログ |
 | `payload_length` が実サイズと不一致 | 破棄し、警告ログ |
-| 受信 `seq` が `last_recv_seq_` 以下 | **破棄**。UDP は順序を保証しないため古いパケットが後から届く |
-| `feedback_timeout` の間フィードバックが無い | 警告ログ。**publish はしない**(下記) |
+| 受信 `seq` がその基板の受信済み最大値以下 | **破棄**。UDP は順序を保証しないため古いパケットが後から届く。ただし `feedback_timeout` を超える途絶の後は再起動とみなして基準を捨てる |
+| 送信元が `mcu_ip` / `mcu_theta_ip` のどちらでもない | 破棄し、警告ログ (スロットリング付き) |
+| 片方の基板からしか届いていない | `current_pose` を出さず警告ログ。両方揃って初めて publish |
+| `feedback_timeout` の間フィードバックが無い (片方でも) | 警告ログ。**publish はしない**(下記)。`mcu_status` は `connected=false` |
 | `sendto` 失敗 | 警告ログ(スロットリング付き)。送信は継続する |
 | MCU 未実装でフィードバックが一切無い | `/catchrobo/arm/current_pose` を **publish しない** |
 
@@ -307,6 +349,10 @@ TCP は再送とヘッドオブラインブロッキングがあり、**古い�
 
 実機 (MCU) が無い間は `sharmech_core/scripts/mock_mcu.py` を UDP の送信先にして手元で
 動作確認できる。詳細は `CLAUDE.md` の「テスト」節を参照。
+
+2 基板の合成は `--board arm` / `--board theta` の mock を 2 つ立て、launch の
+`mock_mcu_two_boards:=true` (`config/mock_mcu_two_boards.yaml`) で確認する。
+合成規則そのものは `test/test_feedback_merge.cpp` (gtest) が回帰テストしている。
 
 ## 未決定事項
 

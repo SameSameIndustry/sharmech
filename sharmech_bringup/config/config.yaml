@@ -104,11 +104,19 @@ joy_teleop_node:
 hardware_bridge_node:
   ros__parameters:
     command_mode: "cartesian"   # "cartesian" (パターンA) / "joint" (パターンB。packet_type=0x02)
-    mcu_ip: "192.168.1.100"     # MCU の IP アドレス (有線 Ethernet)。STM32_UDP2CAN_controller の
-                                # main.c gWIZNETINFO.ip と一致させること (2026-09-05 現物に合わせた)。
-                                # 疑似MCUに繋ぐときはここを触らず launch の mock_mcu:=true を使う
-    mcu_port: 8888              # MCU の UDP 受信ポート
-    local_port: 8889            # フィードバック受信ポート
+    # MCU は 2 枚構成 (2026-09-10 ユーザー確定。基板同士は通信できない)。
+    # 同じ指令パケットを両方へ送り、両方から届く 0x81 を送信元 IP で見分けて合成する
+    # (sharmech_core/docs/hardware_bridge_node.md「2 基板のフィードバック合成」)。
+    #   mcu_ip       = r/z 基板 (肩・肘/膝の GIM ×4。STM32_UDP2CAN_controller の
+    #                  ip_100_section ブランチ、gWIZNETINFO.ip = 192.168.1.100)
+    #   mcu_theta_ip = θ 基板 (ターンテーブル + エンドエフェクタ。enndeffector_UDP
+    #                  ブランチ、192.168.1.101)。空文字なら 1 枚構成 (mcu_ip が全部返す)
+    # 疑似MCUに繋ぐときはここを触らず launch の mock_mcu:=true を使う
+    mcu_ip: "192.168.1.100"
+    mcu_port: 8888              # MCU の UDP 受信ポート (両基板共通)
+    mcu_theta_ip: "192.168.1.101"
+    mcu_theta_port: -1          # 負なら mcu_port と同じ
+    local_port: 8889            # フィードバック受信ポート (両基板ともここへ返す)
     feedback_poll_rate: 200.0   # 受信ポーリング周期 [Hz]
     feedback_timeout: 0.5       # フィードバック途絶の警告閾値 [s]
     # /joint_states に載せる関節名。0x02指令・0x81フィードバックの並び順の契約

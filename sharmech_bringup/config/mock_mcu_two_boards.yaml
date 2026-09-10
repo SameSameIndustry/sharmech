@@ -1,0 +1,14 @@
+# 疑似MCU を 2 つ立てて 2 枚構成 (r/z 基板 + θ 基板) の合成を確認するときの
+# 上書きパラメータ。sharmech.launch.xml の mock_mcu_two_boards:=true で読み込む。
+# 同じ localhost なので送信元はポートで区別する (hardware_bridge_node は IP が
+# 同じ基板が複数あるときだけポートを見る)。
+#
+#   python3 sharmech_core/scripts/mock_mcu.py --listen-port 8888 --board arm
+#   python3 sharmech_core/scripts/mock_mcu.py --listen-port 8890 --board theta
+#   ros2 launch sharmech_bringup sharmech.launch.xml field_color:=red mock_mcu_two_boards:=true
+hardware_bridge_node:
+  ros__parameters:
+    mcu_ip: "127.0.0.1"
+    mcu_port: 8888
+    mcu_theta_ip: "127.0.0.1"
+    mcu_theta_port: 8890

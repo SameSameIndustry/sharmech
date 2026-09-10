@@ -30,6 +30,9 @@ ROS2層 (別PC。軌道生成・調停・作業領域クランプ・ウォッチ
 モータドライバ / モータ / グリッパ
 ```
 
+マイコンは 2 枚構成で、上図の担当は r/z 基板 (肩・肘/膝) と θ 基板 (ターンテーブル・グリッパ・
+縦にする) に分かれる (§2.2)。**現行ファーム上での実装のしかたは §10 (基板別の実装仕様)。**
+
 **マイコンがやらなくてよいこと** (ROS2側の責務なので実装しないこと):
 
 | やらないこと | 理由 |
@@ -52,6 +55,27 @@ ROS2層 (別PC。軌道生成・調停・作業領域クランプ・ウォッチ
   (最初の受信パケットの送信元から学習する方式にしない)
 - IPアドレスは現場で確定する (ROS2側configの現在値はマイコン=192.168.1.100。
   `STM32_UDP2CAN_controller` の `main.c` `gWIZNETINFO.ip` と同じ値に揃えてある)
+
+### 2.2 マイコンは 2 枚構成 (2026-09-10 ユーザー確定)
+
+基板は 2 枚あり、**基板同士は通信できない** (デイジーチェーンではない)。
+ROS2 側は **同じ指令パケット (0x01) を両方の基板へ送る**。各基板は受信したパケットの
+うち自分の担当フィールドだけを使い、**自分の担当フィールドだけを埋めた 0x81 を
+ROS2 側 PC の同じ 8889 番へ返す**。合成は ROS2 側 (`hardware_bridge_node`) が行う。
+
+| 基板 | IP (現物) | ファーム | 担当 (指令で使うもの) | 0x81 で埋めるもの |
+|---|---|---|---|---|
+| r/z 基板 | 192.168.1.100 | `ip_100_section` ブランチ | `r`, `z` (肩・肘/膝の GIM ×4)、`control_flags` bit0/bit2 | `r`, `z`, `joint_positions` の肩・肘/膝 (index 0,1,3,4)、`status_flags` |
+| θ 基板 | 192.168.1.101 | `enndeffector_UDP` ブランチ | `theta` (ターンテーブル)、`gripper`、`control_flags` bit0/bit1/bit2 | `theta`, `joint_positions[2]` (turntable)、`pitch`, `yaw`, `gripper_state`、`status_flags` |
+
+- 担当外のフィールドは **0 で送る** (ROS2 側は読まない)。`joint_count` は両基板とも 5
+- `status_flags` は基板ごとに自分の状態を立てる。ROS2 側で **bit0〜4 は OR、bit5 は AND**
+  で合成する。したがって **bit5 (初期位置到達) は両基板が実装すること** —— 片方が bit5 を
+  返さないと `INIT` モードが永久に終わらない。同様に bit3 (未初期化) は片方でも立っていれば
+  ROS2 は動作許可を出さない
+- `seq` は基板ごとに独立でよい (ROS2 側は基板ごとに順序逆転を判定する)。**再起動で 0 から
+  振り直してよい** (ROS2 側は途絶後の再開を再起動とみなして基準を捨てる)
+- 2 枚とも 100Hz で自発送信する (§3.4 の送信条件は基板ごとに適用)
 - **バイトオーダはリトルエンディアン、構造体はパディングなし** (STM32 (Cortex-M) /
   x86 ともリトルエンディアンなので変換不要)。実数は全て float32
   (FPU付きSTM32ならネイティブ)
@@ -198,6 +222,10 @@ index 4: knee_right      (肘/膝 右モータ)
 | 42 | `uint8` | `gripper_state` | 実際のグリッパ状態 (0=開, 1=閉)。**必ず実状態を返すこと** (ROS2側で把持確認に使う予定) |
 | 43 | `uint8` | `joint_count` | 5 |
 | 44 | `float32[5]` | `joint_positions` | 実測の関節角 [rad]。並び順は §3.3 |
+
+**2 枚構成での分担は §2.2 を参照。** 各基板は自分の担当フィールドだけを埋め、担当外は 0 で送る
+(r/z 基板は `theta`・`pitch`・`yaw`・`gripper_state`・`joint_positions[2]` を 0、
+θ 基板は `r`・`z`・`joint_positions[0,1,3,4]` を 0)。**`status_flags` bit5 は両基板が実装する。**
 
 **送信条件: 指令の受信と無関係に、マイコン起動直後から100Hzで自発送信する。**
 指令へのエコー(受信したら返す)型にしないこと。理由:
@@ -545,7 +573,7 @@ UDPの指令だけでは動かない。以下はパケットでは送られて�
 | 3 | **モータ・エンコーダ設定**: 回転方向・ギア比・カウント→rad換算 | マイコン側の設計裁量 |
 | 4 | **関節可動域 (joint limits)**: 可動域外破棄 (bit4) 用 | マイコン側の設計裁量。実測後ROS2側の作業領域クランプと整合を取る |
 | 5 | **グリッパ・「縦にする」機構の実物**: アクチュエータ・駆動回路 | 機構未定 (2026-09-01時点)。bit1の指示経路はプロトコル側で確保済み |
-| 6 | **ネットワーク静的設定**: 自分のIP (config上は192.168.1.100) と、フィードバック宛先 (ROS2側PCのIP:8889) | 現場で確定 (§2) |
+| 6 | **ネットワーク静的設定**: 自分のIP (r/z 基板 192.168.1.100、θ 基板 192.168.1.101) と、フィードバック宛先 (ROS2側PCのIP:8889。両基板とも同じ宛先) | 現場で確定 (§2、§2.2) |
 | 7 | **ハードE-stop・動力電源表示灯**: IC非依存の回路 | ルールブック必須 (§6)。ソフトとは独立 |
 
 ## 9. 未確定事項 (変わる可能性のある箇所)
@@ -562,3 +590,307 @@ UDPの指令だけでは動かない。以下はパケットでは送られて�
 | 0x02 (関節指令) | ワイヤ仕様は確定・ROS2側実装済み | リンク長が未実測のため当面実機では使わない。実装優先度は低くてよい |
 | 初期位置要求 (bit2) / 到達 (bit5) | 2026-09-10 追加。**パケットレイアウトは不変** (予約ビットの割当のみ) なので `protocol_version` は 2 のまま | 「到達」の判定基準 (静止の閾値) はマイコン側の裁量。ROS2 は bit5 が立つまで待ち続ける (出口は `/catchrobo/arm/cancel`) |
 | 可動域の値 | マイコン側の裁量 | 実測が揃い次第、ROS2側の作業領域クランプ値と整合を取る |
+
+---
+
+## 10. 基板別の実装仕様 (ファーム担当者向け。2026-09-10)
+
+§1〜§9 は「ROS2 から見た契約」であり、この章は **その契約を現行ファーム
+`STM32_UDP2CAN_controller` の上にどう実装するか** を基板ごとに書いたもの。
+ファーム側も Claude Code で作業する前提なので、判断の根拠と「人間が決める値」を明示してある。
+現行ファームのコードは 2026-09-10 にリモートの各ブランチ (`ip_100_section` / `enndeffector_UDP`) を
+読んで確認した (ローカル `main` は 9/5 で止まっているので **必ず `git fetch` してブランチを読むこと**)。
+
+### 10.1 初版の範囲と共通の方針
+
+**初版でやること (両基板共通):**
+
+1. UDP 8888 番で 0x01 を受信し、§4.1 の検証 (version / type / length / seq) を通す
+2. `control_flags` bit0 (動作許可)・bit2 (初期位置要求) に従って目標を決める (§4.6)
+3. 自分の担当フィールドだけを各モータの角度へ変換し、**既存の CAN 送信経路**でモータへ送る
+4. 0x81 を **起動直後から 100Hz** で ROS2 側 PC へ返す (§3.4)。担当外のフィールドは 0 (§2.2)
+5. 50ms 指令が途絶えたら bit2 を立てる (§4.3)。目標を更新しないだけでホールドになる
+
+**初版でやらないこと (ユーザー決定 2026-09-10。「まず最低限動く」ことを優先):**
+
+| 項目 | 扱い |
+|---|---|
+| §4.2 の速度による補間 | **やらない。** 受信した位置をそのまま目標にする。段差は ODrive の `POS_FILTER` (r/z 基板)・wave motor 基板の自前の減速・C610 のカスケードループ (θ 基板) が均す。ROS2 側の `v_max`=0.1 m/s / `a_max`=0.2 m/s² なら 10ms あたりの段差は 1mm 未満 |
+| §4.4 のスルーレート制限 | **やらない。** 上と同じ理由。ただし §10.2 / §10.3 の可動域チェックは入れる (跳びは防げないが範囲外へは行かない) |
+| 0x02 (関節指令、パターンB) | 受信しても**黙って破棄** (bit4 も立てない) |
+| `pitch`/`yaw`/`*_rate` の連続値 | 無視 (§9)。姿勢は bit1 の 2 値だけ |
+| CRC | 入れない (§決定済み) |
+
+**「修正ではなく拡張」の方針 (ユーザー指示):** 現行ファームは CAN の送信順序・
+起動シーケンス・再送・診断がよく調整されているので、**既存の行は一切変更しない。**
+許される変更は次の 3 種類だけ。
+
+| 変更 | 内容 |
+|---|---|
+| ① 新規ファイルの追加 | `ros2_link.c/.h` (UDP 受信・0x81 送信・フラグ・ウォッチドッグ)、`ros2_protocol.h` (§3.6 の構造体をそのまま)、`user_config.h` (人間設定の定数)、r/z 基板のみ `arm_ik.c/.h` |
+| ② `main.c` への呼び出し行の追加 | `ROS2Link_Init(...)` を `HLControlUDP_Init` の直後に 1 行、`ROS2Link_Poll()` と `ROS2Link_Tick()` を `Delay_WithCANPoll()` のループ内と `while(1)` の末尾に各 1 行 (既存の `HLControlUDP_Poll()` の隣) |
+| ③ `hl_control_udp.c/.h` への**公開関数の追加** | 目標値を書き込む setter (下記)。**既存の static 変数・既存関数の中身は触らない** |
+
+③が必要な理由: `hl_control_udp.c` は各軸の目標を file-static 変数に持ち、
+`HLControlUDP_ResendTick()` が 300ms ごとにそれを再送する (ODrive ウォッチドッグ feed)。
+新モジュールが別経路で `Set_Input_Pos` を送ると、**300ms ごとに古い目標へ引き戻されて振動する**。
+目標は必ず同じ static 変数へ書く必要があり、そのための入口を追加する。
+5003 番のベンチプロトコルは残す (同じ変数に書くので**後から書いた方が勝つ**。
+ROS2 が動いている間にベンチ GUI から送ると競合するが、運用で避ける)。
+
+**W5500 ソケット:** 0〜3 は使用中 (Hello / ブリッジ 5001 / ハートビート 5002 / 高レベル制御 5003。
+θ 基板は 5004 も)。**ソケット 4 を 8888 番で開き** (`socket(4, Sn_MR_UDP, 8888, 0)` +
+`ctlsocket(CS_SET_IOMODE, SOCK_IO_NONBLOCK)`)、0x81 の送信も同じソケットから行う。
+受信バッファは既定 2KB (指令 60B なら約 30 パケット = 300ms 分) なので、**毎回の `Poll()` で
+`recvfrom` を空になるまで回し、最後のパケットだけ採用する** (5ms ごとの Poll に対し 100Hz なら
+1〜2 個溜まる)。フィードバック宛先は `ROS2_PC_IP` (人間設定。`main.c` の `dest_ip` と同じ
+192.168.1.2 を既定に) のポート 8889。
+
+**周期の作り方:** `Delay_WithCANPoll()` は約 5ms ごとに登録済みの Poll 群を回している。
+新モジュールはそこに乗るだけで、**タイマ割り込みは使わない** (既存構造を変えない)。
+`ROS2Link_Tick()` の中で `HAL_GetTick()` を見て、(a) 10ms ごとに 0x81 を 1 発送る、
+(b) CAN 送信を 1 tick に 1 軸だけ行う (r/z 基板。下記)、(c) 最終受信から 50ms 経過で bit2 を立てる。
+メインループ側の `Delay_WithCANPoll(1500)` の途中でハートビート組み立て等がブロックする区間は
+数 ms なので、100Hz のフィードバックに数 ms のジッタが乗るのは許容する。
+
+**人間が設定する定数の書き方 (`user_config.h`):**
+
+- 1 行ずつ `/* ★HUMAN: 〜 */` のコメントを付け、**単位を名前に含める** (`_DEG`, `_M`, `_MS`)
+- **寸法 (リンク長など未実測のもの) は `NAN` で初期化する。** `NAN` が残っている間、
+  ファームは IK を走らせず、0x01 を毎回 bit4 (破棄) で応答して現在位置をホールドする。
+  ただし bit2 (初期位置要求) は関節空間で完結するので **寸法が無くても動く**
+- 角度 [deg] の基準は **既存の 5003 番プロトコルと同じ** (`*_INITIAL_NATIVE_TURNS` からの
+  偏差を出力軸 deg で表したもの。ユーザー決定)。IK の関節角 [rad] との間は
+  `deg = SIGN × rad × 180/π + OFFSET_DEG` の 1 次式で結び、`SIGN` と `OFFSET_DEG` を人間が入れる
+- 初期位置 (bit2 と電源投入時の到達先) も deg で持つ (`*_INIT_DEG`)。既存の
+  `*_INITIAL_NATIVE_TURNS` は「deg=0 の基準点」として**そのまま残す** (意味を変えない)
+
+**フラグの共通処理:**
+
+| 受信 | 動作 |
+|---|---|
+| bit0 = 0 | 目標を**更新しない** (直前の目標のまま = ホールド)。CAN へは既存の再送だけが流れる |
+| bit0 = 1, bit2 = 0 | 担当フィールドを角度に変換して目標にする |
+| bit2 = 1 | `r/θ/z` を無視し、各軸の目標を `*_INIT_DEG` にする。全軸が許容差内に入ったら bit5 |
+| seq 逆転・length 不一致・可動域外・IK 不能 | 破棄して bit4 を 200ms 立てる。目標は変えない |
+
+### 10.2 r/z 基板 (192.168.1.100、`ip_100_section` ブランチ)
+
+**接続されているモータ (現物・ファームから確認済み):**
+
+| CAN node | 機種 | 対の規約 (既存 0x04/0x05 ハンドラ) | 既存の基準定数 |
+|---|---|---|---|
+| 0x06 (A) / 0x07 (B) | GIM6010-8 (ODrive CAN Simple、減速比 8、`POS_FILTER`) | **同符号。** 入力 deg を 0〜60 にクランプ → 符号反転 → `delta = deg/360×8`、A も B も `init + delta` | `GIM6010_A/B_INITIAL_NATIVE_TURNS` (-0.61 / -0.38) |
+| 0x04 (C) / 0x05 (D) | GIM8018-8 (同上) | **逆符号。** クランプ無し、`delta = deg/360×8`、C = `origin + delta`、D = `origin − delta`。origin は起動時マルチターン正規化で確定 | `GIM8018_C/D_INITIAL_NATIVE_TURNS` (0.2 / 0.2) |
+| 0x21 | TTL サーボ | 5003 番の open/close は残っているが、**グリッパは θ 基板の担当** (§10.3)。この基板の ROS2 モジュールは `gripper` を無視する | — |
+| ESC 1 / VESC 10 | C610 / VESC | 初期化・受信監視のみ。使わない | — |
+
+**担当:** `r` を肩の対に、`z` を肘/膝の対に割り当てる。**どちらの対 (GIM6010 か GIM8018) が肩かは
+未確認**なので、人間設定 `ARM_SHOULDER_PAIR` (`PAIR_GIM6010` / `PAIR_GIM8018`) で切り替える。
+`theta`・`gripper`・bit1・`pitch`/`yaw` は無視する (θ 基板の担当)。
+
+**IK (ROS2 側 `parallel_arm_kinematics.hpp` の C 移植。数式は同一にすること):**
+
+肩・肘/膝はどちらも「2 つの固定ピボットに付いたモータが対称に回る」同型の機構で、
+ピボット中点からエンドエフェクタまでの距離 `d` と関節角 `φ` の関係は
+
+```
+順運動学  d(φ) = L1·sin φ + sqrt( L2² − (a − L1·cos φ)² )        (根号内 < 0 なら到達不可)
+逆運動学  ρ = hypot(a, d)          (ρ > L1+L2 または ρ < |L1−L2| なら到達不可)
+          α = acos( (L1² + ρ² − L2²) / (2·L1·ρ) )
+          β = atan2(d, a)
+          候補 φ ∈ { β − α, β + α }
+          → 各候補を順運動学に入れて |d(φ) − d| < 1e-6 のものだけ残し、
+            直前の関節角に近い方を採る (両方残ることがある。単調でない曲線のため)
+```
+
+`a` = ピボット間距離の半分、`L1` = ピボット側リンク、`L2` = EE 側リンク。
+`φ` は「もう一方のピボットへ向かう向き」を 0、EE 側へ回るほど正 (ROS2 側と同じ定義)。
+**肩:** `d = r` (受信した `r` をそのまま。ターンテーブル軸のオフセットは ROS2 側が済ませている §5)。
+**肘/膝:** `d = z − knee_base_height_m`。
+到達不可なら bit4 を立てて目標を変えない。左右モータは常に同じ `φ` (対称駆動)。
+
+**人間が設定する定数 (`user_config.h`):**
+
+| 定数 | 単位 | 対応する ROS2 側の名前 (`robot_geometry.yaml`) | 初期値 |
+|---|---|---|---|
+| `SHOULDER_PIVOT_HALF_SEPARATION_M` | m | `kinematics.shoulder_pivot_half_separation_m` | `NAN` (要実測) |
+| `SHOULDER_PROXIMAL_LINK_LENGTH_M` | m | `kinematics.shoulder_proximal_link_length_m` | `NAN` |
+| `SHOULDER_DISTAL_LINK_LENGTH_M` | m | `kinematics.shoulder_distal_link_length_m` | `NAN` |
+| `KNEE_PIVOT_HALF_SEPARATION_M` | m | `kinematics.knee_pivot_half_separation_m` | `NAN` |
+| `KNEE_PROXIMAL_LINK_LENGTH_M` | m | `kinematics.knee_proximal_link_length_m` | `NAN` |
+| `KNEE_DISTAL_LINK_LENGTH_M` | m | `kinematics.knee_distal_link_length_m` | `NAN` |
+| `KNEE_BASE_HEIGHT_M` | m | `kinematics.knee_base_height_m` (肘/膝の d=0 に対応するベース座標 z) | `NAN` |
+| `ARM_SHOULDER_PAIR` | — | — (どちらの対が肩か) | 要確認 |
+| `GIM6010_DEG_PER_RAD_SIGN` / `GIM8018_DEG_PER_RAD_SIGN` | ±1 | — (IK の φ の正方向と 5003 deg の正方向が一致するか) | 要確認 |
+| `GIM6010_DEG_OFFSET` / `GIM8018_DEG_OFFSET` | deg | — (φ = 0 のときの 5003 deg) | 要実測 |
+| `GIM6010_INIT_DEG` / `GIM8018_INIT_DEG` | deg | — (電源投入時・bit2 の到達先) | 要決定 |
+| `GIM6010_MIN_DEG` / `MAX_DEG`、`GIM8018_MIN_DEG` / `MAX_DEG` | deg | — (bit4 の可動域。GIM6010 は既存クランプ 0〜60 の内側) | 要決定 |
+| `GIM6010_LEFT_NODE` / `GIM8018_LEFT_NODE` | node id | — (`joint_positions` の `*_left` にどちらを載せるか) | 要確認 |
+| `ARM_TRACKING_ERROR_DEG` | deg | — (bit0 の閾値) | 5 |
+| `ARM_INIT_TOLERANCE_DEG` | deg | — (bit5 の許容差) | 1 |
+| `ROS2_PC_IP` | — | — | 192,168,1,2 |
+
+測り方は `sharmech/docs/measurement_checklist.md`。ROS2 側の `robot_geometry.yaml` にも同じ値を
+入れる (パターン B とシミュレータ用。**値の正本は人間の実測で、両方に同じ数を書く**)。
+
+**CAN 送信 (既存経路の再利用):** `hl_control_udp.c` に次の公開関数を**追加**する
+(既存の 0x04/0x05 ハンドラの中身と同じ換算・同じ guard を使い、`s_*_target` / `s_*_armed` へ書く)。
+
+```c
+/* 0x04 ハンドラと同じ換算 (0〜60 クランプ → 符号反転 → init + deg/360*8) で目標を記憶するだけ。送信しない */
+void HLControlUDP_SetGim6010TargetDeg(float deg);
+/* 0x05 ハンドラと同じ換算 (C = origin + Δ, D = origin − Δ)。正規化未完了なら無視して 0 を返す */
+uint8_t HLControlUDP_SetGim8018TargetDeg(float deg);
+/* armed な軸のうち 1 軸だけ Set_Input_Pos を送る (呼ぶたびに node7→6→5→4 の順で進む)。
+ * MotorCanReady 前・正規化前は何もしない。送ったら 1 を返す */
+uint8_t HLControlUDP_FlushOneAxis(void);
+```
+
+`ROS2Link_Tick()` は 5ms ごとに `HLControlUDP_FlushOneAxis()` を 1 回呼ぶ。4 軸で 20ms、
+つまり**各軸 50Hz の更新**になる (100Hz の指令を 2 回に 1 回反映)。1 パケット受信ごとに 4 軸へ
+`HAL_Delay(5)` を挟んで送る既存ハンドラの形は**使わない** (15ms ブロックして 10ms 周期に収まらない)。
+既存の `ResendTick` (300ms) はそのまま動き、同じ変数を再送するので競合しない。
+既存の起動時 5ms 間隔・node7→6→5→4 の順序 (低優先度ノードの飢餓対策) を守ること。
+
+**起動シーケンス (§4.6):** 既存の `GIM_StartupBringUp()` / `GIM_StartupTick()` はそのまま。
+両 GIM6010 が CLOSED_LOOP かつ両 GIM8018 が正規化済みになったら、新モジュールが
+`*_INIT_DEG` を setter で書き、全軸が `ARM_INIT_TOLERANCE_DEG` 内に入った時点で bit3 を落とす。
+それまで (電源投入から 7〜10 秒程度) は bit3 を立てた 0x81 を送り続ける。
+
+**0x81 の中身:**
+
+| フィールド | 値 |
+|---|---|
+| `r`, `z` | 各対の実測角 → FK。実測角は `pos_estimate` (モータ軸 turns) から `deg = ±(pos − init_native)/8×360` (対の符号規約の逆算) → 1 次式の逆で rad。対の 2 軸は平均せず **左側 (`*_LEFT_NODE`) の値**を使う |
+| `theta`, `pitch`, `yaw`, `gripper_state` | 0 (θ 基板の担当) |
+| `joint_positions[0..4]` | `[shoulder_left, shoulder_right, 0, knee_left, knee_right]` (rad、φ の定義) |
+| bit0 | いずれかの軸で `|pos_estimate − 目標| > ARM_TRACKING_ERROR_DEG` |
+| bit1 | いずれかの軸で `axis_error != 0`、または heartbeat が 1 秒以上来ていない |
+| bit2 | 最終受信から 50ms 超 |
+| bit3 | 上記の起動シーケンス完了前 (`GIM6010_IsClosedLoop` × 2 と `GIM8018_IsStartupNormalized` × 2 と初期位置到達) |
+| bit4 | 直近 200ms 以内に破棄あり (seq 逆転・可動域外・IK 不能・寸法が `NAN`) |
+| bit5 | bit2 受信中かつ全軸が `*_INIT_DEG` の `ARM_INIT_TOLERANCE_DEG` 内 |
+
+`pos_estimate` は ODrive の周期送信 (`encoder_rate_ms`。GIM6010 は 10〜50ms、GIM8018 は 97ms に
+設定されている) で更新されるので、0x81 の値は最大 100ms 古い。初版では許容する
+(ROS2 側の同期は静止時に行われる)。
+
+**CAN バス負荷の注意:** GIM8018 の node5 は同一周期のノードに飢餓させられた実績がある
+(`tools/odrive_setup/ODRIVE_ABSOLUTE_ANGLE_NOTES.md` §8)。50Hz×4 軸の追加送信で
+`txQFail` / node5 の `hbAge` (ハートビート 5002 に出る) が悪化しないことを実機で確認する。
+悪化するなら `FlushOneAxis` の呼び出し間隔を 10ms に落とす (各軸 25Hz)。
+
+### 10.3 θ 基板 (192.168.1.101、`enndeffector_UDP` ブランチ)
+
+**接続されているモータ (現物・ファームから確認済み):**
+
+| CAN id | 機種 | 既存の駆動のしかた | ROS2 での役割 |
+|---|---|---|---|
+| ESC 3 (`C610_CURRENT_ESC_ID`) | DJI C610 + M2006、**AS5600 磁気エンコーダ (I2C) で角度フィードバック** | 5003 番 0x07: `target = norm360(C610_POS_ORIGIN_DEG + offset)` へカスケード位置制御 (位置 P → 速度 PI → 電流 ±0.8A、20Hz、速度上限 60°/s)。**電源投入直後は無効 (フリー)** で最初の 0x07 から制御開始 | **θ (ターンテーブル)** |
+| 0x11 / 0x12 | wave motor ×2 (受信専用基板、差動機構) | 5003 番 0x01/0x08/0x09: ピッチ = 2 台逆回転、ヨー = 同回転。`HLControlUDP_WaveTick()` が起動時に 0 を送って整定を待ち、以後は目標変更時にバースト再送 | **bit1 (縦にする)** |
+| 0x21 | TTL サーボ (受信専用) | 5003 番 0x02/0x03: open = −25°、close = +50°。ヨー軸に機械連動しているため `TtlYawFollowTick()` がヨー角へ追従 | **`gripper`** |
+
+**担当:** `theta`・`gripper`・bit1、それに bit0/bit2。`r`・`z`・`pitch`/`yaw` の連続値は無視する。
+
+**θ → ターンテーブル:** 受信 `theta` [rad] は ±π を超えた連続値で届く (§3.2)。
+
+```
+table_deg  = THETA_DEG_PER_RAD_SIGN × theta × 180/π           (出力軸のターンテーブル角、+X が 0)
+offset_deg = table_deg × TURNTABLE_ENC_DEG_PER_TABLE_DEG        (AS5600 が測っている軸の角度に換算)
+→ 既存の 0x07 ハンドラが呼んでいるのと同じ関数へ offset_deg を渡す
+   (target = norm360(C610_POS_ORIGIN_DEG + offset_deg)。C610_POS_ORIGIN_DEG が「θ=0 = +X」に対応する)
+```
+
+- 既存の位置ループは誤差を ±180 に折り返して最短経路で回すので、100Hz の小さな増分に対しては
+  ROS2 側のアンラップと同じ向きに連続して回る。**AS5600 は単回転 (0〜360°) なので、ターンテーブルの
+  可動域は 1 回転未満に限る。** `TURNTABLE_MIN_DEG` / `MAX_DEG` の外は bit4 で破棄する
+  (ケーブルの巻き込み防止。ROS2 側が ±π を超える値を送っても物理可動域で弾く)
+- 既存ループの性能 (20Hz、±0.8A、60°/s) は初版ではそのまま使う。追従が遅いなら
+  `c610_position.h` のゲインを人間が調整する (ROS2 側の要求は §4.4 の「v_max より速く」)
+
+**`gripper` → TTL サーボ:** `gripper = 1` で既存の close (+50°)、`0` で open (−25°)。
+値が**変化したときだけ**既存の open/close と同じ関数を呼ぶ (再送とヨー追従は既存の
+`TtlYawFollowTick()` が担当するので、100Hz で毎回呼ばない)。
+
+**bit1 → wave motor (ピッチ):** `pitch_deg = bit1 ? WRIST_PITCH_VERTICAL_DEG : WRIST_PITCH_HORIZONTAL_DEG`、
+`yaw_deg = WRIST_YAW_HOLD_DEG` (既定 0)。値が変化したときだけ既存の 0x09 (ピッチ+ヨー同時) と
+同じ関数を呼ぶ。実送信・ソフトスタート・バースト再送は既存の `WaveTick()` が担当する。
+
+`hl_control_udp.c` に追加する公開関数:
+
+```c
+void HLControlUDP_SetC610TargetOffsetDeg(float offset_deg);   /* 0x07 ハンドラと同じ */
+void HLControlUDP_SetGripperClosed(uint8_t closed);           /* 0x02/0x03 ハンドラと同じ */
+void HLControlUDP_SetWristPitchYawDeg(float pitch, float yaw); /* 0x09 ハンドラと同じ */
+float HLControlUDP_GetC610MeasDeg(void);                      /* AS5600 由来の meas_deg (0x81 用) */
+uint8_t HLControlUDP_IsC610FeedbackAlive(void);               /* AS5600 サンプルが途絶していないか */
+```
+
+**起動シーケンス (§4.6) —— 既存挙動への追加が 1 点ある:** 現状は最初の 0x07 が来るまで
+ターンテーブルはフリーだが、ROS2 の契約では**電源投入時に自力で初期位置へ行く**。
+新モジュールは、起動から 2 秒 (`C610_CURRENT_STARTUP_DELAY_MS`) 経過かつ AS5600 が有効
+(`ok=1`, `mag=1`) になったら `TURNTABLE_INIT_DEG` を setter で書いて制御を始める。
+**電源投入でターンテーブルが動く**ことになるので、人間はこれを承知の上で
+`TURNTABLE_INIT_DEG` を決めること (現在位置のまま動かさない運用にしたければ、起動時に
+`meas_deg` を読んでそれを INIT にする実装に切り替える定数 `TURNTABLE_INIT_AT_POWER_ON_POSE` を用意する)。
+wave motor は既存の `WaveTick()` が起動時にオフセット 0 を送る (= `WRIST_PITCH_HORIZONTAL_DEG` を 0 に
+しておけば「横倒し」が初期姿勢)。到達を確認する手段が無いので、`WRIST_INIT_SETTLE_MS` 経過で到達扱い。
+
+**人間が設定する定数 (`user_config.h`):**
+
+| 定数 | 単位 | 意味 | 初期値 |
+|---|---|---|---|
+| `THETA_DEG_PER_RAD_SIGN` | ±1 | θ の正方向 (+X → +Y) と AS5600 の増加方向が一致するか | 要確認 |
+| `TURNTABLE_ENC_DEG_PER_TABLE_DEG` | — | AS5600 が測っている軸 1° あたりのターンテーブル角。出力軸直付なら 1.0 | 要確認 |
+| `C610_POS_ORIGIN_DEG` (既存、`main.c`) | deg | θ = 0 (+X) のときの `meas_deg`。既存の意味のまま | 要実測 |
+| `TURNTABLE_INIT_DEG` | deg | 電源投入時・bit2 の到達先 (ターンテーブル角) | 要決定 |
+| `TURNTABLE_INIT_AT_POWER_ON_POSE` | 0/1 | 1 なら電源投入時の現在角を INIT にする | 0 |
+| `TURNTABLE_MIN_DEG` / `MAX_DEG` | deg | bit4 の可動域 (1 回転未満) | 要決定 |
+| `TURNTABLE_TRACKING_ERROR_DEG` | deg | bit0 の閾値 | 5 |
+| `TURNTABLE_INIT_TOLERANCE_DEG` | deg | bit5 の許容差 | 1 |
+| `WRIST_PITCH_VERTICAL_DEG` / `WRIST_PITCH_HORIZONTAL_DEG` | deg | bit1 = 1 / 0 のピッチ (5003 番 0x01 と同じ定義) | 要実測 / 0 |
+| `WRIST_YAW_HOLD_DEG` | deg | ヨーの固定値 | 0 |
+| `WRIST_INIT_SETTLE_MS` | ms | wave/TTL の「到達」とみなす待ち時間 | 1500 |
+| `ROS2_PC_IP` | — | フィードバック宛先 | 192,168,1,2 |
+
+**0x81 の中身:**
+
+| フィールド | 値 |
+|---|---|
+| `theta` | `(meas_deg − C610_POS_ORIGIN_DEG) / TURNTABLE_ENC_DEG_PER_TABLE_DEG × π/180 × THETA_DEG_PER_RAD_SIGN`。±π に折り返してよい (§3.4) |
+| `joint_positions[2]` | `theta` と同じ値。他の 4 つは 0 |
+| `pitch` | bit1 の現在状態のエコー: 縦なら π/2、横なら 0 (実測できないため) |
+| `yaw` | 0 |
+| `gripper_state` | 最後に受け取った `gripper` のエコー (TTL サーボは応答を返さない。§9) |
+| `r`, `z` | 0 (r/z 基板の担当) |
+| bit0 | `|meas_deg − target| > TURNTABLE_TRACKING_ERROR_DEG` |
+| bit1 | AS5600 の磁石未検出 (`mag=0`) または AS5600 サンプル途絶 (`C610Position_Failsafe` が電流を 0 にした状態) |
+| bit2 | 最終受信から 50ms 超 |
+| bit3 | 起動 2 秒前、AS5600 無効、または初期位置未到達 |
+| bit4 | 直近 200ms 以内に破棄あり (seq 逆転・可動域外) |
+| bit5 | bit2 受信中かつ `|meas_deg − INIT| < TURNTABLE_INIT_TOLERANCE_DEG` かつ `WRIST_INIT_SETTLE_MS` 経過 |
+
+**CAN バスの注意:** C610 の 1kHz フィードバックで wave motor 基板の受信が飽和する問題は
+既存のバースト再送で対処済み。新モジュールは wave/TTL への送信を「変化時のみ」にして
+バス負荷を増やさない。
+
+### 10.4 試験手順 (基板ごと)
+
+1. **回帰:** 5003 番のベンチ GUI (`tools/can_id_scanner/can_id_scanner.py`) が従来どおり動くこと
+   (新モジュールが何も受信していない状態で既存挙動が変わっていないことの確認)
+2. **自発送信:** 電源投入直後から Wireshark (`udp.port == 8889`) に 0x81 が 100Hz で流れ、
+   bit3 が立った状態から起動シーケンス完了で 0 になること。担当外フィールドが 0 であること
+3. **ROS2 接続:** ROS2 側 PC で `ros2 launch sharmech_bringup sharmech.launch.xml field_color:=red`
+   (config.yaml の `mcu_ip` / `mcu_theta_ip` が両基板)。`ros2 topic echo /catchrobo/arm/mcu_status` で
+   `connected: true`、`status_flags: 0` になること。**片方の基板だけでも `mcu_status` は出るが
+   `/catchrobo/arm/current_pose` は両方揃うまで出ない** (ROS2 側の仕様。§2.2)
+4. **初期位置:** `ros2 topic pub --once /catchrobo/game/reset std_msgs/msg/Empty '{}'` で bit2 が届き、
+   両基板が `*_INIT_DEG` へ行って bit5 を返し、`/catchrobo/game/state` が `WAITING_FOR_PICK` に戻ること
+5. **追従:** `ros2 topic pub --once /catchrobo/arm/target_pose geometry_msgs/msg/PoseStamped ...` で
+   初期位置から数 cm 離れた目標を与え、r/z 基板 (r, z) と θ 基板 (θ) がそれぞれ動くこと
+6. **途絶:** ROS2 を止めて 50ms 後に bit2 (ウォッチドッグ) が立ち、位置を保持すること。再開で bit2 が落ちること
+7. **バス監視:** ハートビート 5002 の `txQFail` / `canBusOff` / node5 の `hbAge` が悪化しないこと
+
+答え合わせ用の参照実装は ROS2 側の `sharmech_core/scripts/mock_mcu.py` (`--board arm` /
+`--board theta` が各基板の 0x81 の埋め方を再現している。§7.1)。

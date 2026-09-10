@@ -1,4 +1,5 @@
 #include "sharmech_core/hardware_bridge_node.hpp"
+#include "sharmech_core/utility/feedback_merge.hpp"
 #include "sharmech_core/utility/orientation_utils.hpp"
 #include "sharmech_core/utility/polar_utils.hpp"
 #include "sharmech_core/utility/udp_protocol.hpp"
@@ -27,6 +28,10 @@ HardwareBridgeNode::HardwareBridgeNode(const rclcpp::NodeOptions & options)
   command_mode_ = declare_parameter("command_mode", std::string("cartesian"));
   mcu_ip_ = declare_parameter("mcu_ip", std::string("192.168.1.50"));
   mcu_port_ = declare_parameter("mcu_port", 8888);
+  // θ 基板 (ターンテーブル + エンドエフェクタ)。空なら 1 枚構成 (mcu_ip が全部返す)
+  mcu_theta_ip_ = declare_parameter("mcu_theta_ip", std::string(""));
+  mcu_theta_port_ = declare_parameter("mcu_theta_port", -1);
+  if (mcu_theta_port_ < 0) {mcu_theta_port_ = mcu_port_;}
   local_port_ = declare_parameter("local_port", 8889);
   feedback_poll_rate_ = declare_parameter("feedback_poll_rate", 200.0);
   feedback_timeout_ = declare_parameter("feedback_timeout", 0.5);
@@ -91,10 +96,18 @@ HardwareBridgeNode::HardwareBridgeNode(const rclcpp::NodeOptions & options)
     std::chrono::duration_cast<std::chrono::nanoseconds>(poll_period),
     std::bind(&HardwareBridgeNode::onFeedbackTimer, this));
 
-  RCLCPP_INFO(
-    get_logger(),
-    "hardware_bridge_node started (mode=%s) → udp %s:%d (recv :%d)",
-    command_mode_.c_str(), mcu_ip_.c_str(), mcu_port_, local_port_);
+  if (boards_.size() >= 2) {
+    RCLCPP_INFO(
+      get_logger(),
+      "hardware_bridge_node started (mode=%s) → udp r/z %s:%d + theta %s:%d (recv :%d)",
+      command_mode_.c_str(), mcu_ip_.c_str(), mcu_port_,
+      mcu_theta_ip_.c_str(), mcu_theta_port_, local_port_);
+  } else {
+    RCLCPP_INFO(
+      get_logger(),
+      "hardware_bridge_node started (mode=%s) → udp %s:%d (recv :%d, single board)",
+      command_mode_.c_str(), mcu_ip_.c_str(), mcu_port_, local_port_);
+  }
 }
 
 HardwareBridgeNode::~HardwareBridgeNode()
@@ -129,16 +142,83 @@ bool HardwareBridgeNode::openUdpSocket()
     return false;
   }
 
-  std::memset(&mcu_addr_, 0, sizeof(mcu_addr_));
-  mcu_addr_.sin_family = AF_INET;
-  mcu_addr_.sin_port = htons(static_cast<uint16_t>(mcu_port_));
-  if (::inet_pton(AF_INET, mcu_ip_.c_str(), &mcu_addr_.sin_addr) != 1) {
-    RCLCPP_ERROR(get_logger(), "Invalid mcu_ip parameter: %s", mcu_ip_.c_str());
+  // 宛先 = 基板の一覧。[0] r/z 基板は必須、[1] θ 基板は mcu_theta_ip が空なら無し
+  boards_.clear();
+  const auto add_board = [this](const std::string & name, const std::string & ip, int port) {
+      McuBoard board;
+      board.name = name;
+      board.ip = ip;
+      board.port = port;
+      std::memset(&board.addr, 0, sizeof(board.addr));
+      board.addr.sin_family = AF_INET;
+      board.addr.sin_port = htons(static_cast<uint16_t>(port));
+      if (::inet_pton(AF_INET, ip.c_str(), &board.addr.sin_addr) != 1) {
+        RCLCPP_ERROR(
+          get_logger(), "Invalid IP for %s board: '%s'", name.c_str(), ip.c_str());
+        return false;
+      }
+      boards_.push_back(board);
+      return true;
+    };
+  bool ok = add_board("r/z", mcu_ip_, mcu_port_);
+  if (ok && !mcu_theta_ip_.empty()) {
+    ok = add_board("theta", mcu_theta_ip_, mcu_theta_port_);
+    if (ok && boards_[0].addr.sin_addr.s_addr == boards_[1].addr.sin_addr.s_addr &&
+      boards_[0].port == boards_[1].port)
+    {
+      // 送信元で見分けられない (mock を 2 つ立てるときはポートを変えること)
+      RCLCPP_ERROR(
+        get_logger(), "mcu_ip and mcu_theta_ip resolve to the same %s:%d; "
+        "feedback cannot be attributed to a board", mcu_ip_.c_str(), mcu_port_);
+      ok = false;
+    }
+  }
+  if (!ok) {
     ::close(sockfd_);
     sockfd_ = -1;
+    boards_.clear();
     return false;
   }
   return true;
+}
+
+void HardwareBridgeNode::sendToAllBoards(const std::vector<uint8_t> & packet)
+{
+  for (const auto & board : boards_) {
+    const auto sent = ::sendto(
+      sockfd_, packet.data(), packet.size(), 0,
+      reinterpret_cast<const sockaddr *>(&board.addr), sizeof(board.addr));
+    if (sent < 0) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "UDP send to %s board (%s:%d) failed: %s",
+        board.name.c_str(), board.ip.c_str(), board.port, std::strerror(errno));
+    }
+  }
+}
+
+HardwareBridgeNode::McuBoard * HardwareBridgeNode::findBoard(const sockaddr_in & from)
+{
+  // IP で照合する。同じ IP の基板が複数ある (localhost の mock を 2 つ) ときだけ
+  // 送信元ポートでも区別する。実機は送信元ポートを契約に含めていないので、
+  // IP が一意なら port は見ない
+  McuBoard * ip_match = nullptr;
+  int ip_match_count = 0;
+  for (auto & board : boards_) {
+    if (board.addr.sin_addr.s_addr == from.sin_addr.s_addr) {
+      ip_match = &board;
+      ++ip_match_count;
+    }
+  }
+  if (ip_match_count <= 1) {return ip_match;}
+  for (auto & board : boards_) {
+    if (board.addr.sin_addr.s_addr == from.sin_addr.s_addr &&
+      board.addr.sin_port == from.sin_port)
+    {
+      return &board;
+    }
+  }
+  return nullptr;
 }
 
 void HardwareBridgeNode::onCartesianCommand(
@@ -180,15 +260,8 @@ void HardwareBridgeNode::onCartesianCommand(
     static_cast<float>(msg->twist.angular.z),   // yaw_rate
     gripper_state_, controlFlags(), send_seq_++, timestamp_us);
   has_sent_command_ = true;
-
-  const auto sent = ::sendto(
-    sockfd_, packet.data(), packet.size(), 0,
-    reinterpret_cast<const sockaddr *>(&mcu_addr_), sizeof(mcu_addr_));
-  if (sent < 0) {
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 5000,
-      "UDP send failed: %s", std::strerror(errno));
-  }
+  // 同じパケットを全基板へ送る。各基板は自分の担当フィールドだけ使う
+  sendToAllBoards(packet);
 }
 
 void HardwareBridgeNode::onJointCommand(const sensor_msgs::msg::JointState::SharedPtr msg)
@@ -235,15 +308,7 @@ void HardwareBridgeNode::onJointCommand(const sensor_msgs::msg::JointState::Shar
   const auto packet = UdpProtocol::encodeJoint(
     q, qdot, gripper_state_, controlFlags(), send_seq_++, timestamp_us);
   has_sent_command_ = true;
-
-  const auto sent = ::sendto(
-    sockfd_, packet.data(), packet.size(), 0,
-    reinterpret_cast<const sockaddr *>(&mcu_addr_), sizeof(mcu_addr_));
-  if (sent < 0) {
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 5000,
-      "UDP send failed: %s", std::strerror(errno));
-  }
+  sendToAllBoards(packet);
 }
 
 void HardwareBridgeNode::onGripperCommand(const std_msgs::msg::Bool::SharedPtr msg)
@@ -311,12 +376,17 @@ void HardwareBridgeNode::onFeedbackTimer()
 {
   if (sockfd_ < 0) {return;}
 
-  // ソケットに溜まっているデータグラムをすべて読み切り、最新のみ採用する
-  std::optional<udp_protocol::Feedback> latest;
+  // ソケットに溜まっているデータグラムをすべて読み切り、送信元の基板ごとに
+  // 最新のみ採用する
+  bool updated = false;
   uint8_t buffer[512];
+  const auto t_now = now();
   while (true) {
-    const auto received =
-      ::recvfrom(sockfd_, buffer, sizeof(buffer), MSG_DONTWAIT, nullptr, nullptr);
+    sockaddr_in from{};
+    socklen_t from_len = sizeof(from);
+    const auto received = ::recvfrom(
+      sockfd_, buffer, sizeof(buffer), MSG_DONTWAIT,
+      reinterpret_cast<sockaddr *>(&from), &from_len);
     if (received < 0) {break;}  // EAGAIN: 読み切った
 
     auto fb = UdpProtocol::decodeFeedback(buffer, static_cast<size_t>(received));
@@ -326,74 +396,91 @@ void HardwareBridgeNode::onFeedbackTimer()
         "Invalid feedback packet discarded (%zd bytes)", received);
       continue;
     }
-    // UDP は順序を保証しない。古い seq のパケットは破棄する
-    if (last_recv_seq_ && fb->seq <= *last_recv_seq_) {
-      ++out_of_order_count_;
+    McuBoard * board = findBoard(from);
+    if (board == nullptr) {
+      char ip_text[INET_ADDRSTRLEN] = {};
+      ::inet_ntop(AF_INET, &from.sin_addr, ip_text, sizeof(ip_text));
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "Feedback from unknown source %s:%u discarded (not mcu_ip / mcu_theta_ip)",
+        ip_text, static_cast<unsigned>(ntohs(from.sin_port)));
       continue;
     }
-    last_recv_seq_ = fb->seq;
-    latest = std::move(fb);
+    // feedback_timeout を超えて途絶した後の再開は基板の再起動とみなし、seq の基準を
+    // 捨てる。MCU は再起動すると seq を 0 から振り直すので、前回の最大値を覚えたままだと
+    // 追いつくまで (長時間運転後なら数十秒〜) 全パケットを順序逆転として捨ててしまう
+    if (board->last_seq && board->last_time &&
+      (t_now - *board->last_time).seconds() > feedback_timeout_)
+    {
+      RCLCPP_INFO(
+        get_logger(), "Feedback from %s board resumed after %.1f s (seq %u → %u); "
+        "treating as MCU restart",
+        board->name.c_str(), (t_now - *board->last_time).seconds(),
+        *board->last_seq, fb->seq);
+      board->last_seq.reset();
+    }
+    // UDP は順序を保証しない。古い seq のパケットは破棄する (連番は基板ごと)
+    if (board->last_seq && fb->seq <= *board->last_seq) {
+      ++board->out_of_order;
+      continue;
+    }
+    board->last_seq = fb->seq;
+    board->latest = std::move(fb);
+    board->last_time = t_now;
+    updated = true;
   }
 
-  if (latest) {
-    last_feedback_time_ = now();
-
-    // ROS2 がまだ駆動していない間は、θ のアンラップ基準を MCU の実 θ に合わせておく
-    // (ヘッダの last_sent_theta_ のコメント参照)。駆動中は送信値が基準
-    if (!has_sent_command_ || !enable_state_ || init_request_state_) {
-      last_sent_theta_ = latest->theta;
-    }
-
-    geometry_msgs::msg::PoseStamped pose_msg;
-    pose_msg.header.stamp = *last_feedback_time_;
-    pose_msg.header.frame_id = "field";
-    // フィードバックも極座標で届く (0x81)。/catchrobo/arm/current_pose は
-    // VR・シミュレータとの契約で base 座標系の直交座標なのでここで戻す
-    // (送信時と同じターンテーブル軸オフセットを足す)
-    pose_msg.pose.position.x = PolarUtils::toX(latest->r, latest->theta, turntable_axis_x_);
-    pose_msg.pose.position.y = PolarUtils::toY(latest->r, latest->theta, turntable_axis_y_);
-    pose_msg.pose.position.z = latest->z;
-    tf2::Quaternion q;
-    q.setRPY(0.0, latest->pitch, latest->yaw);
-    pose_msg.pose.orientation = tf2::toMsg(q);
-    current_pose_pub_->publish(pose_msg);
-
-    sensor_msgs::msg::JointState js;
-    js.header.stamp = *last_feedback_time_;
-    const size_t n = latest->joint_positions.size();
-    if (joint_names_.size() == n) {
-      js.name = joint_names_;
-    } else {
-      if (!warned_joint_names_) {
-        RCLCPP_WARN(
-          get_logger(),
-          "joint_names size (%zu) != feedback joint_count (%zu); using joint_i",
-          joint_names_.size(), n);
-        warned_joint_names_ = true;
+  if (updated) {
+    // 全基板が一度以上届いていて、かつ全部が feedback_timeout 以内に更新されている
+    // ときだけ合成して publish する。片方しか無い姿勢を流すと motion_generator_node が
+    // 半端な姿勢に同期してしまう (「フィードバックが無いときにエコーしない」と同じ理由)
+    const McuBoard * missing = nullptr;
+    const McuBoard * stale = nullptr;
+    double max_silence = 0.0;
+    for (const auto & board : boards_) {
+      if (!board.latest) {
+        missing = &board;
+        break;
       }
-      for (size_t i = 0; i < n; ++i) {
-        js.name.push_back("joint_" + std::to_string(i));
-      }
+      const double silence = (t_now - *board.last_time).seconds();
+      max_silence = std::max(max_silence, silence);
+      if (silence > feedback_timeout_) {stale = &board;}
     }
-    js.position.assign(
-      latest->joint_positions.begin(), latest->joint_positions.end());
-    joint_states_pub_->publish(js);
-
-    if (latest->status_flags != 0) {
+    if (missing != nullptr) {
       RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 2000,
-        "MCU status_flags = 0x%04x", latest->status_flags);
+        get_logger(), *get_clock(), 5000,
+        "Waiting for feedback from %s board (%s:%d); /catchrobo/arm/current_pose is "
+        "withheld until every board reports",
+        missing->name.c_str(), missing->ip.c_str(), missing->port);
+      return;
     }
 
+    udp_protocol::Feedback merged =
+      boards_.size() >= 2 ?
+      FeedbackMerge::merge(*boards_[0].latest, *boards_[1].latest) :
+      *boards_[0].latest;
     // ログに出すだけでは可視化クライアントから見えないので、トピックにも出す
-    last_status_flags_ = latest->status_flags;
-    last_gripper_state_ = latest->gripper_closed;
-    last_seq_echo_ = latest->seq_echo;
+    last_status_flags_ = merged.status_flags;
+    last_gripper_state_ = merged.gripper_closed;
+    last_seq_ = merged.seq;
+    last_seq_echo_ = merged.seq_echo;
+
+    if (stale != nullptr) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "No feedback from %s board for %.1f s; /catchrobo/arm/current_pose withheld",
+        stale->name.c_str(), (t_now - *stale->last_time).seconds());
+      publishMcuStatus(false, max_silence);
+      return;
+    }
+
+    last_feedback_time_ = t_now;
+    publishFeedback(merged, t_now);
     publishMcuStatus(true, 0.0);
   } else if (last_feedback_time_) {
-    // 一度でも届いたことがあるのに途絶した場合のみ警告する。
+    // 一度でも揃って届いたことがあるのに途絶した場合のみ警告する。
     // MCU 側が未実装のうちからログを埋めないため
-    const auto silence = (now() - *last_feedback_time_).seconds();
+    const auto silence = (t_now - *last_feedback_time_).seconds();
     if (silence > feedback_timeout_) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 5000,
@@ -403,9 +490,61 @@ void HardwareBridgeNode::onFeedbackTimer()
   }
 }
 
+void HardwareBridgeNode::publishFeedback(
+  const udp_protocol::Feedback & fb, const rclcpp::Time & stamp)
+{
+  // ROS2 がまだ駆動していない間は、θ のアンラップ基準を MCU の実 θ に合わせておく
+  // (ヘッダの last_sent_theta_ のコメント参照)。駆動中は送信値が基準
+  if (!has_sent_command_ || !enable_state_ || init_request_state_) {
+    last_sent_theta_ = fb.theta;
+  }
+
+  geometry_msgs::msg::PoseStamped pose_msg;
+  pose_msg.header.stamp = stamp;
+  pose_msg.header.frame_id = "field";
+  // フィードバックも極座標で届く (0x81)。/catchrobo/arm/current_pose は
+  // VR・シミュレータとの契約で base 座標系の直交座標なのでここで戻す
+  // (送信時と同じターンテーブル軸オフセットを足す)
+  pose_msg.pose.position.x = PolarUtils::toX(fb.r, fb.theta, turntable_axis_x_);
+  pose_msg.pose.position.y = PolarUtils::toY(fb.r, fb.theta, turntable_axis_y_);
+  pose_msg.pose.position.z = fb.z;
+  tf2::Quaternion q;
+  q.setRPY(0.0, fb.pitch, fb.yaw);
+  pose_msg.pose.orientation = tf2::toMsg(q);
+  current_pose_pub_->publish(pose_msg);
+
+  sensor_msgs::msg::JointState js;
+  js.header.stamp = stamp;
+  const size_t n = fb.joint_positions.size();
+  if (joint_names_.size() == n) {
+    js.name = joint_names_;
+  } else {
+    if (!warned_joint_names_) {
+      RCLCPP_WARN(
+        get_logger(),
+        "joint_names size (%zu) != feedback joint_count (%zu); using joint_i",
+        joint_names_.size(), n);
+      warned_joint_names_ = true;
+    }
+    for (size_t i = 0; i < n; ++i) {
+      js.name.push_back("joint_" + std::to_string(i));
+    }
+  }
+  js.position.assign(fb.joint_positions.begin(), fb.joint_positions.end());
+  joint_states_pub_->publish(js);
+
+  if (fb.status_flags != 0) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "MCU status_flags = 0x%04x", fb.status_flags);
+  }
+}
+
 // MCU の状態を可視化クライアントへ伝える。
 // connected=false のときは status_flags の内容は「最後に受け取った値」であり
-// 現在値ではない点に注意 (silence_sec を見て判断すること)
+// 現在値ではない点に注意 (silence_sec を見て判断すること)。
+// 2 枚構成では connected = 全基板が feedback_timeout 以内、seq は r/z 基板の連番、
+// out_of_order_count は全基板の合計
 void HardwareBridgeNode::publishMcuStatus(bool connected, double silence_sec)
 {
   sharmech_msgs::msg::McuStatus msg;
@@ -414,10 +553,14 @@ void HardwareBridgeNode::publishMcuStatus(bool connected, double silence_sec)
   msg.connected = connected;
   msg.status_flags = last_status_flags_;
   msg.gripper_closed = last_gripper_state_;
-  msg.seq = last_recv_seq_.value_or(0);
+  msg.seq = last_seq_;
   msg.seq_echo = last_seq_echo_;
   msg.silence_sec = silence_sec;
-  msg.out_of_order_count = out_of_order_count_;
+  uint32_t out_of_order = 0;
+  for (const auto & board : boards_) {
+    out_of_order += board.out_of_order;
+  }
+  msg.out_of_order_count = out_of_order;
   mcu_status_pub_->publish(msg);
 }
 
