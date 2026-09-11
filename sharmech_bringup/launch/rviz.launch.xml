@@ -4,8 +4,9 @@
          ros2 launch sharmech_bringup rviz.launch.xml
        表示内容は sharmech_description/rviz/sharmech.rviz のコメントと docs/match_runbook.md §8。
        現在位置 (/catchrobo/arm/current_pose)・ストリーム目標 (/catchrobo/debug/command_pose)・
-       ゴール (/catchrobo/arm/target_pose)・ワーク検出 (/catchrobo/field/cylinders)・
-       VR の共有映像 (/catchrobo/vr/spectator/image/compressed)。Fixed Frame は field (TF 不要)。
+       ゴール (/catchrobo/arm/target_pose)・ワーク検出 (/catchrobo/field/cylinders)。
+       Fixed Frame は field (TF 不要)。VR の共有映像 (/catchrobo/vr/spectator/image/compressed) の
+       Image 表示は 2026-09-11 に帯域節約で無効化 (sharmech.rviz 内にコメントで残置)。
        config は -d で渡す (ROS パラメータでは読まれない) -->
   <arg name="config" default="$(find-pkg-share sharmech_description)/rviz/sharmech.rviz"/>
   <node pkg="rviz2" exec="rviz2" name="rviz2" output="screen" args="-d $(var config)"/>

@@ -148,7 +148,7 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 | `/catchrobo/debug/change_state` | `std_msgs/String` | デバッグ用 → `game_state_manager_node`。ステートを強制遷移させる (その状態の目標姿勢は配信しない) | ○ |
 | `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `motion_generator_node` → 下流。位置 + 速度 + `enable` (動作許可 bit0。起動時の同期完了まで false。**この立ち上がりが `game_state_manager_node` の `INIT` の動き出しの合図も兼ねる**) | |
 | `/catchrobo/debug/command_pose` | `geometry_msgs/PoseStamped` | `motion_generator_node` → RViz。上の pose だけを写した可視化専用 (制御には使わない) | |
-| `/catchrobo/vr/spectator/image/compressed` | `sensor_msgs/CompressedImage` | WebXR → RViz / rqt_image_view。ヘッドセット内の一人称映像 (JPEG)。ROS2 ノードは購読しない | ○ |
+| `/catchrobo/vr/spectator/image/compressed` | `sensor_msgs/CompressedImage` | WebXR → RViz / rqt_image_view。ヘッドセット内の一人称映像 (JPEG)。ROS2 ノードは購読しない。**2026-09-11 帯域節約のため WebXR 側送信・RViz 側表示ともコメントアウトで無効化** (契約は残す) | ○ |
 | `/catchrobo/command/joint` | `sensor_msgs/JointState` (`name`=5モータ個別名) | `kinematics_node` → `hardware_bridge_node` (`command_mode: "joint"`、packet_type=0x02。2026-09-01 接続済み。`pattern_b:=true` 時のみ流れる) | |
 | `/catchrobo/command/gripper` | `std_msgs/Bool` | `motion_generator_node` → `hardware_bridge_node` | |
 | `/catchrobo/command/orient_vertical` | `std_msgs/Bool` | `motion_generator_node` → `hardware_bridge_node` | |
