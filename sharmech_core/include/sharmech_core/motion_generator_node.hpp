@@ -96,6 +96,9 @@ private:
   rclcpp::Subscription<sharmech_msgs::msg::WorkspaceClamp>::SharedPtr workspace_clamp_sub_;
   rclcpp::Subscription<sharmech_msgs::msg::JogLimit>::SharedPtr jog_limit_sub_;
   rclcpp::Publisher<sharmech_msgs::msg::CartesianCommand>::SharedPtr cartesian_pub_;
+  // 可視化用。/catchrobo/command/cartesian の pose だけを PoseStamped で写す
+  // (RViz は独自型の CartesianCommand を表示できないため)。制御には使わない
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr command_pose_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr orient_vertical_pub_;
   rclcpp::Publisher<sharmech_msgs::msg::MotionStatus>::SharedPtr status_pub_;

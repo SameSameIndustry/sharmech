@@ -56,6 +56,7 @@
 | `/catchrobo/command/gripper` | `std_msgs/Bool` | 調停後のグリッパ指令 |
 | `/catchrobo/command/orient_vertical` | `std_msgs/Bool` | 調停後の「縦にする」指令。`hardware_bridge_node` が UDP の `control_flags` bit1 に詰める |
 | `/catchrobo/arm/status` | `sharmech_msgs/MotionStatus` | 現在のモードと進捗。**latched (transient_local)**、10Hz 程度 |
+| `/catchrobo/debug/command_pose` | `geometry_msgs/PoseStamped` | `command/cartesian` の pose だけを写した **RViz 用** (独自型は RViz で表示できないため)。制御には使わない。`sharmech_description/rviz/sharmech.rviz` で橙の矢印 |
 
 **Action Server も Service も持たない。** ゴールは `/catchrobo/arm/target_pose`、
 キャンセルは `/catchrobo/arm/cancel`、状態の通知は `/catchrobo/arm/status` で行う。

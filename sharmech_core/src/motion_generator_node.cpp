@@ -142,6 +142,8 @@ MotionGeneratorNode::MotionGeneratorNode(const rclcpp::NodeOptions & options)
 
   cartesian_pub_ = create_publisher<sharmech_msgs::msg::CartesianCommand>(
     "/catchrobo/command/cartesian", 10);
+  command_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
+    "/catchrobo/debug/command_pose", 10);
   gripper_pub_ = create_publisher<std_msgs::msg::Bool>(
     "/catchrobo/command/gripper", 10);
   orient_vertical_pub_ = create_publisher<std_msgs::msg::Bool>(
@@ -667,6 +669,12 @@ void MotionGeneratorNode::onControlTimer()
   cmd.enable = synced_with_feedback_ || mode_ == Mode::kInit;
   cmd.init_request = (mode_ == Mode::kInit);
   cartesian_pub_->publish(cmd);
+
+  // RViz 用 (sharmech_description/rviz/sharmech.rviz)。今この瞬間の目標姿勢
+  geometry_msgs::msg::PoseStamped command_pose;
+  command_pose.header = cmd.header;
+  command_pose.pose = cmd.pose;
+  command_pose_pub_->publish(command_pose);
 
   std_msgs::msg::Bool gripper_msg;
   gripper_msg.data = gripper_state_;

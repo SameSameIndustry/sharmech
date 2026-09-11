@@ -130,7 +130,7 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 | `/catchrobo/arm/cmd_twist` | `geometry_msgs/Twist` | 操縦層 → `motion_generator_node` | ○ |
 | `/catchrobo/arm/gripper` | `std_msgs/Bool` | 操縦層 / `game_state_manager_node` → `motion_generator_node` | ○ |
 | `/catchrobo/arm/orient_vertical` | `std_msgs/Bool` | `game_state_manager_node` → `motion_generator_node`。PLACING中のみtrue | |
-| `/catchrobo/arm/current_pose` | `geometry_msgs/PoseStamped` | `hardware_bridge_node` → 各ノード / WebXR | ○ |
+| `/catchrobo/arm/current_pose` | `geometry_msgs/PoseStamped` | `hardware_bridge_node` → 各ノード / WebXR / RViz | ○ |
 | `/catchrobo/arm/mcu_status` | `sharmech_msgs/McuStatus` | `hardware_bridge_node` → 観測者 (疎通状態・`status_flags`・`seq`/`seq_echo`・連番逆転回数)。**latched** | ○ |
 | `/catchrobo/arm/cancel` | `std_msgs/Empty` | 操縦層 → `motion_generator_node` (初期位置要求の取り下げも兼ねる) | ○ |
 | `/catchrobo/arm/init_request` | `std_msgs/Empty` | `game_state_manager_node` → `motion_generator_node`。初期位置要求 (`/catchrobo/game/reset` の実体)。座標は持たず、UDP `control_flags` bit2 で MCU 側の初期関節角へ戻す | |
@@ -147,6 +147,8 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 | `/catchrobo/game/jog_limit` | `sharmech_msgs/JogLimit` | `game_state_manager_node` → `motion_generator_node`。場面ごとのジョグ速度上限 (微調整中は減速、自動シーケンス中は遮断)。2026-09-10 追加 | |
 | `/catchrobo/debug/change_state` | `std_msgs/String` | デバッグ用 → `game_state_manager_node`。ステートを強制遷移させる (その状態の目標姿勢は配信しない) | ○ |
 | `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `motion_generator_node` → 下流。位置 + 速度 + `enable` (動作許可 bit0。起動時の同期完了まで false) + `init_request` (初期位置要求 bit2) | |
+| `/catchrobo/debug/command_pose` | `geometry_msgs/PoseStamped` | `motion_generator_node` → RViz。上の pose だけを写した可視化専用 (制御には使わない) | |
+| `/catchrobo/vr/spectator/image/compressed` | `sensor_msgs/CompressedImage` | WebXR → RViz / rqt_image_view。ヘッドセット内の一人称映像 (JPEG)。ROS2 ノードは購読しない | ○ |
 | `/catchrobo/command/joint` | `sensor_msgs/JointState` (`name`=5モータ個別名) | `kinematics_node` → `hardware_bridge_node` (`command_mode: "joint"`、packet_type=0x02。2026-09-01 接続済み。`pattern_b:=true` 時のみ流れる) | |
 | `/catchrobo/command/gripper` | `std_msgs/Bool` | `motion_generator_node` → `hardware_bridge_node` | |
 | `/catchrobo/command/orient_vertical` | `std_msgs/Bool` | `motion_generator_node` → `hardware_bridge_node` | |
@@ -632,7 +634,7 @@ source install/setup.bash
 # ノードが起動時エラーになる (独断で選ばせない設計。詳細は
 # sharmech_core/docs/game_state_manager_node.md)
 ros2 launch sharmech_bringup sharmech.launch.xml field_color:=red
-ros2 launch sharmech_bringup sharmech.launch.xml field_color:=red rviz:=true
+ros2 launch sharmech_bringup rviz.launch.xml     # デバッグ表示 (別端末。本体の launch とは独立)
 
 # VR クライアントと通信する場合 (rosbridge, port 9090)
 ros2 launch sharmech_bringup rosbridge.launch.xml

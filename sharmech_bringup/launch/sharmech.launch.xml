@@ -1,6 +1,6 @@
 <?xml version='1.0' ?>
 <launch>
-  <arg name="rviz" default="false"/>
+  <!-- rviz2 はここには含めない。別途 rviz.launch.xml を別端末で上げる -->
   <arg name="joy"  default="true"/>
   <!-- シミュレータ (catchrobo_sim_threejs) が /catchrobo/arm/current_pose を
        publish する場合は false にする。実機と二重publishすると衝突するため -->
@@ -87,12 +87,4 @@
     </composable_node>
 
   </node_container>
-
-  <!-- rviz2 -->
-  <group if="$(var rviz)">
-    <node pkg="rviz2" exec="rviz2" name="rviz2" output="screen">
-      <param name="config_file"
-             value="$(find-pkg-share sharmech_description)/rviz/sharmech.rviz"/>
-    </node>
-  </group>
 </launch>

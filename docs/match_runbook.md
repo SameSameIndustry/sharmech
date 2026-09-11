@@ -183,6 +183,15 @@ ros2 topic echo /catchrobo/game/state
 `connected: false` は片方の基板でも 0.5 秒途絶したことを示す。`hardware_bridge_node` のログに
 どちらの基板かが出る。
 
+RViz で見るなら別端末で:
+
+```bash
+ros2 launch sharmech_bringup rviz.launch.xml
+```
+
+現在位置 (座標軸)・ストリーム目標 (橙)・ゴール (赤)・ワーク検出 (黄)・VR の共有映像が出る。
+共有映像は VR 側で `?spectator=1` かメニュー「表示」で入にしたときだけ流れる (既定は切)。
+
 ## 9. 終了
 
 各端末で `Ctrl+C`。ROS2 を止めても MCU は最後の目標位置をホールドする (脱力しない)。
