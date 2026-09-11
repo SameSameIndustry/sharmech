@@ -278,36 +278,53 @@ TEST(UdpProtocol, DecodeFeedbackRejectsBufferShorterThanFixedPart)
 
 
 // ---- xy → r-θ 変換 (PolarUtils) ----
-// UDP に載る値そのものを作る変換なので、ワイヤフォーマットと同じ場所で回帰を見る
+// UDP に載る値そのものを作る変換なので、ワイヤフォーマットと同じ場所で回帰を見る。
+// **ワイヤ上の θ は時計回り (+x → −y) が正** (2026-09-11 ユーザー決定。polar_utils.hpp の
+// kThetaSign)。以下の期待値はすべてその向きで書いてある
+
+TEST(PolarUtils, ThetaIsClockwisePositiveOnTheWire)
+{
+  // +y 方向の点は数学的には +π/2 だが、ワイヤでは時計回り正なので -π/2 になる。
+  // +x 上の点で +y へ動く速度も θ̇ < 0 (位置と速度で向きが食い違うと MCU の外挿が逆走する)
+  EXPECT_NEAR(PolarUtils::toPolar(0.0, 1.0, 0.0, 0.0, 0.0).theta, -M_PI / 2.0, 1e-12);
+  EXPECT_NEAR(PolarUtils::toPolar(0.0, -1.0, 0.0, 0.0, 0.0).theta, +M_PI / 2.0, 1e-12);
+  EXPECT_LT(PolarUtils::toPolar(1.0, 0.0, 0.0, 1.0, 0.0).theta_dot, 0.0);
+  // 復元も同じ向き: θ = -π/2 は +y の点に戻る
+  EXPECT_NEAR(PolarUtils::toX(1.0, -M_PI / 2.0), 0.0, 1e-12);
+  EXPECT_NEAR(PolarUtils::toY(1.0, -M_PI / 2.0), 1.0, 1e-12);
+  EXPECT_EQ(PolarUtils::kThetaSign, -1.0);
+}
 
 TEST(PolarUtils, ConvertsPositionAndVelocityToPolar)
 {
-  // (x, y) = (3, 4) → r = 5, θ = atan2(4,3)
+  // (x, y) = (3, 4) → r = 5, θ = -atan2(4,3) (時計回り正)
   // 速度は純粋な半径方向 (単位ベクトル (0.6, 0.8) 方向に 1 m/s) にとると
   // ṙ = 1, θ̇ = 0 になるはず
   const auto p = PolarUtils::toPolar(3.0, 4.0, 0.6, 0.8, /*theta_ref=*/ 0.0);
   EXPECT_NEAR(p.r, 5.0, 1e-9);
-  EXPECT_NEAR(p.theta, std::atan2(4.0, 3.0), 1e-9);
+  EXPECT_NEAR(p.theta, -std::atan2(4.0, 3.0), 1e-9);
   EXPECT_NEAR(p.r_dot, 1.0, 1e-9);
   EXPECT_NEAR(p.theta_dot, 0.0, 1e-9);
 }
 
 TEST(PolarUtils, PureTangentialVelocityGivesZeroRadialRate)
 {
-  // (x, y) = (2, 0) で +y 方向に 1 m/s → ṙ = 0, θ̇ = v/r = 0.5 rad/s
+  // (x, y) = (2, 0) で +y 方向に 1 m/s → ṙ = 0, |θ̇| = v/r = 0.5 rad/s
+  // (+y へ動く = 反時計回りなので、時計回り正のワイヤでは負)
   const auto p = PolarUtils::toPolar(2.0, 0.0, 0.0, 1.0, 0.0);
   EXPECT_NEAR(p.r, 2.0, 1e-9);
   EXPECT_NEAR(p.r_dot, 0.0, 1e-9);
-  EXPECT_NEAR(p.theta_dot, 0.5, 1e-9);
+  EXPECT_NEAR(p.theta_dot, -0.5, 1e-9);
 }
 
 TEST(PolarUtils, UnwrapsThetaAcrossNegativeXAxis)
 {
   // 作業領域は X が -2.045〜+0.941 なので -x 軸 (θ = ±π) を実際にまたぐ。
-  // atan2 の生値なら +3.14 → -3.14 と飛ぶところを、直前値の近傍へ連続化する
-  const double before = PolarUtils::toPolar(-1.0, 0.05, 0, 0, 0.0).theta;   // ≒ +3.09
+  // atan2 の生値なら ±3.14 で飛ぶところを、直前値の近傍へ連続化する
+  // (時計回り正なので +y 側の点は負: (-1, 0.05) ≒ -3.09、(-1, -0.05) は生値で +3.09)
+  const double before = PolarUtils::toPolar(-1.0, 0.05, 0, 0, 0.0).theta;   // ≒ -3.09
   const double after = PolarUtils::toPolar(-1.0, -0.05, 0, 0, before).theta;
-  EXPECT_GT(after, M_PI);                       // -π 側へ飛ばず π を超えて連続
+  EXPECT_LT(after, -M_PI);                      // +π 側へ飛ばず -π を超えて連続
   EXPECT_LT(std::abs(after - before), 0.2);     // 1回転ぶんの飛びが無い
   // cos/sin で戻せば元の直交座標に一致する (アンラップは等価変換)
   EXPECT_NEAR(PolarUtils::toX(1.0, after), -1.0 / std::hypot(1.0, 0.05), 1e-9);
@@ -316,12 +333,13 @@ TEST(PolarUtils, UnwrapsThetaAcrossNegativeXAxis)
 
 TEST(PolarUtils, KeepsWindingAfterMultipleTurns)
 {
-  // 何周しても直前値の近傍を選び続ける (θ は ±π に丸められない)
+  // 何周しても直前値の近傍を選び続ける (θ は ±π に丸められない)。
+  // 反時計回りに a だけ進んだ点は、時計回り正のワイヤでは -a
   double theta = 0.0;
   for (int i = 1; i <= 40; ++i) {
     const double a = i * (M_PI / 4.0);
     theta = PolarUtils::toPolar(std::cos(a), std::sin(a), 0, 0, theta).theta;
-    EXPECT_NEAR(theta, a, 1e-9);
+    EXPECT_NEAR(theta, -a, 1e-9);
   }
 }
 
@@ -332,7 +350,7 @@ TEST(PolarUtils, PolarIsMeasuredFromTurntableAxisNotBaseOrigin)
   // 軸が (0.10, -0.05) にある。点 (0.40, 0.35) は軸から見て (0.30, 0.40) → r=0.5
   const auto p = PolarUtils::toPolar(0.40, 0.35, 0.0, 0.0, 0.0, 0.10, -0.05);
   EXPECT_NEAR(p.r, 0.5, 1e-12);
-  EXPECT_NEAR(p.theta, std::atan2(0.40, 0.30), 1e-12);
+  EXPECT_NEAR(p.theta, -std::atan2(0.40, 0.30), 1e-12);   // 時計回り正
 
   // オフセット無しなら別の値になる (回帰: オフセットが無視されていないこと)
   const auto q = PolarUtils::toPolar(0.40, 0.35, 0.0, 0.0, 0.0);
@@ -343,10 +361,11 @@ TEST(PolarUtils, PolarIsMeasuredFromTurntableAxisNotBaseOrigin)
 TEST(PolarUtils, VelocityIsAlsoTakenAboutTurntableAxis)
 {
   // 軸 (1.0, 0.0)。点 (2.0, 0.0) が +y に 1 m/s → 軸から見て r=1 の純接線速度
+  // (反時計回りなので時計回り正のワイヤでは -1 rad/s)
   const auto p = PolarUtils::toPolar(2.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0);
   EXPECT_NEAR(p.r, 1.0, 1e-12);
   EXPECT_NEAR(p.r_dot, 0.0, 1e-12);
-  EXPECT_NEAR(p.theta_dot, 1.0, 1e-12);
+  EXPECT_NEAR(p.theta_dot, -1.0, 1e-12);
 }
 
 TEST(PolarUtils, RoundTripWithAxisOffsetRestoresBaseCoordinates)

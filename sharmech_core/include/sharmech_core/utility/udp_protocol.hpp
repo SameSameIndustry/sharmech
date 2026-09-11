@@ -102,7 +102,7 @@ struct CommandHeader
 struct PolarPayload
 {
   float r;              // [m]   ターンテーブル軸からの距離
-  float theta;          // [rad] +x軸から反時計回り。連続値 (±π を超えうる)
+  float theta;          // [rad] +x軸から時計回り正 (PolarUtils::kThetaSign)。連続値 (±π を超えうる)
   float z;              // [m]
   float pitch;          // [rad]
   float yaw;            // [rad]

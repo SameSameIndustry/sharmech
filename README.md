@@ -303,7 +303,7 @@ bool init_request             # 初期位置要求 (bit2)。/catchrobo/game/rese
 | offset | 型 | 名前 | 単位 |
 |---|---|---|---|
 | 16 | `float32` | `r` | m (ターンテーブル軸からの水平距離) |
-| 20 | `float32` | `theta` | rad (+X から反時計回り。**±π を超えうる連続値**) |
+| 20 | `float32` | `theta` | rad (**+X から時計回り正**。2026-09-11 に反時計回りから変更。**±π を超えうる連続値**) |
 | 24 | `float32` | `z` | m |
 | 28 | `float32` | `pitch` | rad |
 | 32 | `float32` | `yaw` | rad |

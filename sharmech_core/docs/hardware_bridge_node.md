@@ -95,9 +95,16 @@ atan2/hypot をやり直すことになる。`z` は肘/膝機構が直接与え
 
 | ROS 側 | UDP 側 | 式 (`x' = x − ax`, `y' = y − ay`。`(ax, ay)` = `turntable_axis_x/y_m`) |
 |---|---|---|
-| `x, y` | `r, theta` | `r = hypot(x',y')`, `θ = atan2(y',x')` |
-| `vx, vy` | `r_dot, theta_dot` | `ṙ = (x'·vx + y'·vy)/r`, `θ̇ = (x'·vy − y'·vx)/r²` |
-| (受信) `r, theta` | `x, y` | `x = ax + r·cos θ`, `y = ay + r·sin θ` |
+| `x, y` | `r, theta` | `r = hypot(x',y')`, `θ = s·atan2(y',x')` |
+| `vx, vy` | `r_dot, theta_dot` | `ṙ = (x'·vx + y'·vy)/r`, `θ̇ = s·(x'·vy − y'·vx)/r²` |
+| (受信) `r, theta` | `x, y` | `x = ax + r·cos(s·θ)`, `y = ay + r·sin(s·θ)` |
+
+`s = PolarUtils::kThetaSign = −1`: **ワイヤ上の θ は上から見て時計回り (+X → −Y) が正**
+(2026-09-11 ユーザー決定。実機のターンテーブルが atan2 そのままだと逆に回ったため、
+MCU 側の `THETA_DEG_PER_RAD_SIGN` ではなく ROS2 側で反転する)。符号は `polar_utils.hpp` の
+定数 1 つに集約してあり、位置 θ・速度 θ̇・受信の復元の 3 箇所が必ず同じ向きになる
+(片方だけ反転すると `current_pose` の y が鏡映になり、起動時にその姿勢へ同期して飛ぶ)。
+ROS トピック (直交座標) と `motion_generator_node`・作業領域クランプには影響しない。
 
 **極座標の原点はターンテーブル回転軸であって、ベース座標系原点 (設置エリア中心) では
 ない** (2026-09-10〜)。両者がずれている場合の補正はここ 1 箇所で完結し、上流 (VR・
