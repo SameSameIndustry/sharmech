@@ -275,12 +275,12 @@ TEST(GameStateMachine, FullCycleAdvancesToNextSlot)
   EXPECT_NEAR(clamp.x_min, 0.0 - 0.03, 1e-9);
   EXPECT_NEAR(clamp.x_max, 0.0 + 0.03, 1e-9);
 
-  // orient dwell 経過 → PLACING。ここで初めて降下ゴールが出る
+  // orient dwell 経過 → PLACING。**箱へは降下しない**: ゴールの z は運搬高さのまま
   machine.tick(2.1);
   ASSERT_EQ(machine.state(), GameState::kPlacing);
   ASSERT_TRUE(machine.hasPendingGoal());
   const auto place_goal = machine.consumePendingGoal();
-  EXPECT_DOUBLE_EQ(place_goal.z, 0.05);  // スロット0のz
+  EXPECT_DOUBLE_EQ(place_goal.z, 0.20);  // transport_clearance_z (スロットの z=0.05 へは下げない)
 
   machine.onGoalReached(2.5);   // → RETRACTING
   ASSERT_EQ(machine.state(), GameState::kRetracting);
@@ -514,11 +514,11 @@ TEST(GameStateMachine, OrientingHoldsPositionUntilDwellElapses)
   EXPECT_EQ(machine.state(), GameState::kOrienting);
   EXPECT_FALSE(machine.hasPendingGoal());
 
-  // dwell 経過でようやく降下に入る
+  // dwell 経過でようやく PLACING へ (降下はしない。z は運搬高さのまま)
   machine.tick(2.5);
   EXPECT_EQ(machine.state(), GameState::kPlacing);
   ASSERT_TRUE(machine.hasPendingGoal());
-  EXPECT_DOUBLE_EQ(machine.consumePendingGoal().z, 0.05);  // スロットのz
+  EXPECT_DOUBLE_EQ(machine.consumePendingGoal().z, 0.20);  // transport_clearance_z
 }
 
 // require_manual_confirm=true では、掴む直前と離す直前で止まり、
@@ -685,7 +685,7 @@ TEST(GameStateMachine, EveryMoveIsEitherPurelyVerticalOrPurelyHorizontal)
   EXPECT_DOUBLE_EQ(traverse.x, 0.0);      // スロット0のxy
   EXPECT_DOUBLE_EQ(traverse.y, 0.2);
 
-  // 6. 縦にする (静止)、7. 降下: xyは変えずスロットの高さへ (完全な垂直移動)
+  // 6. 縦にする (静止)、7. PLACING: 箱へは降下せず、運搬高さのまま (xy も変えない)
   machine.onGoalReached(4.0);
   ASSERT_EQ(machine.state(), GameState::kOrienting);
   machine.tick(4.6);
@@ -694,7 +694,7 @@ TEST(GameStateMachine, EveryMoveIsEitherPurelyVerticalOrPurelyHorizontal)
   const auto place = machine.consumePendingGoal();
   EXPECT_DOUBLE_EQ(place.x, traverse.x);
   EXPECT_DOUBLE_EQ(place.y, traverse.y);
-  EXPECT_DOUBLE_EQ(place.z, 0.05);        // スロットのz
+  EXPECT_DOUBLE_EQ(place.z, traverse.z);  // 運搬高さのまま (下げない)
 
   // 8. 退避: xyは変えず真上へ (完全な垂直移動)
   machine.onGoalReached(5.0);

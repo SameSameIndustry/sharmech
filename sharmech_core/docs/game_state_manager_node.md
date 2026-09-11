@@ -16,8 +16,8 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 2. グリッパを閉じて把持する
 3. 安全な高さまで持ち上げて運搬する
 4. VR の指定箱に「何個目を置いたか」(`box_count`) が届いていれば、そのスロットの
-   上空へ運び、到達したら直線1本で降下し、必要なら「縦にする」指示を MCU へ
-   送りながら設置する
+   上空へ運び、到達したら「縦にする」指示を MCU へ送り、**箱へは降下せず**その高さで
+   離して設置する (2026-09-11 ユーザー決定。`PLACING` は運搬高さのまま動かない)
 5. 箱にぶつからない高さまで退避する
 6. 次のスロットへ進み、1に戻る (24箇所すべて埋まったら完了)
 
@@ -92,7 +92,7 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 | `slot_clamp_margin_m` | 0.03 | ORIENTING〜RETRACTING中の作業領域クランプの片側マージン [m] |
 | `require_manual_confirm` | true | true: 掴む直前・離す直前で止まり操縦者の確定を待つ / false: 止まらず完全自動。実機で位置合わせの精度が出るまでは true 推奨 |
 | `box_top_z_m` | 0.156 | **高さの基準面。箱の上端の高さ [m]。当日実測して入れるのはこれ1個でよく、下の相対値がすべて追従する** |
-| `slot_release_below_box_top_m` | 0.106 | 缶を離す高さ。基準面から何m下か (既定で絶対 z=0.05 相当) |
+| `slot_release_below_box_top_m` | 0.106 | スロット座標の z (基準面から何m下か)。**2026-09-11 以降 `PLACING` はここへ降下せず運搬高さで離すので、動作には使われない** (座標定義として残置) |
 | `approach_clearance_above_box_top_m` | 0.044 | APPROACHING (空のグリッパ) で水平移動する高さ。基準面から何m上か (既定で絶対 z=0.20 相当)。**`retract_...` と同じ値にしておくこと** (揃っていれば退避高さのまま接近でき、接近が完全な水平移動になる) |
 | `transport_clearance_above_box_top_m` | 0.044 | TRANSPORT_LIFT / TRANSPORTING (缶を保持) の高さ。同上 |
 | `retract_clearance_above_box_top_m` | 0.044 | 設置後に上げる高さ。同上 |
@@ -241,8 +241,8 @@ stateDiagram-v2
 | 3 | `kGrasping` → `kTransportLift` | 経過時間 ≥ `grasp_dwell_sec` (既定0.3s) **かつ** `box_count` のキューが空でない | grasp成功の実フィードバックは無い (下記「grasp判定が時間待ちである理由」)。キューが空の間は掴んだ位置で待つ |
 | 3b | `kTransportLift` → `kTransporting` | `last_result = SUCCEEDED` (上昇完了) | 掴んだ場所の真上まで上がってから、水平移動に入る |
 | 4 | `kTransporting` → `kOrienting` | `last_result = SUCCEEDED` (スロット上空に到達) | 「置け」の指示は `box_count` が既に兼ねている (下記「box_count とスロットのキュー」)。`orient_vertical=true` とクランプ絞りをここで発行 |
-| 5 | `kOrienting` → `kPlacing` | 経過時間 ≥ `orient_dwell_sec` (既定0.5s) | ピッチ機構の実フィードバックは無い (下記「縦にするタイミング」) |
-| 5b | `kPlacing` → `kAdjustingPlace` | `last_result = SUCCEEDED` (降下完了) **かつ** `require_manual_confirm` | ゴールを出さず静止して待つ。離す前に位置を微調整できる |
+| 5 | `kOrienting` → `kPlacing` | 経過時間 ≥ `orient_dwell_sec` (既定0.5s) | ピッチ機構の実フィードバックは無い (下記「縦にするタイミング」)。ゴールは xy=スロット・z=`transport_clearance_z` (**降下しない**。実質その場) |
+| 5b | `kPlacing` → `kAdjustingPlace` | `last_result = SUCCEEDED` **かつ** `require_manual_confirm` | ゴールを出さず静止して待つ。離す前に位置を微調整できる |
 | 5c | `kAdjustingPlace` → `kRetracting` | `/catchrobo/game/confirm` 受信 | グリッパ open + 退避を発行 |
 | 6 | `kPlacing` → `kRetracting` | `last_result = SUCCEEDED` | グリッパ open・クランプ解除を同時発行 |
 | 7 | `kRetracting` → `kWaitingForPick` | `last_result = SUCCEEDED` かつ 未処理のスロットが残っている | 次のスロットへ進む |
@@ -264,12 +264,12 @@ stateDiagram-v2
 | `kApproaching` | グリッパを開いたまま、選択されたワークの**真上**まで `approach_clearance_z` の高さで水平移動中 |
 | `kApproachDescend` | ワークの真上から**垂直に降下**して掴む位置へ着ける |
 | `kAdjustingPick` | **掴む直前の微調整待ち** (`require_manual_confirm=true` のときのみ)。ゴールを出さず静止し、操縦者がジョグで位置を合わせて確定するのを待つ |
-| `kAdjustingPlace` | **離す直前の微調整待ち** (同上)。スロットへ降ろした姿勢のまま静止して待つ |
+| `kAdjustingPlace` | **離す直前の微調整待ち** (同上)。スロット上空 (運搬高さ) の姿勢のまま静止して待つ |
 | `kGrasping` | 到達直後にグリッパを閉じ、`grasp_dwell_sec` だけ待つ(下記「grasp判定が時間待ちである理由」)。**`box_count` のキューが空ならここで宛先の指示待ちになる** |
 | `kTransportLift` | 掴んだ位置で `transport_clearance_z` まで**垂直に上昇**する |
 | `kTransporting` | 高さを保ったまま、キュー先頭のスロットの**真上**まで水平移動中。到達したら `kOrienting` へ |
 | `kOrienting` | **スロット上空で静止したまま**、`orient_vertical` を `true` にして横倒しのワークを縦にする。作業領域クランプもここでスロット周辺 (`slot_clamp_margin_m`) に絞る。**ゴールは発行しない** (下記「縦にするタイミング」) |
-| `kPlacing` | スロット姿勢まで直線で降下する。既に縦になっているのでまっすぐ降ろすだけ |
+| `kPlacing` | スロット上空 (`transport_clearance_z`) のまま**降下しない**。ゴールは到達点と同じ高さなので実質動かず、到達で離す段へ進む (2026-09-11 ユーザー決定。以前はスロット姿勢まで降下していた) |
 | `kRetracting` | グリッパを開き、同じ xy で `retract_clearance_z` まで直線で退避。作業領域クランプをデフォルトに戻す。**縦のまま抜く** (横へ戻すのは次の `kApproaching`) |
 | `kComplete` | `placement_order` を使い切った。以降 `pick_request` は無視される(実質的な終了状態)。ただし `box_count` が巻き戻ると `kWaitingForPick` へ復帰する |
 | `kManualControl` | 自動シーケンス停止。**どの状態からでもトグルで入り、再度トグルで元の状態に戻る**(下記「自由操作」節) |
@@ -328,7 +328,7 @@ xy がずれ、ワークを保持したまま別の箱の上へ動くことに�
 
 | | 内容 |
 |---|---|
-| 止まる場所 | 掴む直前 (降下しきった位置) と、離す直前 (スロットへ降ろした位置) |
+| 止まる場所 | 掴む直前 (降下しきった位置) と、離す直前 (スロット上空・運搬高さの位置) |
 | 止まり方 | **ゴールを発行しない。** アームはその場に留まる |
 | 調整の入力 | ジョグ (`/catchrobo/arm/cmd_twist`)。VR・PS4 どちらでもよい |
 | 再開 | `/catchrobo/game/confirm` (PS4の確定ボタン / VRのサムズアップ) |

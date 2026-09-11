@@ -39,8 +39,9 @@ namespace sharmech_core
 //                   (orient_vertical=true)。orient_dwell_sec だけ待ってから降下する。
 //                   降下と同時に回すと回転が間に合わず缶が斜めのまま箱に入るため、
 //                   動かない時間をここで確保する (enterOrienting() のコメント参照)
-//   kPlacing        スロット姿勢まで直線1本で降下する。既に縦になっているので
-//                   まっすぐ降ろすだけでよい
+//   kPlacing        スロット上空 (transport_clearance_z) で**降下せず**離す段へ進む。
+//                   ゴールは xy = スロット、z = 運搬高さのまま (2026-09-11 ユーザー決定:
+//                   箱へ下げる動作は行わない。缶はこの高さから落とす)
 //   kRetracting     グリッパを開き、同じxyでretract_clearance_zまで直線1本で退避。
 //                   作業領域クランプはデフォルトに戻す。**縦のまま抜く**
 //                   (箱の中でグリッパを回さないため。横へ戻すのは次の kApproaching)
@@ -613,14 +614,17 @@ private:
     pending_clamp_ = clamp;
   }
 
-  // 既に kOrienting で縦になっている前提。まっすぐ降ろすだけ
+  // 既に kOrienting で縦になっている前提。**箱へは降下しない** (2026-09-11 ユーザー決定)。
+  // ゴールは TRANSPORTING の到達点と同じ高さなので実質その場で止まり、到達で離す段へ進む
   // (クランプと orient_vertical は enterOrienting() で済ませてある)
   void enterPlacing()
   {
     state_ = GameState::kPlacing;
     const auto id = currentSlotId();
     if (!id) {return;}  // placement_order を使い切っている場合の安全側フォールバック
-    pending_goal_ = config_.slots.at(*id);
+    CartesianState goal = config_.slots.at(*id);
+    goal.z = config_.transport_clearance_z;
+    pending_goal_ = goal;
   }
 
   void enterRetracting()
