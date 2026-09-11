@@ -50,6 +50,7 @@ PS4 は **VR が使えないときのバックアップと、テスト用**と�
 | トピック | 型 | 用途 |
 |---|---|---|
 | `/catchrobo/arm/status` | `sharmech_msgs/MotionStatus` | ホーム復帰が却下されたことをログに出す |
+| `/catchrobo/game/state` | `std_msgs/String` (latched) | `MANUAL_CONTROL` の間 DualSense の LED を白で点滅させる (下記「MANUAL_CONTROL の LED 表示」)。**表示だけ**で、操作の可否は判断しない |
 
 **Action は使わない。** ゴールもキャンセルもトピックで送る
 (理由は [`motion_generator_node.md`](motion_generator_node.md#action-を使わない) を参照)。
@@ -115,6 +116,9 @@ ROS2 Humble の `joy` (SDL2 ベース) と `joy_linux` でも異なる。
 | `manual_toggle_button_r_stick` | 12 | R3 (右スティック押し込み) |
 | `confirm_button` | 12 | R3。微調整の確定 (下記「微調整の確定ボタン」) |
 | `rumble_intensity` | 0.4 | 操作を受け付けたときの振動の強さ [0,1]。0.0 で無効 (下記「振動フィードバック」) |
+| `leds_sysfs_dir` | `/sys/class/leds` | DualSense の LED がある sysfs。`""` で LED 表示ごと無効 (下記「MANUAL_CONTROL の LED 表示」) |
+| `manual_led_blink_period_sec` | 1.0 | `MANUAL_CONTROL` 中の点滅周期 [s] (0.5s 点灯 / 0.5s 消灯)。0 で常時点灯 |
+| `lightbar_normal_rgb` | `[0, 0, 128]` | `MANUAL_CONTROL` 以外のライトバー色。既定はカーネルドライバが接続時に設定する青 |
 
 反転は `scale` を負値にすることで表現する(反転フラグは持たない)。
 
@@ -132,6 +136,8 @@ ROS2 Humble の `joy` (SDL2 ベース) と `joy_linux` でも異なる。
 | `gripper_state_` | トグルで反転する状態。**起動時は `false`(開)** |
 | `prev_buttons_` | 立ち上がりエッジ検出用の前回ボタン状態 |
 | `manual_toggle_combo_was_active_` | 自由操作トグルの4ボタン同時押しが前回tickで揃っていたか。連打防止のエッジ検出用 |
+| `led_devices_` / `led_player_snapshot_` | 見つけた DualSense の LED の sysfs パスと、`MANUAL_CONTROL` に入る前のプレイヤー LED パターン (復元用) |
+| `led_manual_active_` / `led_blink_on_` | 今 LED を点滅させているか / 点滅の現在位相 |
 
 ## 処理フロー
 
@@ -312,3 +318,78 @@ DualSense を鳴らす。**振動の停止は `joy_node` 側が面倒を見る**
 `sensor_msgs/JoyFeedback` は**単体メッセージ**で、配列版の `JoyFeedbackArray`
 ではない。ROS2 Humble の `joy_node` が購読しているのは単体の方
 (`ros2 node info /joy_node` で確認)。間違えると型が合わず届かない。
+
+## MANUAL_CONTROL の LED 表示 (DualSense)
+
+**PS5 (DualSense) だけで操作するときは `MANUAL_CONTROL` に入っていないと試合を
+進められない** (自動シーケンスを始める `pick_request` / `box_count` は VR にしか無く、
+`WAITING_FOR_PICK` のままだと VR の `pick_request` で自動シーケンスが始まって
+ジョグが遮断される。`game_state_manager_node.md` の jog_limit 参照)。
+今その状態かどうかを画面を見ずに分かるよう、`MANUAL_CONTROL` の間は
+**ライトバーとタッチパッド下のプレイヤー LED 5 個を全部白にして点滅**させる。
+
+| 状態 | ライトバー | プレイヤー LED (白 5 個) |
+|---|---|---|
+| `MANUAL_CONTROL` | 白、`manual_led_blink_period_sec` で点滅 | 全点灯、同じ位相で点滅 |
+| それ以外 | `lightbar_normal_rgb` (既定: 青) で点灯 | 入る前のパターンへ復元 (通常は中央 1 個 = プレイヤー 1) |
+
+`/catchrobo/game/state` (latched) を購読して `MANUAL_CONTROL` かどうかだけを見る。
+**状態名に依存するのはこの 1 つだけで、表示専用。** 操作の可否 (ジョグの遮断・
+速度制限) は従来どおり `game_state_manager_node` → `motion_generator_node` の
+`jog_limit` で決まり、このノードは判断に関与しない (「操縦層に状態依存のロジックを
+置かない」の原則は表示には及ばない。VR クライアントも `game/state` を購読して表示している)。
+
+### 仕組み: joy_node は LED を扱えないので sysfs へ直接書く
+
+`joy_node` (SDL2) が `/joy/set_feedback` で扱うのは振動 (`TYPE_RUMBLE`) だけで、
+`TYPE_LED` は無視される。Linux カーネルの `hid-playstation` ドライバがコントローラ
+1 台ごとに LED クラスデバイスを作るので、それに書く
+(`sharmech_core/include/sharmech_core/utility/dualsense_leds.hpp`):
+
+| sysfs | 意味 | 書く値 |
+|---|---|---|
+| `/sys/class/leds/inputN:rgb:indicator/multi_intensity` | ライトバーの色 `"r g b"` | 白 `255 255 255` / 通常 `lightbar_normal_rgb` |
+| `/sys/class/leds/inputN:rgb:indicator/brightness` | ライトバーの明るさ 0〜255 | 点滅で 255 / 0 |
+| `/sys/class/leds/inputN:white:player-1..5/brightness` | プレイヤー LED 各 0/1 | 点滅で 1 / 0、戻るときは控えた値 |
+
+- `N` は接続ごとに変わるので、名前ではなく `device` リンクの先のベンダ ID
+  (Sony = `054C`) で見分ける。USB (`0003:054C:0CE6.*`) / Bluetooth (`0005:054C:0CE6.*`) 共通
+- 点滅はソフトウェア (`create_wall_timer` で半周期ごとに反転)。カーネルの `timer`
+  トリガは このマシンでは `ledtrig-timer` が読み込まれておらず使えない
+- コントローラを切断→再接続すると `inputN` が変わる。点滅タイマーが
+  パス消失を検知して探し直し、白に塗り直して続ける
+- **ライトバーの sysfs 値は初回書き込みまで実機と食い違う** (ドライバは接続時に実機を
+  青 (0,0,128) にするが `multi_intensity` は `0 0 0` のまま。Linux 6.8 の
+  `hid-playstation.c` で確認)。そのためライトバーは読み戻して復元せず
+  `lightbar_normal_rgb` で明示的に戻す。プレイヤー LED はドライバの状態そのものが
+  読めるので、入る前に控えて戻す
+- 振動 (`rumble`) の出力レポートは LED のフィールドを含まないので、振動で表示が消えない。
+  SDL2 は hidraw を開けない (root 権限) ため evdev 経由になり、カーネルドライバの
+  LED 状態と競合しない
+- ノード終了時 (デストラクタ) にも復元するので、点滅したまま取り残されない
+
+### 権限: udev ルールが必要 (1 回だけ)
+
+sysfs の LED は既定で root しか書けない。`sharmech_bringup/udev/90-dualsense-leds.rules`
+が DualSense の LED だけ `0666` にする:
+
+```bash
+sudo cp ~/catchrobo_ros2_ws/src/sharmech/sharmech_bringup/udev/90-dualsense-leds.rules /etc/udev/rules.d/
+sudo udevadm control --reload
+sudo udevadm trigger --action=add --subsystem-match=leds   # 接続済みの分にも適用
+ls -l /sys/class/leds/input*:rgb:indicator/brightness       # -rw-rw-rw- になっていれば OK
+```
+
+入っていないと `MANUAL_CONTROL` に入った瞬間に `Cannot write DualSense LEDs: cannot open
+… (permission?)` の警告が 1 回出て、LED は変わらない (操作には影響しない)。
+コントローラ未接続のときは `no DualSense LEDs found` の警告だけで、接続されれば追いつく。
+
+### 検証 (2026-09-11)
+
+- 単体テスト `test/test_dualsense_leds.cpp`: 偽の sysfs ツリーで探索 (無関係な LED・
+  他社のベンダを除外)・白の書き込み・点滅のトグル・スナップショット復元・切断検知
+- ノード E2E: `leds_sysfs_dir` を偽ツリーに向けて `joy_teleop_node` を起動し、
+  `/catchrobo/game/state` に `MANUAL_CONTROL` → `WAITING_FOR_PICK` を latched で流して、
+  点滅 (255/0 と 11111/00000 が同位相) と復元 (`0 0 128` 点灯・`00100`) を確認
+- **実機の sysfs への書き込みは udev ルール導入後に要確認** (root 権限が無く未実施)
+

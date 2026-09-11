@@ -139,7 +139,7 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 | `/catchrobo/field/rescan_request` | `std_msgs/Empty` | WebXR → `cylinder_detector_node`。手動即時再スキャン | ○ |
 | `/catchrobo/game/pick_request` | `geometry_msgs/PoseStamped` | WebXR → `game_state_manager_node`。選択したワーク姿勢 | ○ |
 | `/catchrobo/game/box_count` | `std_msgs/Int32` | WebXR → `game_state_manager_node`。指定箱に置いた通算個数。`N` → `placement_order[N-1]` のスロットへ置きに行く | ○ |
-| `/catchrobo/game/state` | `std_msgs/String` | `game_state_manager_node` → WebXR。**latched** | ○ |
+| `/catchrobo/game/state` | `std_msgs/String` | `game_state_manager_node` → WebXR / `joy_teleop_node` (`MANUAL_CONTROL` 中の LED 表示のみ)。**latched** | ○ |
 | `/catchrobo/game/toggle_manual_control` | `std_msgs/Empty` | `joy_teleop_node` (4ボタン同時押し) / WebXR → `game_state_manager_node`。自由操作 (`MANUAL_CONTROL`) のトグル | ○ |
 | `/catchrobo/game/confirm` | `std_msgs/Empty` | `joy_teleop_node` (確定ボタン) / WebXR (サムズアップ) → `game_state_manager_node`。微調整 (`ADJUSTING_PICK`/`ADJUSTING_PLACE`) の確定 | ○ |
 | `/catchrobo/game/reset` | `std_msgs/Empty` | WebXR → `game_state_manager_node`。状態のリセット要求。どの状態からでも `INIT` へ入り、**MCU 側で定義した初期位置**へ戻ってから `WAITING_FOR_PICK` に復帰する (ROS2 は座標を持たない) | ○ |

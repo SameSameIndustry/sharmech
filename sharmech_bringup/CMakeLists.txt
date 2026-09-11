@@ -11,6 +11,7 @@ ament_auto_find_build_dependencies()
 install(DIRECTORY
   launch
   config
+  udev
   DESTINATION share/${PROJECT_NAME}/
 )
 

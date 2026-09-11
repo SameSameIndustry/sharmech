@@ -8,6 +8,8 @@
 
 #include <cmath>
 
+#include "sharmech_core/utility/game_state_machine.hpp"  // toString(GameState)
+
 namespace sharmech_core
 {
 
@@ -44,6 +46,21 @@ JoyTeleopNode::JoyTeleopNode(const rclcpp::NodeOptions & options)
   // そこで一定時間後に intensity=0 を送って止め、短い「コツッ」という感触にする
   rumble_duration_sec_ = declare_parameter("rumble_duration_sec", 0.06);
   rumble_enabled_ = rumble_intensity_ > 0.0;
+  // MANUAL_CONTROL の間 DualSense の LED を全部白で点滅させる (下記 setManualLeds)。
+  // leds_sysfs_dir は Linux の LED クラスの場所。"" で機能ごと無効。
+  // テストでは偽の sysfs ディレクトリを指す
+  leds_sysfs_dir_ = declare_parameter(
+    "leds_sysfs_dir", std::string(DualSenseLeds::kDefaultSysfsRoot));
+  manual_led_blink_period_sec_ = declare_parameter("manual_led_blink_period_sec", 1.0);
+  // MANUAL_CONTROL から戻ったときのライトバー色。既定はカーネルドライバが接続時に
+  // 設定する青 (0,0,128)。sysfs から読み戻せないのでここで持つ (dualsense_leds.hpp 参照)
+  lightbar_normal_rgb_ = declare_parameter("lightbar_normal_rgb", std::vector<int64_t>{0, 0, 128});
+  if (lightbar_normal_rgb_.size() != 3) {
+    RCLCPP_FATAL(
+      get_logger(), "lightbar_normal_rgb must be [r, g, b] (got %zu values)",
+      lightbar_normal_rgb_.size());
+    throw std::invalid_argument("lightbar_normal_rgb must have 3 elements");
+  }
 
   if (!home_pose_.empty() && home_pose_.size() != 5) {
     RCLCPP_FATAL(
@@ -57,6 +74,12 @@ JoyTeleopNode::JoyTeleopNode(const rclcpp::NodeOptions & options)
   status_sub_ = create_subscription<sharmech_msgs::msg::MotionStatus>(
     "/catchrobo/arm/status", rclcpp::QoS(1).transient_local(),
     std::bind(&JoyTeleopNode::onStatus, this, std::placeholders::_1));
+  // latched なので起動時点で既に MANUAL_CONTROL ならその場で LED が点滅し始める
+  if (!leds_sysfs_dir_.empty()) {
+    game_state_sub_ = create_subscription<std_msgs::msg::String>(
+      "/catchrobo/game/state", rclcpp::QoS(1).transient_local(),
+      std::bind(&JoyTeleopNode::onGameState, this, std::placeholders::_1));
+  }
 
   twist_pub_ = create_publisher<geometry_msgs::msg::Twist>(
     "/catchrobo/arm/cmd_twist", 10);
@@ -131,6 +154,113 @@ void JoyTeleopNode::rumble(double intensity_scale)
       feedback_pub_->publish(stop);
       rumble_stop_timer_->cancel();   // 単発。次の rumble() で作り直す
     });
+}
+
+JoyTeleopNode::~JoyTeleopNode()
+{
+  // 点滅させたまま終わると「まだ MANUAL_CONTROL」に見えてしまう
+  if (led_manual_active_) {setManualLeds(false);}
+}
+
+// --- MANUAL_CONTROL の LED 表示 ---
+//
+// PS5 だけで操作するときは、MANUAL_CONTROL に入っていないと VR の pick_request で
+// 自動シーケンスが始まってジョグが遮断される (game_state_manager_node の jog_limit)。
+// 今その状態かどうかを手元で分かるように、ライトバー + プレイヤー LED 5 個を
+// **全部白で点滅**させる。表示だけで、操作の可否はここでは判断しない
+// (状態を持つのは game_state_manager_node だけ、という役割分担は変えない)。
+//
+// LED の実体はカーネルの hid-playstation ドライバが作る sysfs で、joy_node は
+// 触れない (振動のみ)。書き込み権限は udev ルールで与える
+// (sharmech_bringup/udev/90-dualsense-leds.rules)。
+
+void JoyTeleopNode::onGameState(const std_msgs::msg::String::SharedPtr msg)
+{
+  const bool manual = msg->data == toString(GameState::kManualControl);
+  if (manual == led_manual_active_) {return;}
+  setManualLeds(manual);
+}
+
+bool JoyTeleopNode::rediscoverLeds()
+{
+  led_devices_ = DualSenseLeds::discover(leds_sysfs_dir_);
+  // 見つけた直後の値がドライバの素の状態 (プレイヤー番号のパターン) なので、
+  // こちらが書き換える前に控える。戻るときにこれへ復元する
+  led_player_snapshot_ = DualSenseLeds::snapshotPlayers(led_devices_);
+  return led_devices_.found();
+}
+
+void JoyTeleopNode::setManualLeds(bool manual)
+{
+  led_manual_active_ = manual;
+  led_blink_timer_.reset();
+  std::string error;
+
+  if (manual) {
+    if (!rediscoverLeds()) {
+      // コントローラ未接続。点滅タイマーが探し直すので、接続されれば追いつく
+      RCLCPP_WARN(
+        get_logger(),
+        "MANUAL_CONTROL: no DualSense LEDs found under %s (controller not connected?)",
+        leds_sysfs_dir_.c_str());
+    }
+    bool ok = DualSenseLeds::setLightbarColor(led_devices_, 255, 255, 255, &error);
+    ok = DualSenseLeds::setLightbarOn(led_devices_, true, &error) && ok;
+    ok = DualSenseLeds::setPlayersOn(led_devices_, true, &error) && ok;
+    if (!ok) {reportLedError(error);}
+    led_blink_on_ = true;
+    if (manual_led_blink_period_sec_ > 0.0) {
+      // 半周期ごとに反転 (period=1.0 なら 0.5s 点灯 / 0.5s 消灯)
+      led_blink_timer_ = create_wall_timer(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::duration<double>(manual_led_blink_period_sec_ / 2.0)),
+        std::bind(&JoyTeleopNode::onLedBlinkTimer, this));
+    }
+    RCLCPP_INFO(get_logger(), "MANUAL_CONTROL: DualSense LEDs → white blink");
+    return;
+  }
+
+  // 戻り: ライトバーは通常色で点灯、プレイヤー LED は入る前のパターンへ
+  if (!led_devices_.found() || !DualSenseLeds::stillPresent(led_devices_)) {
+    rediscoverLeds();   // 点滅中に繋ぎ直された等。snapshot は素の状態なので復元は無害
+  }
+  bool ok = DualSenseLeds::setLightbarColor(
+    led_devices_,
+    static_cast<int>(lightbar_normal_rgb_[0]),
+    static_cast<int>(lightbar_normal_rgb_[1]),
+    static_cast<int>(lightbar_normal_rgb_[2]), &error);
+  ok = DualSenseLeds::setLightbarOn(led_devices_, true, &error) && ok;
+  ok = DualSenseLeds::restorePlayers(led_player_snapshot_, &error) && ok;
+  if (!ok && led_devices_.found()) {reportLedError(error);}
+  RCLCPP_INFO(get_logger(), "MANUAL_CONTROL ended: DualSense LEDs restored");
+}
+
+void JoyTeleopNode::onLedBlinkTimer()
+{
+  if (!led_devices_.found() || !DualSenseLeds::stillPresent(led_devices_)) {
+    // 切断→再接続で inputN が変わる。見つかったら白に塗り直して点滅を続ける
+    if (!rediscoverLeds()) {return;}
+    DualSenseLeds::setLightbarColor(led_devices_, 255, 255, 255);
+    led_blink_on_ = false;   // 次の反転で点灯から始める
+  }
+  led_blink_on_ = !led_blink_on_;
+  std::string error;
+  bool ok = DualSenseLeds::setLightbarOn(led_devices_, led_blink_on_, &error);
+  ok = DualSenseLeds::setPlayersOn(led_devices_, led_blink_on_, &error) && ok;
+  if (!ok) {reportLedError(error);}
+}
+
+void JoyTeleopNode::reportLedError(const std::string & error)
+{
+  if (warned_led_error_) {return;}   // 毎 tick 出すと埋まるので初回だけ
+  warned_led_error_ = true;
+  RCLCPP_WARN(
+    get_logger(),
+    "Cannot write DualSense LEDs: %s. Install the udev rule "
+    "(sudo cp sharmech_bringup/udev/90-dualsense-leds.rules /etc/udev/rules.d/ && "
+    "sudo udevadm control --reload && sudo udevadm trigger --action=add --subsystem-match=leds). "
+    "Set leds_sysfs_dir:\"\" to disable this feature",
+    error.c_str());
 }
 
 void JoyTeleopNode::onJoy(const sensor_msgs::msg::Joy::SharedPtr msg)

@@ -57,6 +57,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_game_state_machine test/test_game_state_machine.cpp)
   target_include_directories(test_game_state_machine PRIVATE include)
 
+  # DualSense の LED (sysfs) 操作。偽のディレクトリで検証する
+  ament_add_gtest(test_dualsense_leds test/test_dualsense_leds.cpp)
+  target_include_directories(test_dualsense_leds PRIVATE include)
+
   # motion_generator_node のウォッチドッグ・クランプ・調停ロジック
   # (rclcpp ノードとしてパブリッシュ/サブスクライブして検証する)
   ament_add_gtest(test_motion_generator_node test/test_motion_generator_node.cpp)

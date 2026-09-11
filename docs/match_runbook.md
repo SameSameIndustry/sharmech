@@ -34,6 +34,19 @@ colcon build --symlink-install --packages-select sharmech_msgs sharmech_core sha
 source install/setup.bash
 ```
 
+## 2.5 PS5 コントローラの LED (初回のみ。入れてあれば飛ばす)
+
+`MANUAL_CONTROL` の間 DualSense のライトバーとプレイヤー LED を白で点滅させる
+(`docs/joy_teleop_node.md`「MANUAL_CONTROL の LED 表示」)。sysfs への書き込み権限が要るので
+1 回だけ udev ルールを入れる:
+
+```bash
+sudo cp ~/catchrobo_ros2_ws/src/sharmech/sharmech_bringup/udev/90-dualsense-leds.rules /etc/udev/rules.d/
+sudo udevadm control --reload
+sudo udevadm trigger --action=add --subsystem-match=leds
+ls -l /sys/class/leds/input*:rgb:indicator/brightness   # -rw-rw-rw- なら OK (コントローラ接続中に)
+```
+
 ## 3. ネットワーク確認
 
 構成: PC (USB-Ethernet アダプタ) ↔ スイッチングハブ ↔ r/z 基板 (.100) / θ 基板 (.101)。
@@ -135,6 +148,10 @@ ros2 topic pub --once /catchrobo/game/box_count std_msgs/msg/Int32 '{data: 1}'
 
 PS4 の既定ボタン: × = グリッパ開閉、△ = ホーム、R3 = 確定、L1 = デッドマン (押しながらスティック)、
 L1+R1+L3+R3 同時 = 自由操作トグル (`docs/joy_teleop_node.md`)。
+**PS5 だけで操作するときは最初に自由操作トグルで `MANUAL_CONTROL` に入る**
+(`pick_request` / `box_count` / `reset` は VR にしか無く、PS5 単独では自動シーケンスを
+始められない。`WAITING_FOR_PICK` のままだと VR の `pick_request` でジョグが遮断される)。
+入っている間は **コントローラのライトバーとプレイヤー LED が白で点滅**する (2.5 の udev ルールが前提)。
 
 ## 7. 当日の調整 (再起動なしで即反映。正本にも同じ値を書くこと)
 

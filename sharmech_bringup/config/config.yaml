@@ -106,6 +106,16 @@ joy_teleop_node:
     #   自由操作トグル             … ×1.5 (自動シーケンスを止める操作なので強く)
     rumble_intensity: 0.4
 
+    # MANUAL_CONTROL の間、DualSense のライトバーとプレイヤー LED 5 個を全部白で
+    # 点滅させる (PS5 だけで操作するときは MANUAL_CONTROL に入っていないと VR の
+    # pick_request で自動シーケンスが始まりジョグが遮断されるため、今その状態か
+    # どうかを手元で分かるようにする)。joy_node は LED を扱えないので sysfs へ直接
+    # 書く。**書き込みには udev ルールが要る**
+    # (sharmech_bringup/udev/90-dualsense-leds.rules を /etc/udev/rules.d/ へ)。
+    leds_sysfs_dir: "/sys/class/leds"   # "" で無効
+    manual_led_blink_period_sec: 1.0    # 点滅周期 [s] (0.5s 点灯 / 0.5s 消灯)。0 で常時点灯
+    lightbar_normal_rgb: [0, 0, 128]    # MANUAL_CONTROL 以外のライトバー色。既定はドライバ接続時の青
+
 hardware_bridge_node:
   ros__parameters:
     command_mode: "cartesian"   # "cartesian" (パターンA) / "joint" (パターンB。packet_type=0x02)

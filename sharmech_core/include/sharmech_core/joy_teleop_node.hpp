@@ -12,7 +12,10 @@
 #include <sensor_msgs/msg/joy_feedback.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <sharmech_msgs/msg/motion_status.hpp>
+
+#include "sharmech_core/utility/dualsense_leds.hpp"
 
 namespace sharmech_core
 {
@@ -26,6 +29,8 @@ namespace sharmech_core
 //
 // Sub: /joy
 // Sub: /catchrobo/arm/status      (ホーム復帰の却下をログに出すため・任意)
+// Sub: /catchrobo/game/state      (MANUAL_CONTROL の間 DualSense の LED を白で点滅させる。
+//      表示のみで、操作の可否はこのノードでは判断しない)
 // Pub: /catchrobo/arm/cmd_twist   (publish_rate で定期送信)
 // Pub: /catchrobo/arm/gripper     (同上)
 // Pub: /catchrobo/arm/target_pose (ホームボタンの立ち上がりエッジ)
@@ -38,6 +43,7 @@ class JoyTeleopNode : public rclcpp::Node
 {
 public:
   explicit JoyTeleopNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
+  ~JoyTeleopNode() override;   // MANUAL_CONTROL 中に落ちても LED を元へ戻す
 
 private:
   // 1自由度分の割り当て。軸とボタン対の両方から駆動でき、合算する。
@@ -52,6 +58,7 @@ private:
 
   void onJoy(const sensor_msgs::msg::Joy::SharedPtr msg);
   void onStatus(const sharmech_msgs::msg::MotionStatus::SharedPtr msg);
+  void onGameState(const std_msgs::msg::String::SharedPtr msg);
   void onPublishTimer();
 
   DofMapping declareDofMapping(
@@ -63,6 +70,7 @@ private:
 
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
   rclcpp::Subscription<sharmech_msgs::msg::MotionStatus>::SharedPtr status_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr game_state_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr twist_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_;
@@ -101,6 +109,25 @@ private:
 
   // 操作が受け付けられたことを手に返す。intensity_scale はイベントごとの相対強さ
   void rumble(double intensity_scale);
+
+  // --- MANUAL_CONTROL の LED 表示 (DualSense のライトバー + プレイヤー LED 5 個) ---
+  // PS5 だけで操作するときは MANUAL_CONTROL に入っていないと自動シーケンスに
+  // 引き戻される/ジョグが遮断されるので、今その状態かどうかを手元で分かるようにする。
+  // joy_node は LED を扱えないため sysfs へ直接書く (utility/dualsense_leds.hpp)
+  std::string leds_sysfs_dir_;               // "" で無効
+  double manual_led_blink_period_sec_;       // 0 以下なら点滅せず常時点灯
+  std::vector<int64_t> lightbar_normal_rgb_;  // MANUAL_CONTROL 以外のときのライトバー色
+  DualSenseLeds::Devices led_devices_;
+  DualSenseLeds::PlayerSnapshot led_player_snapshot_;  // 入る前のプレイヤー LED (復元用)
+  rclcpp::TimerBase::SharedPtr led_blink_timer_;
+  bool led_manual_active_{false};
+  bool led_blink_on_{false};
+  bool warned_led_error_{false};
+
+  void setManualLeds(bool manual);   // 入る/出る
+  void onLedBlinkTimer();
+  bool rediscoverLeds();             // 見つかったら true。スナップショットも取り直す
+  void reportLedError(const std::string & error);
 
   // 内部状態
   std::optional<sensor_msgs::msg::Joy> last_joy_;

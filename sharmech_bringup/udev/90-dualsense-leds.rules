@@ -1,0 +1,15 @@
+# DualSense (PS5 コントローラ) の LED を一般ユーザーから書けるようにする。
+#
+# カーネルの hid-playstation ドライバがコントローラごとに
+#   /sys/class/leds/inputN:rgb:indicator      ライトバー
+#   /sys/class/leds/inputN:white:player-1..5  プレイヤーインジケータ (白 5 個)
+# を作るが、既定では root しか書けない。joy_teleop_node が MANUAL_CONTROL の表示に
+# 使う (utility/dualsense_leds.hpp)。USB (0003:054C:...) / Bluetooth (0005:054C:...) 共通。
+# 054C:0CE6 = DualSense、054C:0DF2 = DualSense Edge。
+#
+# インストール (1 回だけ):
+#   sudo cp sharmech_bringup/udev/90-dualsense-leds.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload
+#   sudo udevadm trigger --action=add --subsystem-match=leds   # 接続済みの分にも適用
+# 確認: ls -l /sys/class/leds/input*:rgb:indicator/brightness → -rw-rw-rw- になっていること
+ACTION=="add|change", SUBSYSTEM=="leds", DEVPATH=="*:054C:0CE6.*/leds/*|*:054C:0DF2.*/leds/*", RUN+="/bin/sh -c 'chmod 0666 /sys%p/brightness /sys%p/multi_intensity 2>/dev/null; exit 0'"
