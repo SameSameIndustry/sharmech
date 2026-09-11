@@ -39,8 +39,8 @@ PS4 は **VR が使えないときのバックアップと、テスト用**と�
 
 | トピック | 型 | 周期 |
 |---|---|---|
-| `/catchrobo/arm/cmd_twist` | `geometry_msgs/Twist` | `publish_rate` で定期送信 |
-| `/catchrobo/arm/gripper` | `std_msgs/Bool` | `publish_rate` で定期送信 |
+| `/catchrobo/arm/cmd_twist` | `geometry_msgs/Twist` | ジョグが非ゼロの間 `publish_rate` で定期送信。ゼロに戻った直後に 1 発ゼロを送り、以後は送らない |
+| `/catchrobo/arm/gripper` | `std_msgs/Bool` | トグルボタンの立ち上がりエッジで変化時のみ |
 | `/catchrobo/arm/target_pose` | `geometry_msgs/PoseStamped` | ホームボタンの立ち上がりエッジ |
 | `/catchrobo/arm/cancel` | `std_msgs/Empty` | デッドマンの立ち下がり |
 | `/catchrobo/game/toggle_manual_control` | `std_msgs/Empty` | 4ボタン同時押しの立ち上がりエッジ(下記) |
@@ -172,30 +172,40 @@ prev_buttons_ ← msg.buttons
        |raw| < deadzone なら 0
        twist ← raw * scale
 
-4. publish
-   /catchrobo/arm/cmd_twist ← twist
-   /catchrobo/arm/gripper   ← gripper_state_
+4. publish (2026-09-11〜)
+   twist が非ゼロ、または直前に publish した twist が非ゼロ:
+       /catchrobo/arm/cmd_twist ← twist
+   それ以外: 送らない
 ```
 
-### デッドマンを離したときは「送信停止」ではなく「ゼロを送る」
+### デッドマンを離したときは「送信停止」ではなく「ゼロを 1 発送る」
 
-送信を止めると `motion_generator_node` のウォッチドッグ(400ms)を待ってから減速が始まる。
-**ゼロを明示的に送れば即座に減速が始まる。** 応答性が違う。
+送信を止めるだけだと `motion_generator_node` のウォッチドッグ(400ms)を待ってから減速が
+始まる。**ゼロを明示的に送れば即座に減速が始まる。** 応答性が違う。
+`joy_timeout` 発動時・デッドマン解放時・スティックがニュートラルに戻ったときは
+いずれも同じ経路で「非ゼロ → ゼロ」の遷移になり、ゼロが 1 発出る。reliable QoS なので
+1 発で届く。万一届かなくてもウォッチドッグで止まる (二重の安全)。
 
-同じ理由で、`joy_timeout` 発動時も publish は止めずゼロを送り続ける。
+### ニュートラルの間は何も送らない (2026-09-11〜。それまでは 50Hz でゼロを送り続けていた)
 
-### ゼロ Twist を送り続けてもゴールは妨げない
+VR (WebXR) も同じ `/catchrobo/arm/cmd_twist` へジョグを送る。このノードが
+ニュートラルでも 50Hz でゼロを送り続けると、VR の非ゼロとこちらのゼロが交互に届き、
+`motion_generator_node` (10Hz で最新値をサンプリング) が 3〜4 割の tick でゼロを掴んで
+速度が上下し、VR のジョグが鈍く感じる (2026-09-11 実機で発覚。逆に VR 接続中に PS4 を
+使うと VR のゼロ (毎フレーム ~72Hz) が勝つ)。
+「VR / PS4 は同時に使わない」方針だが、`joy:=true` 既定で `joy_node` が上がったまま
+VR を使う運用が実際にあるので、ノード側で衝突しないようにした。
 
-このノードはスティックがニュートラルでも**ゼロの Twist を送り続ける**。
+`motion_generator_node` 側は変わらず「**ゼロでない Twist のみがゴールを abort する**」
+仕様なので、PS4 を繋いだままでもゴール指定(ホーム復帰や VR からの指示)は正常に動く。
 
-`motion_generator_node` 側は「**ゼロでない Twist のみがゴールを abort する**」仕様なので、
-PS4 を繋いだままでもゴール指定(ホーム復帰や VR からの指示)は正常に動く。
-上流の仕様が変わるとここが壊れるので、両方のドキュメントに書いてある。
+### グリッパは変化時のみ publish する (2026-09-11〜)
 
-### グリッパは毎周期 publish する
-
-状態量なので冪等であり、毎回送っても害がない。変化時のみ送る方式だと、
-後から起動したノードが現在状態を知る手段がなくなる。
+以前は「状態量なので冪等」として毎周期送っていたが、VR が同じ
+`/catchrobo/arm/gripper` へ送った開閉を 20ms 後にこちらの値で上書きしてしまい、
+VR からグリッパを閉じられなかった。トグルボタンの立ち上がりエッジで 1 回だけ送る。
+後から起動した `motion_generator_node` はこの値を知らないが、両者とも起動時は
+「開」なので実害はない (閉じたまま再起動した場合はもう一度トグルする)。
 
 ## ホーム復帰
 
@@ -235,7 +245,7 @@ L1 は `deadman_button` と兼用してよい(コンボの一部として押さ�
 
 | 事象 | 挙動 |
 |---|---|
-| `joy_timeout` の間 `/joy` が来ない(切断) | 全入力ニュートラル。ゼロ Twist を送り続ける。警告ログ |
+| `joy_timeout` の間 `/joy` が来ない(切断) | 全入力ニュートラル。動いていた最中ならゼロ Twist を 1 発送って止める。警告ログ |
 | 設定した `axis` / `button` の番号が `/joy` の配列長を超える | **起動時とメッセージ受信時に検証**。該当入力を 0 として扱い、エラーログを1度だけ出す |
 | `deadzone` がスティックの中心ずれより小さい | 手を離しても微速で動き続ける。実機で `/joy` を見て調整する |
 | ホームゴールが却下された | `/catchrobo/arm/status` を見て警告ログを出す。リトライしない |

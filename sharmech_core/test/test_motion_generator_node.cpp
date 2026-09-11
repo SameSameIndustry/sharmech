@@ -307,7 +307,7 @@ TEST(MotionGeneratorNode, ZeroTwistDoesNotAbortGoalAndGoalSucceeds)
         return s && s->mode == sharmech_msgs::msg::MotionStatus::MODE_GOAL;
       }, 1.0));
 
-  // joy_teleop_node はニュートラルでもゼロ Twist を送り続ける。
+  // joy_teleop_node は停止時にゼロ Twist を送る (VR は常時送り続ける)。
   // これを模擬してゴールが abort されないことを確認する
   for (int i = 0; i < 10; ++i) {
     harness.publishTwist(0.0, 0.0, 0.0);

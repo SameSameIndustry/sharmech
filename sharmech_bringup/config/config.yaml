@@ -62,7 +62,8 @@ motion_generator_node:
 
 joy_teleop_node:
   ros__parameters:
-    publish_rate: 50.0       # Twist/グリッパの送信周期 [Hz]
+    publish_rate: 50.0       # Twist の送信周期 [Hz] (ジョグが非ゼロの間だけ。ニュートラル中は送らない。
+                             # グリッパはトグル時のみ。2026-09-11〜)
     joy_timeout: 0.5         # /joy 途絶時に全入力をニュートラル扱いにする時間 [s]
     deadzone: 0.15           # スティックのデッドゾーン
     use_deadman: true        # デッドマンスイッチ (押している間だけジョグが効く)

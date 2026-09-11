@@ -287,6 +287,11 @@ void JoyTeleopNode::onJoy(const sensor_msgs::msg::Joy::SharedPtr msg)
     RCLCPP_INFO(
       get_logger(), "Gripper toggled → %s",
       gripper_state_ ? "close" : "open");
+    // 変化したときだけ送る。毎周期送ると、VR が同じトピックへ送った開閉を
+    // 20ms 後にこちらの値で上書きしてしまう (2026-09-11 実機で発覚)
+    std_msgs::msg::Bool gripper_msg;
+    gripper_msg.data = gripper_state_;
+    gripper_pub_->publish(gripper_msg);
   }
   if (pressed_edge(home_button_)) {
     rumble(0.6);        // ホーム姿勢へのゴールを送った
@@ -354,15 +359,14 @@ void JoyTeleopNode::onPublishTimer()
 
   if (!joy_alive) {
     // コントローラ切断。最後のスティック値を送り続けると暴走するため
-    // 全入力をニュートラルとして扱う。publish は止めない
-    // (ゼロを明示的に送れば watchdog を待たず即座に減速が始まる)
+    // 全入力をニュートラルとして扱う (動いていた最中なら下でゼロが 1 発出る)
     if (last_joy_) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 5000,
-        "/joy not received for %.1f s; sending neutral", joy_timeout_);
+        "/joy not received for %.1f s; treating input as neutral", joy_timeout_);
     }
   } else if (use_deadman_ && !readButton(deadman_button_, *last_joy_)) {
-    // デッドマン非押下。「送信停止」ではなくゼロを送る
+    // デッドマン非押下 → ニュートラル (動いていた最中なら下でゼロが 1 発出る)
   } else {
     twist.linear.x = readDof(vx_map_, *last_joy_);
     twist.linear.y = readDof(vy_map_, *last_joy_);
@@ -371,11 +375,20 @@ void JoyTeleopNode::onPublishTimer()
     twist.angular.z = readDof(yaw_map_, *last_joy_);
   }
 
+  // ジョグが効いている間だけ定期送信し、ニュートラルに戻った直後に 1 発だけ
+  // ゼロを送って止める (それ以降は送らない)。ニュートラルでも 50Hz でゼロを
+  // 送り続けると、VR が同じトピックへ送るジョグとゼロが交互に届き、
+  // motion_generator_node の 10Hz サンプリングでゼロを掴んで速度が上下する
+  // (2026-09-11 実機で発覚)。停止の即応性はこの 1 発のゼロで保ち (reliable QoS)、
+  // 万一届かなくても motion_generator_node の twist_timeout で止まる
+  const bool active =
+    twist.linear.x != 0.0 || twist.linear.y != 0.0 || twist.linear.z != 0.0 ||
+    twist.angular.y != 0.0 || twist.angular.z != 0.0;
+  if (!active && !twist_was_active_) {
+    return;
+  }
+  twist_was_active_ = active;
   twist_pub_->publish(twist);
-
-  std_msgs::msg::Bool gripper_msg;
-  gripper_msg.data = gripper_state_;
-  gripper_pub_->publish(gripper_msg);
 }
 
 double JoyTeleopNode::readDof(

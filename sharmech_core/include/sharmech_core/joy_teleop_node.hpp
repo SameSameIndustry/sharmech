@@ -31,8 +31,9 @@ namespace sharmech_core
 // Sub: /catchrobo/arm/status      (ホーム復帰の却下をログに出すため・任意)
 // Sub: /catchrobo/game/state      (MANUAL_CONTROL の間 DualSense の LED を白で点滅させる。
 //      表示のみで、操作の可否はこのノードでは判断しない)
-// Pub: /catchrobo/arm/cmd_twist   (publish_rate で定期送信)
-// Pub: /catchrobo/arm/gripper     (同上)
+// Pub: /catchrobo/arm/cmd_twist   (ジョグが非ゼロの間 publish_rate で定期送信。
+//      ゼロに戻った直後に 1 発ゼロを送り、以後は送らない)
+// Pub: /catchrobo/arm/gripper     (トグルボタンの立ち上がりエッジで変化時のみ)
 // Pub: /catchrobo/arm/target_pose (ホームボタンの立ち上がりエッジ)
 // Pub: /catchrobo/arm/cancel      (デッドマンの立ち下がり)
 // Pub: /catchrobo/game/confirm (微調整の確定。ADJUSTING_PICK/ADJUSTING_PLACE で効く)
@@ -133,6 +134,7 @@ private:
   std::optional<sensor_msgs::msg::Joy> last_joy_;
   std::optional<rclcpp::Time> last_joy_time_;
   bool gripper_state_{false};   // トグルで反転。起動時は false (開)
+  bool twist_was_active_{false};  // 直前に publish した Twist が非ゼロだったか (停止の 1 発用)
   std::vector<int32_t> prev_buttons_;
   bool manual_toggle_combo_was_active_{false};  // 4ボタン同時押しの立ち上がりエッジ検出用
   uint8_t last_seen_result_{sharmech_msgs::msg::MotionStatus::RESULT_NONE};

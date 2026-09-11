@@ -256,8 +256,8 @@ void MotionGeneratorNode::onCmdTwist(const geometry_msgs::msg::Twist::SharedPtr 
   }
 
   // ゼロでない Twist のみがゴールに干渉する。
-  // joy_teleop_node はニュートラルでもゼロ Twist を送り続けるため、
-  // 「受信したら abort」と実装するとゴール指定が一切使えなくなる
+  // joy_teleop_node は停止時にゼロ Twist を送る (2026-09-11 までは常時 50Hz) ため、
+  // 「受信したら abort」と実装するとゴール指定が使えなくなる
   const bool active = isActive(twist);
 
   if ((goal_mode_ == "exclusive" || goal_mode_ == "goal_priority") &&
