@@ -226,9 +226,8 @@ void HardwareBridgeNode::onCartesianCommand(
 {
   if (sockfd_ < 0) {return;}
 
-  // 動作許可・初期位置要求は位置と同じメッセージで届く (取りこぼしても次で回復)
+  // 動作許可は位置と同じメッセージで届く (取りこぼしても次で回復)
   enable_state_ = msg->enable;
-  init_request_state_ = msg->init_request;
 
   // 手首は pitch/yaw の2自由度のみ。roll 成分は捨てる
   const auto pitch_yaw = OrientationUtils::toPitchYaw(msg->pose.orientation);
@@ -329,7 +328,6 @@ void HardwareBridgeNode::onCartesianFlagsOnly(
 {
   // joint モード用。位置は使わずフラグだけラッチする
   enable_state_ = msg->enable;
-  init_request_state_ = msg->init_request;
 }
 
 rcl_interfaces::msg::SetParametersResult HardwareBridgeNode::onSetParameters(
@@ -368,7 +366,7 @@ udp_protocol::ControlFlags HardwareBridgeNode::controlFlags() const
   udp_protocol::ControlFlags flags;
   flags.enable = enable_state_;
   flags.orient_vertical = orient_vertical_state_;
-  flags.init_request = init_request_state_;
+  // bit2 (初期位置要求) は ROS2 からは立てない (予約。udp_protocol.hpp 参照)
   return flags;
 }
 
@@ -495,7 +493,7 @@ void HardwareBridgeNode::publishFeedback(
 {
   // ROS2 がまだ駆動していない間は、θ のアンラップ基準を MCU の実 θ に合わせておく
   // (ヘッダの last_sent_theta_ のコメント参照)。駆動中は送信値が基準
-  if (!has_sent_command_ || !enable_state_ || init_request_state_) {
+  if (!has_sent_command_ || !enable_state_) {
     last_sent_theta_ = fb.theta;
   }
 

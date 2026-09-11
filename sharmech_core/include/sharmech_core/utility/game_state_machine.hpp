@@ -18,11 +18,13 @@ namespace sharmech_core
 // /catchrobo/game/state (std_msgs/String) としてそのまま配信する。
 //
 // 各状態での動作:
-//   kInit           初期位置へ戻している最中。/catchrobo/game/reset を受けると
-//                   **どの状態からでも**ここへ入り、motion_generator_node へ初期位置要求を
-//                   出す (座標はこちらでは持たない。MCU が自前の初期関節角へ動く)
-//                   (グリッパは開・縦は解除・作業領域クランプはデフォルトへ)。
-//                   到達したら kWaitingForPick へ戻る (requestInit() のコメント参照)
+//   kInit           初期位置 (Config::init_pose) へ動かしている最中。**起動時
+//                   (Config::init_on_startup)・/catchrobo/game/reset・MCU フィードバックの
+//                   途絶** で、どの状態からでもここへ入る (グリッパは開・縦は解除・
+//                   作業領域クランプはデフォルトへ)。motion_generator_node の動作許可
+//                   (enable) が出ていれば初期位置へ直線 1 本のゴールを出し、まだなら
+//                   立ち上がりを待って出す。到達で kWaitingForPick へ、MANUAL_CONTROL に
+//                   入ると抜ける (requestInit() / onMotionEnabled() のコメント参照)
 //   kWaitingForPick 次に運ぶワークの選択待ち。VR からの pick_request を受理する
 //   kApproaching    ワークの真上まで approach_clearance_z のまま**水平移動**する
 //                   (グリッパは開)。斜めに降りながら近づくと、200mmピッチで並んだ
@@ -156,14 +158,22 @@ public:
     // false なら止まらずそのまま掴む/離す (完全自動)。
     // 実機で位置合わせの精度が出るまでは true を推奨
     bool require_manual_confirm{true};
-    // 初期位置 (kInit の行き先) は **持たない**。/catchrobo/game/reset の実体は
-    // motion_generator_node への初期位置要求で、座標は MCU 側が定義する
-    // (control_flags bit2。docs/game_state_manager_node.md「状態のリセット」)
+    // 初期位置 (kInit の行き先)。ベース座標系の直交座標。正本は robot_geometry.yaml の
+    // init_pose (極座標 r/θ/z、赤・青別) で、game_state_manager_node が直交座標へ直して渡す。
+    // pitch/yaw は 0。**そこまでは直線 1 本で動く** (L 字にはしない。起動時は人間が
+    // おおよその初期位置に置いてから電源を入れる運用でカバーする)
+    CartesianState init_pose{};
+    // true なら起動直後に kInit から始まり、動作許可が出た時点で初期位置へ動く。
+    // false なら kWaitingForPick から始まる (reset / 途絶による kInit は使える)
+    bool init_on_startup{true};
   };
 
   explicit GameStateMachine(Config config)
   : config_(std::move(config))
   {
+    if (config_.init_on_startup) {state_ = GameState::kInit;}
+    // ゴールはまだ出さない。motion_generator_node が MCU の実姿勢へ同期して
+    // 動作許可を出したとき (onMotionEnabled の立ち上がり) に出す
   }
 
   GameState state() const {return state_;}
@@ -200,12 +210,15 @@ public:
   // (kManualControl・kComplete を含む)。試合中に手順が崩れたときの立て直しや、
   // 練習のやり直しのために、VR / PS4 のどちらからでも押せる1つの出口として置く。
   //
-  // 「リセット」は**アームを初期位置へ戻すところまで**を指す。ただし初期位置の
-  // 座標はこのクラスも ROS2 側も持たず、motion_generator_node への「初期位置要求」
-  // (→ UDP control_flags bit2) を1回出すだけ。MCU が自前の初期関節角へ動き、
-  // 到達 (last_result = SUCCEEDED) で kWaitingForPick へ戻る (onGoalReached)。
-  // 却下・中断されたときは他の自動シーケンスと同じ扱いで kWaitingForPick へ落ちる
-  // (onGoalRejectedOrAborted。理由はノード側が警告ログに出す)。
+  // 「リセット」は**アームを初期位置 (Config::init_pose) へ戻すところまで**を指す。
+  // 動作許可が出ていれば初期位置へのゴールを 1 本出し、まだなら onMotionEnabled の
+  // 立ち上がりで出す。到達 (last_result = SUCCEEDED) で kWaitingForPick へ戻る
+  // (onGoalReached)。却下・中断されたときは他の自動シーケンスと同じ扱いで
+  // kWaitingForPick へ落ちる (onGoalRejectedOrAborted。理由はノード側が警告ログに出す)。
+  //
+  // MCU フィードバックの途絶 (motion_generator_node が動作許可を落とす) でも
+  // ノードがこれを呼ぶ (onMotionEnabled の立ち下がり)。ワークを保持していても
+  // グリッパは開ける (ユーザー決定 2026-09-11)
   //
   // **配置の進み具合 (order_index_ / authorized_count_) は消さない。**
   // 消してしまうと、VR側が持っている通算カウント (box_count) と食い違い、
@@ -215,8 +228,9 @@ public:
   void requestInit()
   {
     state_ = GameState::kInit;
-    pending_goal_.reset();             // ゴールは出さない (座標を持たない)
-    pending_init_request_ = true;
+    pending_goal_.reset();
+    init_goal_sent_ = false;
+    if (motion_enabled_) {sendInitGoal();}
     pending_gripper_ = false;          // 掴んだままにしない
     pending_orient_vertical_ = false;  // 縦にしていたら横へ戻す
     WorkspaceClampCommand reset_clamp;
@@ -228,6 +242,26 @@ public:
     // 退避先 (pre_manual_state_) はここでは触らない —— 次に自由操作へ
     // 入るときに、そのときの状態で上書きされるため
   }
+
+  // motion_generator_node の動作許可 (/catchrobo/command/cartesian の enable)。
+  // MCU の実姿勢へ同期し終えると false → true、MCU 未初期化 (bit3) やフィードバックの
+  // 途絶で true → false になる。
+  //   立ち上がり: kInit で待っていれば初期位置へのゴールを出す (起動時・reset 直後・
+  //               途絶からの復帰)。それ以外の状態では何もしない
+  //   立ち下がり: どの状態からでも kInit へ (途絶 → 強制 INIT。ユーザー決定 2026-09-11)。
+  //               ゴールは復帰後の立ち上がりで出る
+  void onMotionEnabled(bool enabled)
+  {
+    const bool was_enabled = motion_enabled_;
+    motion_enabled_ = enabled;
+    if (enabled && !was_enabled && state_ == GameState::kInit) {
+      sendInitGoal();
+    } else if (!enabled && was_enabled) {
+      requestInit();
+    }
+  }
+
+  bool motionEnabled() const {return motion_enabled_;}
 
   // ワークへは「水平移動 → 垂直降下」の2段で近づく (斜めに降りない)。
   // ここで出すのは1段目、ワークの**真上**までのゴール
@@ -340,7 +374,11 @@ public:
         advanceSlot();
         break;
       case GameState::kInit:
-        // 初期位置へ戻り切った。ここから普通に pick_request を受けられる
+        // 初期位置へ戻り切った。ここから普通に pick_request を受けられる。
+        // まだゴールを出していない (動作許可待ち) のに届いた到達は他人のもの
+        // (ノード再起動時に latched で届く古い status 等) なので無視する
+        if (!init_goal_sent_) {break;}
+        init_goal_sent_ = false;
         state_ = GameState::kWaitingForPick;
         break;
       default:
@@ -354,6 +392,10 @@ public:
   // 引き戻されると、脱出ハッチとして機能しなくなるため)
   void onGoalRejectedOrAborted()
   {
+    // kInit でゴールを出す前 (動作許可待ち) の却下・中断は自分のものではない
+    // (途絶で中断された直前のゴールの ABORTED が enable の立ち下がりの後に届く等)
+    if (state_ == GameState::kInit && !init_goal_sent_) {return;}
+    init_goal_sent_ = false;
     if (state_ != GameState::kWaitingForPick && state_ != GameState::kComplete &&
       state_ != GameState::kManualControl)
     {
@@ -396,7 +438,7 @@ public:
   {
     state_ = state;
     pending_goal_.reset();
-    pending_init_request_ = false;
+    init_goal_sent_ = false;   // forceState(kInit) では動かない (動かすのは reset)
     pending_gripper_.reset();
     pending_orient_vertical_.reset();
     pending_clamp_.reset();
@@ -424,13 +466,16 @@ public:
   void toggleManualControl(double now_sec)
   {
     if (state_ == GameState::kManualControl) {
-      state_ = pre_manual_state_;
+      // kInit から自由操作に入っていた場合は kInit へ戻さず待機へ (自由操作で動かした
+      // 後に、途中だった初期位置への移動を再開しない)。自由操作は INIT の出口の 1 つ
+      state_ = pre_manual_state_ == GameState::kInit ?
+        GameState::kWaitingForPick : pre_manual_state_;
     } else {
       pre_manual_state_ = state_;
       state_ = GameState::kManualControl;
     }
     pending_goal_.reset();
-    pending_init_request_ = false;
+    init_goal_sent_ = false;
     pending_gripper_.reset();
     pending_orient_vertical_.reset();
     WorkspaceClampCommand reset_clamp;
@@ -442,15 +487,6 @@ public:
   }
 
   // --- 保留中の指令。状態遷移直後にのみセットされる (edge-triggered) ---
-
-  // 初期位置要求 (kInit 進入時に1回だけ真)。消費すると偽に戻る
-  bool hasPendingInitRequest() const {return pending_init_request_;}
-  bool consumePendingInitRequest()
-  {
-    const bool v = pending_init_request_;
-    pending_init_request_ = false;
-    return v;
-  }
 
   bool hasPendingGoal() const {return pending_goal_.has_value();}
   CartesianState consumePendingGoal()
@@ -485,6 +521,16 @@ public:
   }
 
 private:
+  // 初期位置へのゴール (直線 1 本) を出す。姿勢は 0 にそろえる
+  void sendInitGoal()
+  {
+    CartesianState goal = config_.init_pose;
+    goal.pitch = 0.0;
+    goal.yaw = 0.0;
+    pending_goal_ = goal;
+    init_goal_sent_ = true;
+  }
+
   void enterGrasping(double now_sec)
   {
     state_ = GameState::kGrasping;
@@ -592,8 +638,12 @@ private:
   // motion_generator の現在の目標姿勢 (微調整のジョグを含む)。未受信なら nullopt
   std::optional<CartesianState> current_pose_;
 
+  // motion_generator_node の動作許可 (未受信なら false)
+  bool motion_enabled_{false};
+  // kInit で初期位置へのゴールを出したか。出す前に届く到達・却下は無視する
+  bool init_goal_sent_{false};
+
   std::optional<CartesianState> pending_goal_;
-  bool pending_init_request_{false};
   std::optional<bool> pending_gripper_;
   std::optional<bool> pending_orient_vertical_;
   std::optional<WorkspaceClampCommand> pending_clamp_;

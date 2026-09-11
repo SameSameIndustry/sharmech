@@ -1,10 +1,12 @@
 #include "sharmech_core/game_state_manager_node.hpp"
 #include "sharmech_core/utility/orientation_utils.hpp"
+#include "sharmech_core/utility/polar_utils.hpp"
 
 #include <rclcpp_components/register_node_macro.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
+#include <cmath>
 #include <stdexcept>
 #include <string>
 
@@ -69,7 +71,7 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
     "/catchrobo/game/box_count", 10,
     std::bind(&GameStateManagerNode::onBoxCount, this, std::placeholders::_1));
   status_sub_ = create_subscription<sharmech_msgs::msg::MotionStatus>(
-    "/catchrobo/arm/status", rclcpp::QoS(1).transient_local(),
+    "/catchrobo/arm/status", rclcpp::QoS(10).transient_local(),   // depth は publisher 側と揃える
     std::bind(&GameStateManagerNode::onArmStatus, this, std::placeholders::_1));
 
   // デバッグ用。任意のステートへ飛ばして、その状態の振る舞いだけを確認できる
@@ -107,8 +109,6 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
     "/catchrobo/arm/gripper", 10);
   orient_vertical_pub_ = create_publisher<std_msgs::msg::Bool>(
     "/catchrobo/arm/orient_vertical", 10);
-  init_request_pub_ = create_publisher<std_msgs::msg::Empty>(
-    "/catchrobo/arm/init_request", 10);
   workspace_clamp_pub_ = create_publisher<sharmech_msgs::msg::WorkspaceClamp>(
     "/catchrobo/game/workspace_clamp", 10);
   jog_limit_pub_ = create_publisher<sharmech_msgs::msg::JogLimit>(
@@ -125,8 +125,11 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
 
   RCLCPP_INFO(
     get_logger(),
-    "game_state_manager_node started (field_color=%s, %zu slots, %zu-step placement_order)",
-    field_color.c_str(), config.slots.size(), config.placement_order.size());
+    "game_state_manager_node started (field_color=%s, %zu slots, %zu-step placement_order, "
+    "init_pose=(%.3f, %.3f, %.3f), init_on_startup=%s)",
+    field_color.c_str(), config.slots.size(), config.placement_order.size(),
+    config.init_pose.x, config.init_pose.y, config.init_pose.z,
+    config.init_on_startup ? "true" : "false");
   logSlotGeometry(config, {});
 }
 
@@ -186,8 +189,18 @@ void GameStateManagerNode::declareParameters(const std::string & color_suffix)
   declare_parameter("adjusting_jog_v_max", 0.05);
   declare_parameter("grasp_dwell_sec", 0.3);
   declare_parameter("orient_dwell_sec", 0.5);
-  // 初期位置 (init_pose) のパラメータは **持たない**。/catchrobo/game/reset は
-  // MCU 側で定義した初期関節角へ戻す要求であり、座標は ROS2 側に無い
+
+  // --- 初期位置 (起動時・reset・フィードバック途絶で戻る先) ---
+  // robot_geometry.yaml の init_pose から生成される。UDP と同じ極座標
+  // (原点 = ターンテーブル軸、θ は +X から時計回り正、z はベース座標系) で赤・青別に持ち、
+  // buildConfig() が turntable_axis_x/y_m を原点として直交座標へ直す
+  declare_parameter("init_pose_r_" + color_suffix, 0.0);
+  declare_parameter("init_pose_theta_" + color_suffix, 0.0);
+  declare_parameter("init_pose_z_" + color_suffix, 0.0);
+  declare_parameter("turntable_axis_x_m", 0.0);
+  declare_parameter("turntable_axis_y_m", 0.0);
+  // true: 起動直後 INIT から始まり、MCU 同期後に初期位置へ動く。起動時にだけ読む
+  declare_parameter("init_on_startup", true);
 }
 
 // overrides に載っているものはそ担ってるよねの値を、載っていないものは現在値を使って設定を組む。
@@ -259,6 +272,20 @@ GameStateMachine::Config GameStateManagerNode::buildConfig(
     box_top_z + dbl("retract_clearance_above_box_top_m") + offset_z;
   config.grasp_dwell_sec = dbl("grasp_dwell_sec");
   config.orient_dwell_sec = dbl("orient_dwell_sec");
+
+  // 初期位置: 極座標 → 直交座標。field_origin_offset は掛けない
+  // (ロボット自身に対する姿勢で、フィールドの設置誤差とは無関係)
+  const double init_r = dbl("init_pose_r_" + field_color_);
+  const double init_theta = dbl("init_pose_theta_" + field_color_);
+  if (!(init_r > 0.0) || !std::isfinite(init_theta)) {
+    throw std::invalid_argument(
+            "init_pose_r_" + field_color_ + " must be positive (got " +
+            std::to_string(init_r) + "); robot_geometry.generated.yaml が古いか未生成");
+  }
+  config.init_pose.x = PolarUtils::toX(init_r, init_theta, dbl("turntable_axis_x_m"));
+  config.init_pose.y = PolarUtils::toY(init_r, init_theta, dbl("turntable_axis_y_m"));
+  config.init_pose.z = dbl("init_pose_z_" + field_color_);
+  config.init_on_startup = boolean("init_on_startup");
 
   if (config.slots.empty()) {
     throw std::invalid_argument(
@@ -490,7 +517,7 @@ void GameStateManagerNode::onToggleManualControl(const std_msgs::msg::Empty::Sha
 }
 
 // 状態のリセット要求 (/catchrobo/game/reset)。どの状態からでも INIT へ入り、
-// motion_generator_node へ初期位置要求を1回出す (座標は MCU 側が持つ)。
+// 初期位置 (init_pose) へのゴールを出す (動作許可がまだなら立ち上がりで出す)。
 // 到達 (last_result = SUCCEEDED) したら WAITING_FOR_PICK へ戻る。
 // **配置の進み具合 (box_count のキュー) は消さない** ——
 // 正本は VR 側の通算カウントなので、こちらだけ巻き戻すと食い違う
@@ -501,7 +528,7 @@ void GameStateManagerNode::onResetRequest(const std_msgs::msg::Empty::SharedPtr)
   machine_->requestInit();
   RCLCPP_WARN(
     get_logger(),
-    "Game state reset requested: %s -> INIT (requesting MCU init pose)",
+    "Game state reset requested: %s -> INIT (moving to init_pose)",
     toString(previous).c_str());
   publishPendingOutputs();
   publishState();
@@ -523,7 +550,10 @@ void GameStateManagerNode::onConfirm(const std_msgs::msg::Empty::SharedPtr)
   publishState();
 }
 
-// 現在の目標姿勢を控えるだけ (publish はしない)。微調整後の垂直移動の起点に使う
+// 現在の目標姿勢と動作許可。姿勢は控えるだけ (微調整後の垂直移動の起点に使う)。
+// 動作許可の立ち上がり (MCU の実姿勢へ同期済み) は INIT が初期位置へ動き出す契機、
+// 立ち下がり (MCU 未初期化・フィードバック途絶) はどの状態からでも INIT へ入る契機
+// (GameStateMachine::onMotionEnabled)
 void GameStateManagerNode::onCommandCartesian(
   const sharmech_msgs::msg::CartesianCommand::SharedPtr msg)
 {
@@ -535,6 +565,19 @@ void GameStateManagerNode::onCommandCartesian(
   pose.pitch = pitch_yaw.pitch;
   pose.yaw = pitch_yaw.yaw;
   machine_->onCurrentPose(pose);
+
+  const auto previous = machine_->state();
+  const bool was_enabled = machine_->motionEnabled();
+  machine_->onMotionEnabled(msg->enable);
+  if (msg->enable != was_enabled) {
+    RCLCPP_WARN(
+      get_logger(), "Motion %s by motion_generator_node: %s -> %s%s",
+      msg->enable ? "enabled" : "disabled",
+      toString(previous).c_str(), toString(machine_->state()).c_str(),
+      machine_->hasPendingGoal() ? " (moving to init_pose)" : "");
+    publishPendingOutputs();
+    publishState();
+  }
 }
 
 void GameStateManagerNode::onTimer()
@@ -572,10 +615,6 @@ void GameStateManagerNode::publishPendingOutputs()
   }
   if (machine_->hasPendingGoal()) {
     target_pose_pub_->publish(toPoseStampedMsg(machine_->consumePendingGoal()));
-  }
-  if (machine_->hasPendingInitRequest()) {
-    machine_->consumePendingInitRequest();
-    init_request_pub_->publish(std_msgs::msg::Empty{});
   }
 }
 

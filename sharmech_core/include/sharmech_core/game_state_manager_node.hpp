@@ -48,7 +48,10 @@ namespace sharmech_core
 // Sub: /catchrobo/game/toggle_manual_control  DualSenseの特定ボタン同時押し
 //      (L1+R1+L3+R3) で joy_teleop_node が publish する、自由操作の入/切トグル
 // Sub: /catchrobo/game/reset          (std_msgs/Empty) 状態のリセット要求。
-//      どの状態からでも INIT へ入り、MCU 側の初期位置へ戻ってから WAITING_FOR_PICK に復帰する
+//      どの状態からでも INIT へ入り、初期位置 (init_pose_*) へ戻ってから WAITING_FOR_PICK に復帰する
+// Sub: /catchrobo/command/cartesian   現在の目標姿勢 (微調整の起点) と動作許可 enable。
+//      enable の立ち上がりで INIT が初期位置へ動き出し、立ち下がり (MCU 未初期化・
+//      フィードバック途絶) でどの状態からでも INIT へ入る
 class GameStateManagerNode : public rclcpp::Node
 {
 public:
@@ -63,13 +66,13 @@ private:
   // VRが使えない場合の脱出ハッチ。どの状態からでも自由操作(手動ジョグのみ)へ
   // トグルする。詳細は GameStateMachine::toggleManualControl() のコメント参照
   void onToggleManualControl(const std_msgs::msg::Empty::SharedPtr msg);
-  // 状態のリセット要求。どの状態からでも INIT へ入り、motion_generator_node へ
-  // 初期位置要求 (/catchrobo/arm/init_request) を1回出す。座標は持たない
+  // 状態のリセット要求。どの状態からでも INIT へ入り、初期位置へのゴールを 1 本出す
   // (詳細は GameStateMachine::requestInit() のコメント参照)
   void onResetRequest(const std_msgs::msg::Empty::SharedPtr msg);
   // 操縦者の確定 (微調整の完了)。ADJUSTING_PICK / ADJUSTING_PLACE でのみ効く
   void onConfirm(const std_msgs::msg::Empty::SharedPtr msg);
-  // motion_generator の現在の目標姿勢。微調整でジョグした結果を追うために購読する
+  // motion_generator の現在の目標姿勢と動作許可 (enable)。姿勢は微調整でジョグした
+  // 結果を追うため、enable は INIT の動き出し / 途絶時の INIT 突入の契機
   void onCommandCartesian(const sharmech_msgs::msg::CartesianCommand::SharedPtr msg);
   void onTimer();
 
@@ -92,7 +95,6 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr orient_vertical_pub_;
-  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr init_request_pub_;
   rclcpp::Publisher<sharmech_msgs::msg::WorkspaceClamp>::SharedPtr workspace_clamp_pub_;
   rclcpp::Publisher<sharmech_msgs::msg::JogLimit>::SharedPtr jog_limit_pub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr change_state_sub_;

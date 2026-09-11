@@ -89,7 +89,7 @@ ROS2 の `joy` ノードは既定で**状態が変化したときだけ** publis
 | `joy_timeout` | 0.5 | この時間 `/joy` が無ければ全入力をニュートラル扱い [s] |
 | `deadzone` | 0.15 | スティックのデッドゾーン。**必須**(ドリフトで微速動作し続けるのを防ぐ) |
 | `use_deadman` | `true` | デッドマンスイッチを使うか |
-| `home_pose` | (空 = 無効) | ホーム姿勢 `[x, y, z, pitch, yaw]`。**暫定・未設定。** 初期位置の正本は MCU 側 (`/catchrobo/game/reset` → `control_flags` bit2) なので、ホームボタンも将来は reset へ寄せる想定 |
+| `home_pose` | (空 = 無効) | ホーム姿勢 `[x, y, z, pitch, yaw]`。**暫定・未設定。** 初期位置の正本は `robot_geometry.yaml` の `init_pose` (`game_state_manager_node`。2026-09-11〜。それ以前は MCU 側) なので、ホームボタンも将来は `/catchrobo/game/reset` へ寄せる想定 (このノードは reset を publish しない) |
 
 ### 軸・ボタン割り当て
 
@@ -269,7 +269,7 @@ L1 は `deadman_button` と兼用してよい(コンボの一部として押さ�
 
 | 項目 | 内容 |
 |---|---|
-| `home_pose` の扱い | 未設定 (空なら無効)。初期位置の正本が MCU 側へ移った (2026-09-10) ため、Cartesian の `home_pose` を持ち続けるか、ホームボタンを `/catchrobo/game/reset` の発行に置き換えるかは未決定 |
+| `home_pose` の扱い | 未設定 (空なら無効)。初期位置の正本は `robot_geometry.yaml` の `init_pose` (`game_state_manager_node`。2026-09-11〜。2026-09-10 の版では MCU 側だった) で `/catchrobo/game/reset` がそこへ戻すため、Cartesian の `home_pose` を持ち続けるか、ホームボタンを `/catchrobo/game/reset` の発行に置き換えるかは未決定 |
 | 軸・ボタン番号の既定値 | 実機の `ros2 topic echo /joy` で要確認 |
 | 速度スケールの切り替え | 低速モード / 高速モードをボタンで切り替えたいか |
 
@@ -391,5 +391,11 @@ ls -l /sys/class/leds/input*:rgb:indicator/brightness       # -rw-rw-rw- にな�
 - ノード E2E: `leds_sysfs_dir` を偽ツリーに向けて `joy_teleop_node` を起動し、
   `/catchrobo/game/state` に `MANUAL_CONTROL` → `WAITING_FOR_PICK` を latched で流して、
   点滅 (255/0 と 11111/00000 が同位相) と復元 (`0 0 128` 点灯・`00100`) を確認
-- **実機の sysfs への書き込みは udev ルール導入後に要確認** (root 権限が無く未実施)
+- **実機 (2026-09-11)**: udev ルール導入前は `MANUAL_CONTROL` に入っても光らなかった
+  (原因は権限。`-rw-r--r-- root` で `Permission denied`)。ルール導入後、Bluetooth 接続の
+  DualSense (`0005:054C:0CE6`、`input21`) に一般ユーザーから白 `255 255 255` / プレイヤー
+  LED `11111` を書いて点灯、青 `0 0 128` / `00100` に戻るところまで確認。
+  **振動は効くのに LED が効かない**のは経路が違うため: 振動は `joy_node` → evdev の FF
+  (ログインユーザーに `uaccess` で自動的に権限が付く)、LED は sysfs の LED クラス
+  (既定 root 専用、`uaccess` の対象外)。振動が動くことは LED の権限の証拠にならない
 

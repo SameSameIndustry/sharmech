@@ -27,6 +27,11 @@ GameStateMachine::Config makeConfig()
   // 既存のサイクルテストは完全自動モードを対象にする。
   // 微調整あり (true) の動作は ManualConfirm* のテストで別途検証する
   config.require_manual_confirm = false;
+  // 既存のテストは WAITING_FOR_PICK 始まりを前提にする。起動時 INIT は Init* のテストで別途検証
+  config.init_on_startup = false;
+  config.init_pose.x = 0.30;
+  config.init_pose.y = 0.0;
+  config.init_pose.z = 0.15;
   return config;
 }
 
@@ -741,25 +746,63 @@ TEST(GameStateMachine, ToggleManualControlWorksFromComplete)
   EXPECT_EQ(machine.state(), GameState::kComplete);
 }
 
-// --- 状態のリセット (/catchrobo/game/reset → INIT) ---------------------------
+// --- 初期位置 (INIT): 起動時・/catchrobo/game/reset・フィードバック途絶 ------------
 
-// どの状態からでも INIT に入り、初期位置要求を1回出す (ゴールは出さない —
-// 初期位置の座標は MCU 側が持ち、ROS2 は知らない)。
-// グリッパは開き、縦は解除し、作業領域クランプはデフォルトへ戻す
-TEST(GameStateMachine, ResetEntersInitAndRequestsMcuInitPose)
+// 起動時は INIT から始まるが、motion_generator_node の動作許可 (enable) が出るまで
+// ゴールは出さない。立ち上がりで init_pose へ直線 1 本のゴールを出す
+TEST(GameStateMachine, StartupInitWaitsForMotionEnableThenSendsInitGoal)
+{
+  auto config = makeConfig();
+  config.init_on_startup = true;
+  GameStateMachine machine(config);
+  EXPECT_EQ(machine.state(), GameState::kInit);
+  EXPECT_FALSE(machine.hasPendingGoal());
+
+  machine.onMotionEnabled(false);   // 同期前は false が届く
+  EXPECT_FALSE(machine.hasPendingGoal());
+
+  machine.onMotionEnabled(true);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  const auto goal = machine.consumePendingGoal();
+  EXPECT_DOUBLE_EQ(goal.x, 0.30);
+  EXPECT_DOUBLE_EQ(goal.y, 0.0);
+  EXPECT_DOUBLE_EQ(goal.z, 0.15);
+  EXPECT_DOUBLE_EQ(goal.pitch, 0.0);
+  EXPECT_DOUBLE_EQ(goal.yaw, 0.0);
+
+  machine.onMotionEnabled(true);    // 立ち上がりは 1 回きり (レベルでは出さない)
+  EXPECT_FALSE(machine.hasPendingGoal());
+
+  machine.onGoalReached(1.0);
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+  machine.onPickPoseReceived(makePose(0.4, 0.1, 0.0));
+  EXPECT_EQ(machine.state(), GameState::kApproaching);
+}
+
+// init_on_startup=false なら従来どおり WAITING_FOR_PICK 始まりで、enable の立ち上がりでも動かない
+TEST(GameStateMachine, NoStartupInitWhenDisabled)
 {
   GameStateMachine machine(makeConfig());
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+  machine.onMotionEnabled(true);
+  EXPECT_FALSE(machine.hasPendingGoal());
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+}
+
+// reset はどの状態からでも INIT に入り、動作許可が出ていれば即ゴールを出す。
+// グリッパは開き、縦は解除し、作業領域クランプはデフォルトへ戻す
+TEST(GameStateMachine, ResetEntersInitAndSendsInitGoal)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true);
   advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
   machine.consumePendingGripper();
   ASSERT_EQ(machine.state(), GameState::kGrasping);
 
   machine.requestInit();
   EXPECT_EQ(machine.state(), GameState::kInit);
-
-  EXPECT_FALSE(machine.hasPendingGoal());
-  ASSERT_TRUE(machine.hasPendingInitRequest());
-  EXPECT_TRUE(machine.consumePendingInitRequest());
-  EXPECT_FALSE(machine.hasPendingInitRequest());  // 1回きり (edge-triggered)
+  ASSERT_TRUE(machine.hasPendingGoal());
+  EXPECT_DOUBLE_EQ(machine.consumePendingGoal().x, 0.30);
 
   ASSERT_TRUE(machine.hasPendingGripper());
   EXPECT_FALSE(machine.consumePendingGripper());          // 開く
@@ -767,20 +810,62 @@ TEST(GameStateMachine, ResetEntersInitAndRequestsMcuInitPose)
   EXPECT_FALSE(machine.consumePendingOrientVertical());    // 横へ戻す
   ASSERT_TRUE(machine.hasPendingWorkspaceClamp());
   EXPECT_TRUE(machine.consumePendingWorkspaceClamp().reset);
-}
-
-// 初期位置へ着いたら待機状態に戻り、そのまま次の pick を受けられる
-TEST(GameStateMachine, InitReturnsToWaitingForPickOnGoalReached)
-{
-  GameStateMachine machine(makeConfig());
-  machine.requestInit();
-  machine.consumePendingInitRequest();
 
   machine.onGoalReached(1.0);
   EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+}
 
-  machine.onPickPoseReceived(makePose(0.4, 0.1, 0.0));
-  EXPECT_EQ(machine.state(), GameState::kApproaching);
+// 動作許可がまだ無いときの reset はゴールを出さずに待ち、立ち上がりで出す
+TEST(GameStateMachine, ResetBeforeMotionEnableWaitsForRisingEdge)
+{
+  GameStateMachine machine(makeConfig());
+  machine.requestInit();
+  EXPECT_EQ(machine.state(), GameState::kInit);
+  EXPECT_FALSE(machine.hasPendingGoal());
+
+  machine.onMotionEnabled(true);
+  ASSERT_TRUE(machine.hasPendingGoal());
+}
+
+// **フィードバック途絶 (enable の立ち下がり) はどの状態からでも INIT へ強制する。**
+// ゴールは復帰 (立ち上がり) まで出さない。ワークを保持していてもグリッパは開ける
+TEST(GameStateMachine, MotionDisabledForcesInitFromAnyState)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true);
+  advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
+  machine.consumePendingGripper();
+  ASSERT_EQ(machine.state(), GameState::kGrasping);
+
+  machine.onMotionEnabled(false);
+  EXPECT_EQ(machine.state(), GameState::kInit);
+  EXPECT_FALSE(machine.hasPendingGoal());
+  ASSERT_TRUE(machine.hasPendingGripper());
+  EXPECT_FALSE(machine.consumePendingGripper());
+
+  // 途絶で中断された直前のゴールの ABORTED が後から届いても INIT のまま
+  machine.onGoalRejectedOrAborted();
+  EXPECT_EQ(machine.state(), GameState::kInit);
+  // 古い SUCCEEDED も自分のものではない
+  machine.onGoalReached(1.0);
+  EXPECT_EQ(machine.state(), GameState::kInit);
+
+  machine.onMotionEnabled(true);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  machine.consumePendingGoal();
+  machine.onGoalReached(2.0);
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+}
+
+// 通常運転中の立ち上がり (途絶せず enable が true のまま) では何も起きない。
+// 立ち下がりを経ずに true が続く限り、WAITING_FOR_PICK で静止したまま
+TEST(GameStateMachine, RepeatedEnableTrueOutsideInitDoesNothing)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true);
+  machine.onMotionEnabled(true);
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+  EXPECT_FALSE(machine.hasPendingGoal());
 }
 
 // **自由操作中でもリセットできる。** リセットは VR のボタンなので、押せている
@@ -789,6 +874,7 @@ TEST(GameStateMachine, InitReturnsToWaitingForPickOnGoalReached)
 TEST(GameStateMachine, ResetPullsOutOfManualControl)
 {
   GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true);
   machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
   machine.consumePendingGoal();
   ASSERT_EQ(machine.state(), GameState::kApproaching);
@@ -798,19 +884,54 @@ TEST(GameStateMachine, ResetPullsOutOfManualControl)
 
   machine.requestInit();
   EXPECT_EQ(machine.state(), GameState::kInit);
-  EXPECT_FALSE(machine.hasPendingGoal());
-  ASSERT_TRUE(machine.consumePendingInitRequest());
+  ASSERT_TRUE(machine.hasPendingGoal());
+  machine.consumePendingGoal();
 
   machine.onGoalReached(2.0);
   EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+}
+
+// 自由操作は INIT の出口の 1 つ。INIT から自由操作へ入り、戻るときは INIT ではなく
+// 待機へ (途中だった初期位置への移動を再開しない)
+TEST(GameStateMachine, ManualControlExitsInitForGood)
+{
+  auto config = makeConfig();
+  config.init_on_startup = true;
+  GameStateMachine machine(config);
+  machine.onMotionEnabled(true);
+  machine.consumePendingGoal();
+  ASSERT_EQ(machine.state(), GameState::kInit);
+
+  machine.toggleManualControl(1.0);
+  EXPECT_EQ(machine.state(), GameState::kManualControl);
+  machine.onGoalReached(1.5);   // 中断された INIT ゴールの結果が届いても無視
+  EXPECT_EQ(machine.state(), GameState::kManualControl);
+
+  machine.toggleManualControl(2.0);
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+  EXPECT_FALSE(machine.hasPendingGoal());
+}
+
+// forceState(kInit) は状態を変えるだけで動かない (動かすのは reset)
+TEST(GameStateMachine, ForceStateToInitDoesNotMove)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true);
+  machine.forceState(GameState::kInit, 0.0);
+  EXPECT_EQ(machine.state(), GameState::kInit);
+  EXPECT_FALSE(machine.hasPendingGoal());
+  machine.onGoalReached(1.0);   // ゴールを出していないので到達も無視
+  EXPECT_EQ(machine.state(), GameState::kInit);
 }
 
 // 初期位置へのゴールが却下・中断されたら、他の自動シーケンスと同じ扱いで待機へ落ちる
 TEST(GameStateMachine, InitFallsBackToWaitingForPickWhenGoalRejected)
 {
   GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true);
   machine.requestInit();
-  machine.consumePendingInitRequest();
+  ASSERT_TRUE(machine.hasPendingGoal());
+  machine.consumePendingGoal();
 
   machine.onGoalRejectedOrAborted();
   EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
@@ -821,11 +942,12 @@ TEST(GameStateMachine, InitFallsBackToWaitingForPickWhenGoalRejected)
 TEST(GameStateMachine, ResetKeepsPlacementProgress)
 {
   GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true);
   runOneCycle(machine, 1);
   ASSERT_EQ(machine.currentSlotId(), 1);  // 1個目を消化済み
 
   machine.requestInit();
-  machine.consumePendingInitRequest();
+  machine.consumePendingGoal();
   machine.onGoalReached(5.0);
   ASSERT_EQ(machine.state(), GameState::kWaitingForPick);
 
