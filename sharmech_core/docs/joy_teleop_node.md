@@ -103,9 +103,9 @@ ROS2 Humble の `joy` (SDL2 ベース) と `joy_linux` でも異なる。
 |---|---|---|
 | `vx_axis` / `vx_scale` | 1 / 0.10 | 左スティック 縦 → 前後 [m/s] |
 | `vy_axis` / `vy_scale` | 0 / 0.10 | 左スティック 横 → 左右 [m/s] |
-| `vz_axis` / `vz_scale` | 7 / 0.10 | 十字キー 縦 → 上下 [m/s] |
-| `pitch_axis` / `pitch_scale` | 4 / 0.50 | 右スティック 縦 → pitch [rad/s] |
-| `yaw_axis` / `yaw_scale` | 3 / 0.50 | 右スティック 横 → yaw [rad/s] |
+| `vz_axis` / `vz_scale` | 7 / 0.10 | 上下 [m/s]。**config.yaml では 4 (右スティック 縦)** (2026-09-11 実機で変更。コードの既定値 7 = 十字キー縦は残置) |
+| `pitch_axis` / `pitch_scale` | 4 / 0.50 | pitch [rad/s]。**config.yaml では -1 (無効)** (2026-09-11。右スティックから angular は出さない) |
+| `yaw_axis` / `yaw_scale` | 3 / 0.50 | yaw [rad/s]。**config.yaml では -1 (無効)** (同上) |
 | `<dof>_button_pos` / `<dof>_button_neg` | -1 | 軸の代わりにボタン対で駆動する場合 |
 | `deadman_button` | 4 | L1 |
 | `gripper_toggle_button` | 0 | × |

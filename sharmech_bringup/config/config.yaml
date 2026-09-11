@@ -75,11 +75,13 @@ joy_teleop_node:
     vx_scale: 0.10
     vy_axis: 0               # 左スティック横 → 左右
     vy_scale: 0.10
-    vz_axis: 7               # 十字キー縦 → 上下
+    vz_axis: 4               # 右スティック縦 → 上下 (2026-09-11 実機で変更。旧: 十字キー縦 = 7)
     vz_scale: 0.10
-    pitch_axis: 4            # 右スティック縦
+    # 右スティックからは angular を出さない (2026-09-11 ユーザー指示。旧: 縦=4 → pitch、横=3 → yaw)。
+    # 姿勢 (pitch/yaw) を PS5 から操作したくなったら、ここに軸番号を戻すか十字キー (7/6) を割り当てる
+    pitch_axis: -1
     pitch_scale: 0.50
-    yaw_axis: 3              # 右スティック横
+    yaw_axis: -1
     yaw_scale: 0.50
     deadman_button: 4        # L1
     gripper_toggle_button: 0 # ×
