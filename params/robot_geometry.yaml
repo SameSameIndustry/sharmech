@@ -256,10 +256,11 @@ shooting_box:
     source: "従来値 (絶対 z=0.20) からの逆算"
     note: "接近時に水平移動する高さ。基準面から何m上か。**retract と同じ値にする** (揃っていれば接近が完全な水平移動になる)"
   transport_clearance_above_top_m:
-    value: 0.044
+    value: 0.144
     unit: m
     status: decision
-    source: "同上"
+    source: "2026-09-11 ユーザー指示: 運搬高さを絶対 z=0.30 に (0.30 - top_z 0.156)"
+    date: 2026-09-11
     note: "運搬中の高さ。缶を縦に持つと下端が更に142mm下がる点に注意"
   retract_clearance_above_top_m:
     value: 0.044
