@@ -28,7 +28,12 @@ field_geometry:
 
 motion_generator_node:
   ros__parameters:
-    control_rate: 100.0      # Cartesianストリーム出力周期 [Hz]
+    # Cartesianストリーム出力周期 [Hz] = UDP 指令 (0x01) の送信周期。起動時のみ読む。
+    # 2026-09-11 に 100 → 10 へ変更 (ユーザー指示)。合わせて MCU ウォッチドッグは
+    # 50ms → 500ms (mcu_spec.md §4.3、mock_mcu.py の --watchdog-timeout 既定)。
+    # 10Hz では 1 パケットあたりの段差が最大 v_max×0.1s = 10mm になるので、
+    # MCU 側の補間 (§4.2) 無しだと 10Hz の階段で動く
+    control_rate: 10.0
     status_rate: 10.0        # /catchrobo/arm/status の配信周期 [Hz]
     v_max: 0.10              # 最大並進速度 [m/s]。軌道生成とジョグで共用
     a_max: 0.20              # 最大並進加速度 [m/s^2]。同上
@@ -118,7 +123,7 @@ hardware_bridge_node:
     mcu_theta_port: -1          # 負なら mcu_port と同じ
     local_port: 8889            # フィードバック受信ポート (両基板ともここへ返す)
     feedback_poll_rate: 200.0   # 受信ポーリング周期 [Hz]
-    feedback_timeout: 0.5       # フィードバック途絶の警告閾値 [s]
+    feedback_timeout: 0.5       # フィードバック途絶の警告閾値 [s]。FB は 10Hz (2026-09-11〜) なので 5 発分
     # /joint_states に載せる関節名。0x02指令・0x81フィードバックの並び順の契約
     # (udp_protocol.hpp の kJointOrder) と同一。2026-09-01確定
     joint_names: ["shoulder_left", "shoulder_right", "turntable", "knee_left", "knee_right"]

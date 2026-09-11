@@ -12,7 +12,7 @@ sharmech_core/include/sharmech_core/utility/udp_protocol.hpp が正本。
 アンラップした連続値で届くが、本モックは値をそのまま保持してエコーするだけ
 なので ±π の外でも扱いは変わらない。
 フィードバック (0x81) は仕様どおり **指令の受信とは独立に一定周期
-(--feedback-rate、既定100Hz) で自発送信する** (2026-09-01確定の契約。
+(--feedback-rate、既定10Hz。2026-09-11 に 100Hz から変更) で自発送信する** (2026-09-01確定の契約。
 実MCUは起動直後から送るが、本モックは送り先アドレスを知らないため
 最初の指令パケットを受けてから送り始める)。
 実際の追従遅れを見たいときは --lag で一次遅れを、--drop-rate で
@@ -168,12 +168,13 @@ def main():
     parser.add_argument("--tracking-error-limit", type=float, default=0.0,
                         help="追従誤差(r-z平面の距離[m])がこれを超えたら FLAG_TRACKING_ERROR を立てる "
                              "(0 で無効。--lag と併用すると実機に近い立ち方をする)")
-    parser.add_argument("--watchdog-timeout", type=float, default=0.05,
+    parser.add_argument("--watchdog-timeout", type=float, default=0.5,
                         help="指令がこの秒数途絶したら FLAG_WATCHDOG を立てて外挿を止める "
-                             "(既定: 0.05 = 仕様の推奨50ms。0 で無効)")
-    parser.add_argument("--feedback-rate", type=float, default=100.0,
-                        help="フィードバック(0x81)の自発送信周期 [Hz] (既定: 100。0 で"
-                             "旧来のエコー型に戻る)")
+                             "(既定: 0.5 = 仕様の推奨500ms。指令が 10Hz (100ms 間隔) なので "
+                             "50ms だと毎パケット間で発動する。0 で無効)")
+    parser.add_argument("--feedback-rate", type=float, default=10.0,
+                        help="フィードバック(0x81)の自発送信周期 [Hz] (既定: 10 = 仕様 §3.4。"
+                             "2026-09-11 に 100 から変更。0 で旧来のエコー型に戻る)")
     parser.add_argument("--init-pose", type=str, default="0.30,0.0,0.15",
                         help="MCU 側で定義した初期位置 'r,theta,z' (m,rad,m)。起動直後の実位置であり、"
                              "control_flags bit2 (初期位置要求) で戻る先 (既定: 0.30,0.0,0.15)")
