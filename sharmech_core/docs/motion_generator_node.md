@@ -214,7 +214,7 @@ ROS2 側の初期位置 (`init_pose_*`) へ動かす → 以後は目標を与�
 |---|---|---|
 | 起動〜同期前 | ゴールは `not synced with MCU feedback yet` で却下、ジョグは捨てる。目標は仮値のまま | `enable=false` (bit0=0) → MCU は現在位置ホールド |
 | 同期 | `mcu_status` が bit3 (未初期化) を報告していないときに `current_pose` が届いたら、制御タイマー内で目標 ← 実姿勢 (1回だけ) | 以後 `enable=true`。目標 = 実姿勢なので**このノード単体では動かない** |
-| 同期の直後 | (このノードは何もしない) | `enable` の false → true を見た `game_state_manager_node` が、`INIT` で待っていれば初期位置へのゴールを出す (2026-09-11) |
+| 同期の直後 | (このノードは何もしない) | `enable` の false → true を見た `game_state_manager_node` が、`INIT` で待っていれば `init_delay_sec` (3s) 後に初期位置へのゴールを出す (2026-09-11) |
 | MCU が bit3 を報告 (MCU 再起動) | 同期を取り消し、ゴール/ジョグを `ABORTED` ("MCU uninitialized") | `enable=false` に戻る |
 | **フィードバック途絶** (`mcu_status.connected=false`。`hardware_bridge_node` の `feedback_timeout`、既定 500ms) | bit3 と同じ扱い: 同期を取り消し、ゴール/ジョグを `ABORTED` ("MCU feedback lost")。**最後に受けた `current_pose` も捨てる** (捨てないと次の制御周期で古い姿勢へ即再同期してしまう)。復帰後の `current_pose` で同期し直す | `enable=false` に戻る。`game_state_manager_node` はこの立ち下がりでどの状態からでも `INIT` へ入る (2026-09-11) |
 

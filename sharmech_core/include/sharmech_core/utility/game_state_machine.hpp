@@ -166,6 +166,9 @@ public:
     // true なら起動直後に kInit から始まり、動作許可が出た時点で初期位置へ動く。
     // false なら kWaitingForPick から始まる (reset / 途絶による kInit は使える)
     bool init_on_startup{true};
+    // kInit で動作許可が出てから実際に初期位置へのゴールを出すまでの待ち時間 [s]
+    // (ユーザー指示 2026-09-11。同期直後に即動き出さず、一呼吸置く)
+    double init_delay_sec{3.0};
   };
 
   explicit GameStateMachine(Config config)
@@ -225,12 +228,13 @@ public:
   // 次に届いた box_count で既に置いたスロットへもう一度置きに行くことになる。
   // 「何個目まで置いたか」の正本はあくまで VR の box_count 側にある
   // (docs/game_state_manager_node.md の「box_count のキュー」参照)。
-  void requestInit()
+  void requestInit(double now_sec)
   {
     state_ = GameState::kInit;
     pending_goal_.reset();
     init_goal_sent_ = false;
-    if (motion_enabled_) {sendInitGoal();}
+    init_goal_due_sec_.reset();
+    if (motion_enabled_) {scheduleInitGoal(now_sec);}
     pending_gripper_ = false;          // 掴んだままにしない
     pending_orient_vertical_ = false;  // 縦にしていたら横へ戻す
     WorkspaceClampCommand reset_clamp;
@@ -246,18 +250,19 @@ public:
   // motion_generator_node の動作許可 (/catchrobo/command/cartesian の enable)。
   // MCU の実姿勢へ同期し終えると false → true、MCU 未初期化 (bit3) やフィードバックの
   // 途絶で true → false になる。
-  //   立ち上がり: kInit で待っていれば初期位置へのゴールを出す (起動時・reset 直後・
-  //               途絶からの復帰)。それ以外の状態では何もしない
+  //   立ち上がり: kInit で待っていれば、init_delay_sec 後に初期位置へのゴールを出す
+  //               (起動時・reset 直後・途絶からの復帰。実際に出すのは tick)。
+  //               それ以外の状態では何もしない
   //   立ち下がり: どの状態からでも kInit へ (途絶 → 強制 INIT。ユーザー決定 2026-09-11)。
   //               ゴールは復帰後の立ち上がりで出る
-  void onMotionEnabled(bool enabled)
+  void onMotionEnabled(bool enabled, double now_sec)
   {
     const bool was_enabled = motion_enabled_;
     motion_enabled_ = enabled;
     if (enabled && !was_enabled && state_ == GameState::kInit) {
-      sendInitGoal();
+      scheduleInitGoal(now_sec);
     } else if (!enabled && was_enabled) {
-      requestInit();
+      requestInit(now_sec);
     }
   }
 
@@ -408,6 +413,12 @@ public:
   // 間は kGrasping のまま待つ** (掴んだ位置で宛先の指示待ちになる)
   void tick(double now_sec)
   {
+    // kInit: 動作許可が出てから init_delay_sec 待って初期位置へのゴールを出す
+    if (state_ == GameState::kInit && init_goal_due_sec_ && now_sec >= *init_goal_due_sec_) {
+      init_goal_due_sec_.reset();
+      sendInitGoal();
+      return;
+    }
     if (state_ == GameState::kGrasping && hasQueuedSlot() &&
       now_sec - grasp_start_sec_ >= config_.grasp_dwell_sec)
     {
@@ -439,6 +450,7 @@ public:
     state_ = state;
     pending_goal_.reset();
     init_goal_sent_ = false;   // forceState(kInit) では動かない (動かすのは reset)
+    init_goal_due_sec_.reset();
     pending_gripper_.reset();
     pending_orient_vertical_.reset();
     pending_clamp_.reset();
@@ -476,6 +488,7 @@ public:
     }
     pending_goal_.reset();
     init_goal_sent_ = false;
+    init_goal_due_sec_.reset();
     pending_gripper_.reset();
     pending_orient_vertical_.reset();
     WorkspaceClampCommand reset_clamp;
@@ -521,6 +534,12 @@ public:
   }
 
 private:
+  // init_delay_sec 後に初期位置へのゴールを出すよう予約する (tick が出す)
+  void scheduleInitGoal(double now_sec)
+  {
+    init_goal_due_sec_ = now_sec + config_.init_delay_sec;
+  }
+
   // 初期位置へのゴール (直線 1 本) を出す。姿勢は 0 にそろえる
   void sendInitGoal()
   {
@@ -642,6 +661,8 @@ private:
   bool motion_enabled_{false};
   // kInit で初期位置へのゴールを出したか。出す前に届く到達・却下は無視する
   bool init_goal_sent_{false};
+  // kInit でゴールを出す予定時刻 [s] (動作許可が出た時刻 + init_delay_sec)。予約が無ければ nullopt
+  std::optional<double> init_goal_due_sec_;
 
   std::optional<CartesianState> pending_goal_;
   std::optional<bool> pending_gripper_;

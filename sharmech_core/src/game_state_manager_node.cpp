@@ -201,6 +201,8 @@ void GameStateManagerNode::declareParameters(const std::string & color_suffix)
   declare_parameter("turntable_axis_y_m", 0.0);
   // true: 起動直後 INIT から始まり、MCU 同期後に初期位置へ動く。起動時にだけ読む
   declare_parameter("init_on_startup", true);
+  // INIT で動作許可が出てから初期位置へのゴールを出すまでの待ち [s]
+  declare_parameter("init_delay_sec", 3.0);
 }
 
 // overrides に載っているものはそ担ってるよねの値を、載っていないものは現在値を使って設定を組む。
@@ -286,6 +288,10 @@ GameStateMachine::Config GameStateManagerNode::buildConfig(
   config.init_pose.y = PolarUtils::toY(init_r, init_theta, dbl("turntable_axis_y_m"));
   config.init_pose.z = dbl("init_pose_z_" + field_color_);
   config.init_on_startup = boolean("init_on_startup");
+  config.init_delay_sec = dbl("init_delay_sec");
+  if (config.init_delay_sec < 0.0) {
+    throw std::invalid_argument("init_delay_sec must be >= 0");
+  }
 
   if (config.slots.empty()) {
     throw std::invalid_argument(
@@ -525,7 +531,7 @@ void GameStateManagerNode::onToggleManualControl(const std_msgs::msg::Empty::Sha
 void GameStateManagerNode::onResetRequest(const std_msgs::msg::Empty::SharedPtr)
 {
   const auto previous = machine_->state();
-  machine_->requestInit();
+  machine_->requestInit(now().seconds());
   RCLCPP_WARN(
     get_logger(),
     "Game state reset requested: %s -> INIT (moving to init_pose)",
@@ -568,13 +574,14 @@ void GameStateManagerNode::onCommandCartesian(
 
   const auto previous = machine_->state();
   const bool was_enabled = machine_->motionEnabled();
-  machine_->onMotionEnabled(msg->enable);
+  machine_->onMotionEnabled(msg->enable, now().seconds());
   if (msg->enable != was_enabled) {
     RCLCPP_WARN(
       get_logger(), "Motion %s by motion_generator_node: %s -> %s%s",
       msg->enable ? "enabled" : "disabled",
       toString(previous).c_str(), toString(machine_->state()).c_str(),
-      machine_->hasPendingGoal() ? " (moving to init_pose)" : "");
+      msg->enable && machine_->state() == GameState::kInit ?
+      " (moving to init_pose after init_delay_sec)" : "");
     publishPendingOutputs();
     publishState();
   }

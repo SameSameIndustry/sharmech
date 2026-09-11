@@ -201,6 +201,9 @@ game_state_manager_node:
     #        この場合でも /catchrobo/game/reset の INIT は使える
     # **起動時にだけ読む** (ros2 param set では変えられない)
     init_on_startup: true
+    # INIT で動作許可 (MCU 同期) が出てから、実際に初期位置へのゴールを出すまでの待ち [s]。
+    # 同期した瞬間に動き出さず一呼吸置く (2026-09-11 ユーザー指示)。ros2 param set で即反映
+    init_delay_sec: 3.0
 
 # kinematics_node (パターンB用) のパラメータは全て機構の幾何 (リンク長・ピボット間距離・
 # ターンテーブル軸位置・肘/膝の基準高さ) なので、このファイルには無い。
