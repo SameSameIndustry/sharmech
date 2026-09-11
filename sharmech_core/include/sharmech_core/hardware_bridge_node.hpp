@@ -120,15 +120,16 @@ private:
   std::vector<McuBoard> boards_;
   bool gripper_state_{false};              // ラッチしたグリッパ状態
   bool orient_vertical_state_{false};         // ラッチした「縦にする」指示
-  // 動作許可 (control_flags bit0) と初期位置要求 (bit2)。Cartesian ストリームの
-  // 同名フィールドを毎パケット写す。**既定 false** —— 上流から何も届いていない間に
-  // 送る理由は無く、届いた瞬間から値は常にストリーム側が決める
+  // 動作許可 (control_flags bit0)。Cartesian ストリームの同名フィールドを
+  // 毎パケット写す。**既定 false** —— 上流から何も届いていない間に送る理由は無く、
+  // 届いた瞬間から値は常にストリーム側が決める。
+  // bit2 (初期位置要求) は 2026-09-11 に廃止し、常に 0 を送る
+  // (初期位置は ROS2 側 game_state_manager_node が普通のゴールとして出す)
   bool enable_state_{false};
-  bool init_request_state_{false};
   uint32_t send_seq_{0};
   // 直前に送った θ [rad]。次の θ をこの値の近傍へアンラップして連続化する
   // (±π のまたぎでターンテーブルを逆走させないため)。
-  // **ROS2 が駆動していない間 (未送信・動作許可 0・初期位置要求中) は MCU の実 θ で
+  // **ROS2 が駆動していない間 (未送信・動作許可 0) は MCU の実 θ で
   // 上書きする。** MCU が自力で θ=+3.0 に居るのにこちらの基準が 0 のままだと、
   // 同期後の最初の指令が -3.28 側の分岐に落ちてターンテーブルが1回転してしまう
   double last_sent_theta_{0.0};

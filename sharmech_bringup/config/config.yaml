@@ -67,9 +67,10 @@ joy_teleop_node:
     deadzone: 0.15           # スティックのデッドゾーン
     use_deadman: true        # デッドマンスイッチ (押している間だけジョグが効く)
     # home_pose: [0.0, 0.15, 0.15, 0.0, 0.0]  # [x, y, z, pitch, yaw]。機構確定後に設定。
-    #                                          # 注: 初期位置の正本は MCU 側 (/catchrobo/game/reset
-    #                                          # → control_flags bit2)。PS4 のホームボタンも将来は
-    #                                          # reset へ寄せる想定で、Cartesian の home_pose は暫定
+    #                                          # 注: 初期位置の正本は robot_geometry.yaml の
+    #                                          # init_pose (game_state_manager_node)。PS4 のホーム
+    #                                          # ボタンも将来は /catchrobo/game/reset へ寄せる想定で、
+    #                                          # Cartesian の home_pose は暫定
     # 軸・ボタン番号はドライバ依存。実機で `ros2 topic echo /joy` を見て合わせること
     vx_axis: 1               # 左スティック縦 → 前後
     vx_scale: 0.10
@@ -151,7 +152,8 @@ game_state_manager_node:
     # 缶の直径・缶の隙間 (slot_gap_x/y_m)・高さの基準面 (box_top_z_m) と各相対高さ・
     # field_origin_offset_x/y/z_m は **すべて robot_geometry.yaml の
     # shooting_box / cylinder / field_origin_offset セクションから生成される。**
-    # (初期位置 init_pose は 2026-09-10 に廃止。MCU 側の初期関節角へ bit2 で戻す)
+    # 初期位置 (起動時と /catchrobo/game/reset の行き先) も同じく robot_geometry.yaml の
+    # init_pose セクション (2026-09-11〜 ROS2 側が正本。極座標 r/θ/z を赤・青で別々に持つ)
     # 当日調整の手順は sharmech/docs/parameter_tuning.md。
     # いずれも実行中に ros2 param set で即反映できる (不正値は却下され直前の設定のまま)。
     #
@@ -189,6 +191,16 @@ game_state_manager_node:
     # 0.5は仮値** (実測後に詰めること。1サイクルあたりこの分だけ試合時間を消費する)
     orient_dwell_sec: 0.5
     state_publish_rate: 10.0      # /catchrobo/game/state の配信周期 [Hz]
+
+    # true: 起動直後に INIT から始まり、motion_generator_node が MCU の実姿勢へ
+    #       同期して動作許可を出した瞬間に、初期位置 (robot_geometry.yaml の
+    #       init_pose) まで L 字で動く。**起動しただけでアームが動く**ので、
+    #       周囲の安全を確認してから起動すること
+    # false: 従来どおり WAITING_FOR_PICK から始まる (その場から動かない)。
+    #        初期位置の値を実機で決める前の初回試験用の逃げ道。
+    #        この場合でも /catchrobo/game/reset の INIT は使える
+    # **起動時にだけ読む** (ros2 param set では変えられない)
+    init_on_startup: true
 
 # kinematics_node (パターンB用) のパラメータは全て機構の幾何 (リンク長・ピボット間距離・
 # ターンテーブル軸位置・肘/膝の基準高さ) なので、このファイルには無い。

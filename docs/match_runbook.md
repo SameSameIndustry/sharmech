@@ -84,9 +84,16 @@ nmcli connection add type ethernet con-name mcu-wired \
 
 ## 4. 起動 (端末を 3 つ)
 
+> ⚠ **端末 A を上げると、MCU と同期した瞬間にアームが初期位置へ動く** (2026-09-11〜。
+> `game_state_manager_node` が `INIT` から始まり、上げる → 水平 → 下ろす の L 字で
+> `robot_geometry.yaml` の `init_pose` へ行く)。**起動前にアームの周囲 (特に退避高さより
+> 下と、今の位置〜初期位置の間) を空けること。** 動かしたくないときは `config.yaml` の
+> `game_state_manager_node.init_on_startup: false` (起動時にだけ読む)。
+
 ```bash
 # 端末 A: ROS2 本体 (motion_generator / hardware_bridge / game_state_manager / joy)
 #   field_color は必須。PS4 を使わないなら joy:=false
+#   ★ 上げた直後に初期位置へ動く (上の注意)
 ros2 launch sharmech_bringup sharmech.launch.xml field_color:=red
 ros2 launch sharmech_bringup sharmech.launch.xml field_color:=blue
 
@@ -109,19 +116,35 @@ npm run play -- --ros=ws://192.168.1.2:9090     # 表示された URL を Quest 
 
 ## 5. 起動確認 (動かす前に必ず)
 
+**起動直後の流れ (2026-09-11〜):** `game/state` は `INIT` で始まる → MCU の 0x81 が届き
+bit3 (未初期化) が落ちると `motion_generator_node` が実姿勢へ同期して動作許可を出す →
+**その瞬間にアームが初期位置へ動き出す** (L 字。`INIT` のまま) → 着いたら `WAITING_FOR_PICK`。
+**⚠ 「動かす前に」といっても、この初期位置への移動だけは launch した時点で勝手に始まる。**
+§4 の注意どおり、起動前にアームの周囲を空けておくこと (同期のタイミングは MCU 次第で、
+MCU が既に原点出し済みなら launch の数秒後に動く)。
+`INIT` のまま動かないなら「まだ同期していない」(MCU が 0x81 を返していない / bit3 が
+立ったまま / 片方の基板しか返していない) なので、下の `mcu_status` を見る。
+
 ```bash
 ros2 topic echo --once /catchrobo/arm/mcu_status    # connected: true / status_flags: 0 になるまで待つ
                                                     #   8 (bit3) = MCU が原点出し中。0 になるまで動かない
 ros2 topic echo --once /catchrobo/arm/current_pose  # 両基板が返して初めて出る
-ros2 topic echo --once /catchrobo/game/state        # WAITING_FOR_PICK
+ros2 topic echo /catchrobo/game/state               # INIT (初期位置へ移動中) → WAITING_FOR_PICK になるまで待つ
 ros2 topic hz /catchrobo/field/cylinders            # カメラが検出を流しているか
 ros2 node list
 ```
 
+端末 A のログにも出る: 起動時に `INIT on startup: the arm will move to the init pose as
+soon as motion is enabled` (WARN)、同期した瞬間に `INIT: motion enabled; moving to init pose
+(x, y, z) via L-shaped goals`、その後 `Goal accepted:` が区間ごとに最大 3 回。
+初期位置の座標は `init pose (red): r=… theta=… z=… -> base (…)` の行で確認できる
+(値の決め方は `parameter_tuning.md` §4.5)。
+
 ## 6. 試合中の操作 (VR / PS4 の代わりに端末から出す場合)
 
 ```bash
-# 初期位置へ戻す (MCU 側の初期関節角。ゲーム状態も INIT → WAITING_FOR_PICK)
+# 初期位置へ戻す (robot_geometry.yaml の init_pose。上げる → 水平 → 下ろす の L 字で戻り、
+#   ゲーム状態も INIT → WAITING_FOR_PICK。どの状態からでも可。掴んでいたワークは離す)
 ros2 topic pub --once /catchrobo/game/reset std_msgs/msg/Empty '{}'
 
 # 微調整 (ADJUSTING_PICK / ADJUSTING_PLACE) の確定
@@ -163,9 +186,18 @@ ros2 param get /game_state_manager_node box_top_z_m
 # 缶の隙間
 ros2 param set /game_state_manager_node slot_gap_y_m 0.014
 
-# ターンテーブル軸のベース原点からのずれ (アームを止めてから変えること)
+# ターンテーブル軸のベース原点からのずれ (アームを止めてから変えること)。
+#   game_state_manager_node も init_pose の極座標の原点として同じ値を持つので両方へ
 ros2 param set /hardware_bridge_node turntable_axis_x_m 0.0
 ros2 param set /hardware_bridge_node turntable_axis_y_m 0.0
+ros2 param set /game_state_manager_node turntable_axis_x_m 0.0
+ros2 param set /game_state_manager_node turntable_axis_y_m 0.0
+
+# 初期位置 (極座標 r [m] / θ [rad、時計回り正] / z [m]。次の reset から効く。決め方は parameter_tuning.md §4.5)
+ros2 param set /game_state_manager_node init_pose_r_red 0.30
+ros2 param set /game_state_manager_node init_pose_theta_red 0.0
+ros2 param set /game_state_manager_node init_pose_z_red 0.15
+ros2 topic pub --once /catchrobo/game/reset std_msgs/msg/Empty '{}'    # 新しい値で戻してみる
 ```
 
 `ros2 param set` は起動中の値だけ変わる。**同じ値を `robot_geometry.yaml` に書いて `generate.py`
@@ -175,7 +207,7 @@ ros2 param set /hardware_bridge_node turntable_axis_y_m 0.0
 
 ```bash
 ros2 topic echo /catchrobo/arm/mcu_status      # status_flags: 1=追従誤差 2=ドライバ異常 4=ウォッチドッグ
-                                               #   8=未初期化 16=指令破棄 32=初期位置到達 (ビットの OR)
+                                               #   8=未初期化 16=指令破棄 (ビットの OR)。32 (bit5) は予約で ROS2 は見ない
 ros2 topic echo /catchrobo/arm/status          # mode / message ('executing' / 'reached' / 却下理由)
 ros2 topic echo /catchrobo/game/state
 ```
@@ -196,3 +228,5 @@ ros2 launch sharmech_bringup rviz.launch.xml
 
 各端末で `Ctrl+C`。ROS2 を止めても MCU は最後の目標位置をホールドする (脱力しない)。
 動力を切るのはハードウェアの非常停止 / 電源スイッチ (ソフトからは切らない)。
+**ROS2 だけを上げ直すと、その位置から初期位置へまた動く** (§4 の注意。MCU を再起動しない
+限り同期はすぐ済むので、`launch` の直後に動き出す)。

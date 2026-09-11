@@ -367,9 +367,55 @@ field_origin_offset:
     note: "基準面 top_z_m の実測値はそのままに、全体を持ち上げ下げしたいときの逃げ道"
 
 # -----------------------------------------------------------------------------
-# 初期位置は **このファイルに無い** (2026-09-10〜)。
-# /catchrobo/game/reset で戻る初期位置は MCU 側で定義した初期関節角であり、
-# ROS2 は UDP の control_flags bit2 (初期位置要求) を送るだけで座標を持たない
-# (sharmech/docs/mcu_spec.md §3.2 / §4.6)。sim / mock_mcu はそれぞれ自前の
-# 初期位置を持つ (config.js / --init-pose)。
+# 初期位置 (起動時と /catchrobo/game/reset で ROS2 が動かす先。2026-09-11〜 ROS2 側が正本)
 # -----------------------------------------------------------------------------
+# 座標は UDP で MCU に届くのと同じ極座標 (docs/mcu_spec.md §3.2/§5):
+#   原点 = ターンテーブル軸 (kinematics.turntable_axis_x/y_m)、θ は +X から時計回り
+#   (+X → −Y) が正 [rad]、z はベース座標系 [m]。
+#   field_origin_offset は掛からない (ロボット自身に対する姿勢であって、フィールドの
+#   設置誤差とは関係が無いため)。
+# 赤・青で別々に持つ (初期位置の場所がフィールドの色で異なる。ユーザー要望)。
+# game_state_manager_node が直交座標へ直し、退避高さ
+# (shooting_box.retract_clearance_above_top_m) を経由する L 字 (上げる → 水平 → 下ろす)
+# でここへ動く。実行中は ros2 param set /game_state_manager_node init_pose_*。
+# ★起動直後 (MCU 同期後) にここへ動くので、実機で最初に起動する前に必ず値を決めること
+#   (決まるまで動かしたくなければ config.yaml の game_state_manager_node.init_on_startup: false)。
+init_pose:
+  r_red:
+    value: 0.30
+    unit: m
+    status: estimate
+    source: "仮値 (sim/mock の起動位置と同じ)。★実機で決める"
+    date: 2026-09-11
+    note: "ターンテーブル軸からの距離。起動直後にここへ動く"
+  theta_red:
+    value: 0.0
+    unit: rad
+    status: estimate
+    source: "同上"
+    date: 2026-09-11
+    note: "+X から時計回りが正 (0.0 = +X 方向)"
+  z_red:
+    value: 0.15
+    unit: m
+    status: estimate
+    source: "同上"
+    date: 2026-09-11
+  r_blue:
+    value: 0.30
+    unit: m
+    status: estimate
+    source: "赤と同じ仮値。青の値は未決定"
+    date: 2026-09-11
+  theta_blue:
+    value: 0.0
+    unit: rad
+    status: estimate
+    source: "赤と同じ仮値。青の値は未決定"
+    date: 2026-09-11
+  z_blue:
+    value: 0.15
+    unit: m
+    status: estimate
+    source: "赤と同じ仮値。青の値は未決定"
+    date: 2026-09-11

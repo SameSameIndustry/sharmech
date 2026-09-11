@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <vector>
+
 #include "sharmech_core/utility/game_state_machine.hpp"
 
 using sharmech_core::CartesianState;
@@ -20,13 +22,21 @@ GameStateMachine::Config makeConfig()
   }
   config.placement_order = {0, 1, 2, 3};
   config.slot_clamp_margin_m = 0.03;
+  config.approach_clearance_z = 0.20;
   config.transport_clearance_z = 0.20;
-  config.retract_clearance_z = 0.20;
+  config.retract_clearance_z = 0.20;   // INIT の L 字が経由する高さでもある
   config.grasp_dwell_sec = 0.3;
   config.orient_dwell_sec = 0.5;
   // 既存のサイクルテストは完全自動モードを対象にする。
   // 微調整あり (true) の動作は ManualConfirm* のテストで別途検証する
   config.require_manual_confirm = false;
+  // 初期位置 (ベース座標系の直交座標)。**既存ケースは従来どおり WAITING_FOR_PICK から
+  // 始めたい**ので起動時 INIT は切っておく (Startup* のテストで個別に有効化する)
+  config.init_pose = CartesianState{};
+  config.init_pose.x = 0.30;
+  config.init_pose.y = 0.0;
+  config.init_pose.z = 0.15;
+  config.init_on_startup = false;
   return config;
 }
 
@@ -741,46 +751,248 @@ TEST(GameStateMachine, ToggleManualControlWorksFromComplete)
   EXPECT_EQ(machine.state(), GameState::kComplete);
 }
 
-// --- 状態のリセット (/catchrobo/game/reset → INIT) ---------------------------
+// --- 起動時と状態のリセット (INIT → 初期位置へ L 字で動く) -------------------
+//
+// 2026-09-11 に初期位置の正本が MCU 側 (control_flags bit2) から ROS2 側
+// (Config::init_pose) へ移った。INIT は「動作許可を待つ → L 字のゴールを1本ずつ出す」
+// という普通のシーケンスになっている
 
-// どの状態からでも INIT に入り、初期位置要求を1回出す (ゴールは出さない —
-// 初期位置の座標は MCU 側が持ち、ROS2 は知らない)。
-// グリッパは開き、縦は解除し、作業領域クランプはデフォルトへ戻す
-TEST(GameStateMachine, ResetEntersInitAndRequestsMcuInitPose)
+namespace
+{
+
+// 初期位置へ動き出せる状態にする (motion_generator_node が実姿勢に同期して
+// 動作許可を出した状況の再現)
+void enableMotion(GameStateMachine & machine)
+{
+  machine.onMotionEnabled(true);
+}
+
+// 現在のゴールを取り出して到達させる、を残りが無くなるまで繰り返し、
+// 出たゴールの一覧を返す
+std::vector<CartesianState> runInitPlan(GameStateMachine & machine, double now_sec = 1.0)
+{
+  std::vector<CartesianState> goals;
+  while (machine.hasPendingGoal()) {
+    goals.push_back(machine.consumePendingGoal());
+    machine.onGoalReached(now_sec);
+  }
+  return goals;
+}
+
+void expectPose(const CartesianState & actual, double x, double y, double z)
+{
+  EXPECT_NEAR(actual.x, x, 1e-9);
+  EXPECT_NEAR(actual.y, y, 1e-9);
+  EXPECT_NEAR(actual.z, z, 1e-9);
+}
+
+}  // namespace
+
+// init_on_startup=true なら起動直後は INIT。**まだゴールは出さない**
+// (動作許可 = MCU の実姿勢への同期を待つ)
+TEST(GameStateMachine, StartsInInitWhenInitOnStartup)
+{
+  GameStateMachine::Config config = makeConfig();
+  config.init_on_startup = true;
+  GameStateMachine machine(config);
+
+  EXPECT_EQ(machine.state(), GameState::kInit);
+  EXPECT_EQ(machine.initPhase(), GameStateMachine::InitPhase::kWaitingForMotion);
+  EXPECT_FALSE(machine.hasPendingGoal());
+}
+
+// 動作許可が false のうちは動かず、true になった瞬間に L 字プランが出る
+TEST(GameStateMachine, StartupInitWaitsForMotionEnable)
+{
+  GameStateMachine::Config config = makeConfig();
+  config.init_on_startup = true;
+  GameStateMachine machine(config);
+  machine.onCurrentPose(makePose(0.5, 0.1, 0.05));
+
+  machine.onMotionEnabled(false);
+  EXPECT_FALSE(machine.hasPendingGoal());
+  EXPECT_EQ(machine.state(), GameState::kInit);
+
+  machine.onMotionEnabled(true);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  expectPose(machine.consumePendingGoal(), 0.5, 0.1, 0.20);   // まず退避高さへ上げる
+  EXPECT_EQ(machine.initPhase(), GameStateMachine::InitPhase::kMoving);
+}
+
+// 現在位置から「上げる → 水平 → 下ろす」の3区間。斜めには動かない
+TEST(GameStateMachine, InitPlanIsLShapedFromCurrentPose)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onCurrentPose(makePose(0.5, 0.1, 0.05));
+  enableMotion(machine);
+  machine.requestInit();
+
+  const auto goals = runInitPlan(machine);
+  ASSERT_EQ(goals.size(), 3u);
+  expectPose(goals[0], 0.5, 0.1, 0.20);    // ① 現在 xy のまま退避高さへ
+  expectPose(goals[1], 0.30, 0.0, 0.20);   // ② その高さで初期位置の xy へ水平移動
+  expectPose(goals[2], 0.30, 0.0, 0.15);   // ③ 初期位置の z へ降ろす
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+  EXPECT_EQ(machine.initPhase(), GameStateMachine::InitPhase::kIdle);
+}
+
+// 長さがほぼ 0 の区間は出さない
+TEST(GameStateMachine, InitSkipsDegenerateSegments)
+{
+  {   // 既に退避高さに居る → 上げる区間を省いて2本
+    GameStateMachine machine(makeConfig());
+    machine.onCurrentPose(makePose(0.5, 0.1, 0.20));
+    enableMotion(machine);
+    machine.requestInit();
+    const auto goals = runInitPlan(machine);
+    ASSERT_EQ(goals.size(), 2u);
+    expectPose(goals[0], 0.30, 0.0, 0.20);
+    expectPose(goals[1], 0.30, 0.0, 0.15);
+  }
+  {   // 既に初期位置に居る → 1本も出さずにそのまま待機へ
+    GameStateMachine machine(makeConfig());
+    machine.onCurrentPose(makePose(0.30, 0.0, 0.15));
+    enableMotion(machine);
+    machine.requestInit();
+    EXPECT_FALSE(machine.hasPendingGoal());
+    EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+    EXPECT_EQ(machine.initPhase(), GameStateMachine::InitPhase::kIdle);
+  }
+  {   // xy は一致・z だけ違う → 垂直1本 (上げてから下ろす無駄をしない)
+    GameStateMachine machine(makeConfig());
+    machine.onCurrentPose(makePose(0.30, 0.0, 0.05));
+    enableMotion(machine);
+    machine.requestInit();
+    const auto goals = runInitPlan(machine);
+    ASSERT_EQ(goals.size(), 1u);
+    expectPose(goals[0], 0.30, 0.0, 0.15);
+  }
+}
+
+// 動作許可は毎周期 true で届く (レベル)。**立ち上がりでしか反応しない**ので、
+// 移動中に何度 true が来てもプランは組み直されない
+TEST(GameStateMachine, InitDoesNotRetriggerOnRepeatedEnableTrue)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onCurrentPose(makePose(0.5, 0.1, 0.05));
+  enableMotion(machine);
+  machine.requestInit();
+
+  ASSERT_TRUE(machine.hasPendingGoal());
+  expectPose(machine.consumePendingGoal(), 0.5, 0.1, 0.20);
+
+  for (int i = 0; i < 3; ++i) {
+    machine.onMotionEnabled(true);
+  }
+  EXPECT_FALSE(machine.hasPendingGoal());   // 1区間目が再発行されない
+
+  machine.onGoalReached(1.0);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  expectPose(machine.consumePendingGoal(), 0.30, 0.0, 0.20);   // 続きは2区間目
+}
+
+// **通常運転中は勝手に INIT へ入らない** (D6)。MCU が再起動して同期し直しても、
+// 試合中に勝手に初期位置へ動いてはいけない。再ホーミングは操縦者の reset から
+TEST(GameStateMachine, EnableRisingEdgeOutsideInitDoesNothing)
+{
+  {
+    GameStateMachine machine(makeConfig());
+    machine.onCurrentPose(makePose(0.5, 0.1, 0.05));
+    ASSERT_EQ(machine.state(), GameState::kWaitingForPick);
+
+    machine.onMotionEnabled(false);
+    machine.onMotionEnabled(true);
+    EXPECT_FALSE(machine.hasPendingGoal());
+    EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+  }
+  {
+    GameStateMachine machine(makeConfig());
+    advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
+    machine.consumePendingGripper();
+    ASSERT_EQ(machine.state(), GameState::kGrasping);
+
+    machine.onMotionEnabled(false);
+    machine.onMotionEnabled(true);
+    EXPECT_FALSE(machine.hasPendingGoal());
+    EXPECT_EQ(machine.state(), GameState::kGrasping);
+  }
+}
+
+// どの状態からでも INIT に入る。グリッパは開き、縦は解除し、作業領域クランプは
+// デフォルトへ戻し、最初のゴールは現在 xy のまま退避高さまで上げる区間
+TEST(GameStateMachine, ResetEntersInitAndPlansLShapedMove)
 {
   GameStateMachine machine(makeConfig());
   advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
   machine.consumePendingGripper();
   ASSERT_EQ(machine.state(), GameState::kGrasping);
 
+  machine.onCurrentPose(makePose(0.5, 0.1, 0.0));
+  enableMotion(machine);
   machine.requestInit();
   EXPECT_EQ(machine.state(), GameState::kInit);
 
-  EXPECT_FALSE(machine.hasPendingGoal());
-  ASSERT_TRUE(machine.hasPendingInitRequest());
-  EXPECT_TRUE(machine.consumePendingInitRequest());
-  EXPECT_FALSE(machine.hasPendingInitRequest());  // 1回きり (edge-triggered)
+  ASSERT_TRUE(machine.hasPendingGoal());
+  expectPose(machine.consumePendingGoal(), 0.5, 0.1, 0.20);
 
   ASSERT_TRUE(machine.hasPendingGripper());
-  EXPECT_FALSE(machine.consumePendingGripper());          // 開く
+  EXPECT_FALSE(machine.consumePendingGripper());           // 開く
   ASSERT_TRUE(machine.hasPendingOrientVertical());
   EXPECT_FALSE(machine.consumePendingOrientVertical());    // 横へ戻す
   ASSERT_TRUE(machine.hasPendingWorkspaceClamp());
   EXPECT_TRUE(machine.consumePendingWorkspaceClamp().reset);
 }
 
+// 動作許可が出ていないうちに reset されたら、出るまで待ってから動く
+TEST(GameStateMachine, ResetWhileMotionDisabledWaitsThenMoves)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onCurrentPose(makePose(0.5, 0.1, 0.05));
+  machine.onMotionEnabled(false);
+
+  machine.requestInit();
+  EXPECT_EQ(machine.state(), GameState::kInit);
+  EXPECT_EQ(machine.initPhase(), GameStateMachine::InitPhase::kWaitingForMotion);
+  EXPECT_FALSE(machine.hasPendingGoal());
+
+  machine.onMotionEnabled(true);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  expectPose(machine.consumePendingGoal(), 0.5, 0.1, 0.20);
+}
+
 // 初期位置へ着いたら待機状態に戻り、そのまま次の pick を受けられる
 TEST(GameStateMachine, InitReturnsToWaitingForPickOnGoalReached)
 {
   GameStateMachine machine(makeConfig());
+  machine.onCurrentPose(makePose(0.5, 0.1, 0.05));
+  enableMotion(machine);
   machine.requestInit();
-  machine.consumePendingInitRequest();
 
-  machine.onGoalReached(1.0);
+  const auto goals = runInitPlan(machine);
+  ASSERT_EQ(goals.size(), 3u);
   EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
 
   machine.onPickPoseReceived(makePose(0.4, 0.1, 0.0));
   EXPECT_EQ(machine.state(), GameState::kApproaching);
+}
+
+// INIT のゴールも姿勢は指定しない (pitch/yaw は 0)
+TEST(GameStateMachine, InitGoalsHaveZeroPitchYaw)
+{
+  GameStateMachine machine(makeConfig());
+  CartesianState pose = makePose(0.5, 0.1, 0.05);
+  pose.pitch = 1.2;     // 缶を縦にしたまま reset された状況
+  pose.yaw = -0.7;
+  machine.onCurrentPose(pose);
+  enableMotion(machine);
+  machine.requestInit();
+
+  const auto goals = runInitPlan(machine);
+  ASSERT_EQ(goals.size(), 3u);
+  for (const auto & goal : goals) {
+    EXPECT_DOUBLE_EQ(goal.pitch, 0.0);
+    EXPECT_DOUBLE_EQ(goal.yaw, 0.0);
+  }
 }
 
 // **自由操作中でもリセットできる。** リセットは VR のボタンなので、押せている
@@ -795,25 +1007,74 @@ TEST(GameStateMachine, ResetPullsOutOfManualControl)
 
   machine.toggleManualControl(1.0);
   ASSERT_EQ(machine.state(), GameState::kManualControl);
+  machine.consumePendingWorkspaceClamp();
 
+  machine.onCurrentPose(makePose(0.5, 0.1, 0.05));
+  enableMotion(machine);
   machine.requestInit();
   EXPECT_EQ(machine.state(), GameState::kInit);
-  EXPECT_FALSE(machine.hasPendingGoal());
-  ASSERT_TRUE(machine.consumePendingInitRequest());
 
-  machine.onGoalReached(2.0);
+  const auto goals = runInitPlan(machine, 2.0);
+  ASSERT_EQ(goals.size(), 3u);
   EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+}
+
+// 自由操作へ抜けて戻ってきたら、**そのときの現在位置から**組み直す。
+// 古いプランの続きを出すと、ジョグでずらした分だけ斜めに動くことになる
+TEST(GameStateMachine, ManualControlReturnToInitReplansFromCurrentPose)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onCurrentPose(makePose(0.5, 0.1, 0.05));
+  enableMotion(machine);
+  machine.requestInit();
+  ASSERT_TRUE(machine.hasPendingGoal());
+  expectPose(machine.consumePendingGoal(), 0.5, 0.1, 0.20);
+
+  machine.toggleManualControl(1.0);
+  ASSERT_EQ(machine.state(), GameState::kManualControl);
+  EXPECT_FALSE(machine.hasPendingGoal());          // 自由操作中はゴールを出さない
+  machine.consumePendingWorkspaceClamp();
+
+  // 操縦者がジョグで動かした
+  machine.onCurrentPose(makePose(0.4, 0.3, 0.10));
+
+  machine.toggleManualControl(2.0);
+  ASSERT_EQ(machine.state(), GameState::kInit);
+  machine.consumePendingWorkspaceClamp();
+  ASSERT_TRUE(machine.hasPendingGoal());
+  expectPose(machine.consumePendingGoal(), 0.4, 0.3, 0.20);   // 新しい現在位置から
+}
+
+// forceState はデバッグ用。**状態を INIT にしても動かない** (動かすのは reset)
+TEST(GameStateMachine, ForceStateToInitDoesNotMove)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onCurrentPose(makePose(0.5, 0.1, 0.05));
+
+  machine.forceState(GameState::kInit, 0.0);
+  EXPECT_EQ(machine.state(), GameState::kInit);
+  EXPECT_EQ(machine.initPhase(), GameStateMachine::InitPhase::kIdle);
+
+  machine.onMotionEnabled(true);   // 立ち上がりが来ても動かない
+  EXPECT_FALSE(machine.hasPendingGoal());
+  EXPECT_EQ(machine.state(), GameState::kInit);
 }
 
 // 初期位置へのゴールが却下・中断されたら、他の自動シーケンスと同じ扱いで待機へ落ちる
 TEST(GameStateMachine, InitFallsBackToWaitingForPickWhenGoalRejected)
 {
   GameStateMachine machine(makeConfig());
+  machine.onCurrentPose(makePose(0.5, 0.1, 0.05));
+  enableMotion(machine);
   machine.requestInit();
-  machine.consumePendingInitRequest();
+  machine.consumePendingGoal();
 
   machine.onGoalRejectedOrAborted();
   EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+  EXPECT_EQ(machine.initPhase(), GameStateMachine::InitPhase::kIdle);
+  // 残りの区間は出ない (中途半端なプランを持ち越さない)
+  machine.onGoalReached(2.0);
+  EXPECT_FALSE(machine.hasPendingGoal());
 }
 
 // **配置の進み具合は消さない。** 正本は VR 側の box_count なので、
@@ -824,9 +1085,10 @@ TEST(GameStateMachine, ResetKeepsPlacementProgress)
   runOneCycle(machine, 1);
   ASSERT_EQ(machine.currentSlotId(), 1);  // 1個目を消化済み
 
+  machine.onCurrentPose(makePose(0.5, 0.1, 0.05));
+  enableMotion(machine);
   machine.requestInit();
-  machine.consumePendingInitRequest();
-  machine.onGoalReached(5.0);
+  runInitPlan(machine, 5.0);
   ASSERT_EQ(machine.state(), GameState::kWaitingForPick);
 
   // キューも消化済み個数もそのまま (次に置くのは2個目のスロット)

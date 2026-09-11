@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-実機 MCU が 0x81 フィードバックを自発送信しているかを ROS2 無しで確認する。
+実機 MCU が 0x81 フィードバックを自発送信しているかを ROS2 無しで確認する.
 
 UDP 8889 番 (config.yaml の local_port) で数秒間受信し、送信元 IP ごとに
 到着レート・ヘッダ・実位置・status_flags を表示する。**こちらからは何も送らない**
@@ -19,6 +19,12 @@ hardware_bridge_node が起動中だと 8889 番が塞がっていて bind に�
   - ver=2 type=0x81 payload_length=48、パケット全体 64 バイト
   - r/z 基板は theta=0、θ 基板は r=z=0 (担当外は 0 で送る契約)
   - status_flags の bit3 (未初期化) が落ちていれば ROS2 起動後すぐ同期できる
+    (bit5 は 2026-09-11〜 予約。立っていても ROS2 は見ない)
+
+初期位置 (robot_geometry.yaml の init_pose) を実機で決めるときにも使える:
+ROS2 を止め、アームを初期位置にしたい姿勢へ動かしてからこれを走らせると、表示される
+r / theta / z が **そのまま init_pose の値** になる (0x81 の極座標は UDP の約束どおり
+原点 = ターンテーブル軸・θ は時計回り正なので換算不要。docs/parameter_tuning.md §4.5)。
 """
 
 import argparse
@@ -36,7 +42,7 @@ FLAG_NAMES = {
     2: "ウォッチドッグ作動中",
     3: "未初期化",
     4: "指令破棄",
-    5: "初期位置到達",
+    5: "初期位置到達 (予約)",   # 2026-09-11〜 旧 bit2 への応答。ROS2 は見ない
 }
 
 
@@ -50,7 +56,9 @@ def decode(data: bytes) -> dict:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=8889, help="受信ポート (config.yaml の local_port)")
     ap.add_argument("--seconds", type=float, default=3.0, help="受信する秒数")
     args = ap.parse_args()
@@ -73,7 +81,8 @@ def main() -> int:
             data, (ip, _) = sock.recvfrom(2048)
         except socket.timeout:
             continue
-        if len(data) != FEEDBACK_LEN or data[0] != PROTOCOL_VERSION or data[1] != PACKET_TYPE_FEEDBACK:
+        if (len(data) != FEEDBACK_LEN or data[0] != PROTOCOL_VERSION or
+                data[1] != PACKET_TYPE_FEEDBACK):
             bad[ip] = bad.get(ip, 0) + 1
             continue
         per_ip.setdefault(ip, []).append(data)
@@ -99,7 +108,8 @@ def main() -> int:
               f"  pitch={last['pitch']:.3f}  yaw={last['yaw']:.3f}  gripper={last['gripper']}")
         flag_desc = ", ".join(f"bit{b}={FLAG_NAMES.get(b, '予約')}" for b in bits) or "なし"
         print(f"   status_flags=0x{last['flags']:04x} ({flag_desc})")
-        print("   joints: " + ", ".join(f"{n}={v:.3f}" for n, v in zip(JOINT_NAMES, last["joints"])))
+        print("   joints: " + ", ".join(
+            f"{n}={v:.3f}" for n, v in zip(JOINT_NAMES, last["joints"])))
     for ip, n in bad.items():
         print(f"[{ip}] 契約外パケット {n} 個 (長さ≠64 / version≠2 / type≠0x81)")
     return 0

@@ -122,9 +122,6 @@ MotionGeneratorNode::MotionGeneratorNode(const rclcpp::NodeOptions & options)
   cancel_sub_ = create_subscription<std_msgs::msg::Empty>(
     "/catchrobo/arm/cancel", 10,
     std::bind(&MotionGeneratorNode::onCancel, this, std::placeholders::_1));
-  init_request_sub_ = create_subscription<std_msgs::msg::Empty>(
-    "/catchrobo/arm/init_request", 10,
-    std::bind(&MotionGeneratorNode::onInitRequest, this, std::placeholders::_1));
   current_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
     "/catchrobo/arm/current_pose", 10,
     std::bind(&MotionGeneratorNode::onCurrentPose, this, std::placeholders::_1));
@@ -182,21 +179,20 @@ void MotionGeneratorNode::onTargetPose(
   // 作業領域外のゴールはクランプせず却下する (黙って別の場所へ動くより安全)
   if (!isInsideWorkspace(goal.x, goal.y, goal.z)) {
     rejectGoal("goal outside workspace");
+    publishStatusIfChanged();
     return;
   }
   // 同期前は target_ が原点の仮値なので、ここから軌道を引くと始点が実姿勢と
   // 無関係になる。動作許可も 0 で送っている間なので、受理しても動かない
   if (!synced_with_feedback_) {
     rejectGoal("not synced with MCU feedback yet");
-    return;
-  }
-  if (mode_ == Mode::kInit) {
-    rejectGoal("init request in progress");
+    publishStatusIfChanged();
     return;
   }
   if (mode_ == Mode::kJog) {
     if (goal_mode_ != "goal_priority") {
       rejectGoal("jog active");
+      publishStatusIfChanged();
       return;
     }
     // goal_priority: ゴールがジョグを横取りする。ジョグの速度指令は捨て、
@@ -221,6 +217,10 @@ void MotionGeneratorNode::onTargetPose(
     get_logger(),
     "Goal accepted: (%.3f, %.3f, %.3f) pitch=%.2f yaw=%.2f, duration=%.2f s",
     goal.x, goal.y, goal.z, goal.pitch, goal.yaw, trajectory_.duration());
+
+  // 受理も却下も、10Hz の status タイマーを待たずに即時通知する
+  // (game_state_manager_node は last_result の変化でしか到達/却下を見ていない)
+  publishStatusIfChanged();
 }
 
 void MotionGeneratorNode::onCmdTwist(const geometry_msgs::msg::Twist::SharedPtr msg)
@@ -230,8 +230,8 @@ void MotionGeneratorNode::onCmdTwist(const geometry_msgs::msg::Twist::SharedPtr 
   // 既に動いている分は onControlTimer 側で commanded_twist_ が空のまま
   // レート制限に従って減速する
   if (jog_blocked_) {return;}
-  // 同期前・初期位置要求中も同じ理由で捨てる (記録すると mode_ が kJog へ落ちる)
-  if (!synced_with_feedback_ || mode_ == Mode::kInit) {return;}
+  // 同期前も同じ理由で捨てる (記録すると mode_ が kJog へ落ちる)
+  if (!synced_with_feedback_) {return;}
 
   CartesianState twist;
   twist.x = msg->linear.x;
@@ -299,34 +299,8 @@ void MotionGeneratorNode::onCancel(const std_msgs::msg::Empty::SharedPtr)
     last_result_ = sharmech_msgs::msg::MotionStatus::RESULT_ABORTED;
     status_message_ = "cancelled";
     RCLCPP_INFO(get_logger(), "Goal cancelled");
-  } else if (mode_ == Mode::kInit) {
-    // 初期位置要求を取り下げる。target_ は INIT 中ずっと実姿勢を追いかけて
-    // いるので、bit2 が落ちた MCU はその場 (≒ 現在位置) に留まる。
-    // MCU が到達を返さない (未対応ファーム等) ときの唯一の出口でもある
-    mode_ = Mode::kIdle;
-    last_result_ = sharmech_msgs::msg::MotionStatus::RESULT_ABORTED;
-    status_message_ = "init request cancelled";
-    RCLCPP_WARN(get_logger(), "Init request cancelled");
   }
-}
-
-// 初期位置要求 (/catchrobo/game/reset の実体)。**初期位置の座標はこのノードも
-// game_state_manager_node も知らない。** control_flags bit2 を立てて MCU に
-// 「自前の初期関節角へ行け」と頼み、到達 (McuStatus FLAG_AT_INIT_POSE) を待つだけ。
-// 実機無しでも sim / mock_mcu が同じ契約でそれぞれの初期位置へ動く
-void MotionGeneratorNode::onInitRequest(const std_msgs::msg::Empty::SharedPtr)
-{
-  if (mode_ == Mode::kGoal) {
-    RCLCPP_INFO(get_logger(), "Goal aborted: preempted by init request");
-  } else if (mode_ == Mode::kJog) {
-    RCLCPP_INFO(get_logger(), "Jog preempted by init request");
-  }
-  commanded_twist_ = CartesianState{};
-  current_twist_ = CartesianState{};
-  mode_ = Mode::kInit;
-  last_result_ = sharmech_msgs::msg::MotionStatus::RESULT_NONE;
-  status_message_ = "moving to MCU init pose";
-  RCLCPP_INFO(get_logger(), "Init request accepted (control_flags bit2)");
+  publishStatusIfChanged();
 }
 
 void MotionGeneratorNode::onCurrentPose(
@@ -356,6 +330,7 @@ void MotionGeneratorNode::onMcuStatus(const sharmech_msgs::msg::McuStatus::Share
       status_message_ = "MCU uninitialized";
     }
   }
+  publishStatusIfChanged();
 }
 
 std::optional<CartesianState> MotionGeneratorNode::feedbackState() const
@@ -623,31 +598,6 @@ void MotionGeneratorNode::onControlTimer()
         }
         break;
       }
-    case Mode::kInit: {
-        // 動かしているのは MCU。こちらは実姿勢を追いかけて、bit2 が落ちた瞬間に
-        // 指令と実姿勢が一致している状態を作る (落とした途端に飛ばないため)。
-        // 作業領域クランプは掛けない —— MCU の初期位置が ROS2 側の作業領域の
-        // 外にあっても、そこに居る事実は変えられない
-        if (const auto fb = feedbackState()) {target_ = *fb;}
-        target_vel_ = CartesianState{};
-        const bool at_init = latest_mcu_flags_ &&
-          (*latest_mcu_flags_ & sharmech_msgs::msg::McuStatus::FLAG_AT_INIT_POSE) != 0;
-        if (at_init) {
-          mode_ = Mode::kIdle;
-          synced_with_feedback_ = true;
-          last_result_ = sharmech_msgs::msg::MotionStatus::RESULT_SUCCEEDED;
-          status_message_ = "init pose reached";
-          RCLCPP_INFO(
-            get_logger(), "MCU init pose reached: (%.3f, %.3f, %.3f)",
-            target_.x, target_.y, target_.z);
-        } else if (!latest_mcu_flags_) {
-          RCLCPP_WARN_THROTTLE(
-            get_logger(), *get_clock(), 5000,
-            "Init request pending but no /catchrobo/arm/mcu_status received; "
-            "cannot detect arrival (cancel with /catchrobo/arm/cancel)");
-        }
-        break;
-      }
     case Mode::kIdle:
       target_vel_ = CartesianState{};
       break;
@@ -663,11 +613,11 @@ void MotionGeneratorNode::onControlTimer()
   cmd.twist.linear.z = target_vel_.z;
   cmd.twist.angular.y = target_vel_.pitch;
   cmd.twist.angular.z = target_vel_.yaw;
-  // 動作許可: 同期済みか、初期位置要求中 (MCU が自力で動く必要がある) のみ true。
-  // 初期位置要求: INIT モードの間だけ true (レベル。毎周期送る)。
-  // 位置と同じメッセージに載せる理由は CartesianCommand.msg のコメント参照
-  cmd.enable = synced_with_feedback_ || mode_ == Mode::kInit;
-  cmd.init_request = (mode_ == Mode::kInit);
+  // 動作許可: MCU の実姿勢へ目標を同期できたときだけ true。
+  // 位置と同じメッセージに載せる理由は CartesianCommand.msg のコメント参照。
+  // **game_state_manager_node はこの立ち上がりを見て初期位置へ動き出す**
+  // (起動時 / reset 後の INIT。それ以外の場面では何も起こさない)
+  cmd.enable = synced_with_feedback_;
   cartesian_pub_->publish(cmd);
 
   // RViz 用 (sharmech_description/rviz/sharmech.rviz)。今この瞬間の目標姿勢
@@ -683,9 +633,27 @@ void MotionGeneratorNode::onControlTimer()
   std_msgs::msg::Bool orient_vertical_msg;
   orient_vertical_msg.data = orient_vertical_state_;
   orient_vertical_pub_->publish(orient_vertical_msg);
+
+  // ゴール到達 (kGoal → kIdle + SUCCEEDED) をこの周期で作ったなら、
+  // status タイマーを待たずに知らせる (短いゴールの取りこぼし対策)
+  publishStatusIfChanged();
 }
 
 void MotionGeneratorNode::onStatusTimer()
+{
+  publishStatus();
+}
+
+// mode / last_result が直近の publish から変わっていたら即座に1回 publish する。
+// ゴールの所要時間が status_rate の周期より短いと、NONE → SUCCEEDED の変化が
+// タイマーのサンプル間に埋もれて game_state_manager_node が到達を見落とす
+void MotionGeneratorNode::publishStatusIfChanged()
+{
+  if (mode_ == last_published_mode_ && last_result_ == last_published_result_) {return;}
+  publishStatus();
+}
+
+void MotionGeneratorNode::publishStatus()
 {
   sharmech_msgs::msg::MotionStatus status;
   status.header.stamp = now();
@@ -712,6 +680,8 @@ void MotionGeneratorNode::onStatusTimer()
   }
 
   status_pub_->publish(status);
+  last_published_mode_ = mode_;
+  last_published_result_ = last_result_;
 }
 
 void MotionGeneratorNode::rejectGoal(const std::string & reason)

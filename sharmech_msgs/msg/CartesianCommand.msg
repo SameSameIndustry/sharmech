@@ -17,6 +17,9 @@ geometry_msgs/Twist twist    # 目標速度(並進 + 角速度)。ベース座�
 # 数百 ms の窓が開き、起動直後に enable=1 のまま原点の仮目標へ動き出したため
 # (2026-09-10 mock_mcu で実測)。
 bool enable                  # 動作許可 (bit0)。false なら MCU は現在位置をホールド。
-                             # motion_generator_node が実姿勢に同期し終えるまで false
-bool init_request            # 初期位置要求 (bit2)。true の間 MCU は pose/twist を無視して
-                             # 自前の初期関節角へ移動する (/catchrobo/game/reset の実体)
+                             # motion_generator_node が実姿勢に同期し終えるまで false。
+                             # **この false → true が game_state_manager_node への
+                             # 「動かしてよい」の合図でもある** (起動時と
+                             # /catchrobo/game/reset の INIT がこれを待って動き出す)
+# init_request (bit2) は 2026-09-11 に廃止。初期位置は ROS2 側
+# (game_state_manager_node の init_pose_*) が持ち、普通のゴールとして出す

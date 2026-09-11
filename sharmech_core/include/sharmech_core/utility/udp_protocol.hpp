@@ -61,26 +61,26 @@ constexpr uint8_t kControlFlagEnable = 0x01;
 //      PLACING 状態でのみ立てる)。MCU側がどう実現するかは未定義で、ROS2 側はこの
 //      フラグを不透明に渡すだけ (グリッパの0/1と同じ扱い)
 constexpr uint8_t kControlFlagOrientVertical = 0x02;
-// bit2 初期位置要求。立っている間、MCU は r/θ/z と速度を無視して **MCU 側で
-//      定義した初期関節角** へ自前のスルーレート制限で移動し、そこで保持する。
-//      ROS2 側は初期位置の座標を一切知らない (/catchrobo/game/reset の実体)。
-//      到達したことは status_flags の kStatusAtInitPose で返る
+// bit2 **予約 (2026-09-11〜 ROS2 は送らない)。** 初期位置は ROS2 側
+//      (game_state_manager_node の init_pose) が持ち、普通の 0x01 ストリームで
+//      そこへ動かす契約に変えたため、このビットは常に 0 になる。
+//      MCU 側に「自前の初期関節角へ行く」実装が残っていても害は無い
+//      (ROS2 が立てないので発動しない)。ビット割当だけを互換のために残す
 constexpr uint8_t kControlFlagInitRequest = 0x04;
 
 // control_flags を組み立てるための入力。既定値 (動作許可のみ) は
 // 「通常運転で r/θ/z に追従せよ」を意味する
+// (bit2 = kControlFlagInitRequest は予約。ROS2 は立てないのでメンバを持たない)
 struct ControlFlags
 {
   bool enable{true};
   bool orient_vertical{false};
-  bool init_request{false};
 
   uint8_t pack() const
   {
     return static_cast<uint8_t>(
       (enable ? kControlFlagEnable : 0) |
-      (orient_vertical ? kControlFlagOrientVertical : 0) |
-      (init_request ? kControlFlagInitRequest : 0));
+      (orient_vertical ? kControlFlagOrientVertical : 0));
   }
 };
 
@@ -172,8 +172,9 @@ constexpr uint16_t kStatusDriverFault = 1 << 1;       // ドライバ異常
 constexpr uint16_t kStatusWatchdog = 1 << 2;          // ウォッチドッグ作動中
 constexpr uint16_t kStatusUninitialized = 1 << 3;     // 未初期化・原点未確定
 constexpr uint16_t kStatusCommandRejected = 1 << 4;   // 直近の指令を破棄した (作業領域外・seq逆転等)
-// 初期位置要求 (kControlFlagInitRequest) に応答して初期位置へ到達し、静止している。
-// bit2 が立っている間だけ意味を持つ (ROS2 側はこれを見て bit2 を落とす)
+// **予約 (2026-09-11〜 ROS2 は使わない)。** 初期位置要求 (bit2) への到達通知だったが、
+// 初期位置が ROS2 側へ移り bit2 を送らなくなったので実機では立たない。
+// MCU が返しても ROS2 側の挙動は変わらない (feedback_merge は 2 枚の AND のまま)
 constexpr uint16_t kStatusAtInitPose = 1 << 5;
 
 // デコード済みフィードバック。r/theta は極座標のまま

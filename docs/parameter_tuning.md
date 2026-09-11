@@ -168,6 +168,100 @@ MCU 側も IK/FK に同じ値が要る)。ターンテーブル軸が原点か�
 
 ---
 
+## 4.5 初期位置を実機で決める手順 (2026-09-11 新設)
+
+`init_pose` は**起動直後と `/catchrobo/game/reset` でアームが戻る姿勢**。
+2026-09-11 に MCU 側からこちらへ移ったので、**ROS2 側で決めて `robot_geometry.yaml` に
+書く** (ファームの書き換えは不要)。既定値 (r=0.30, θ=0.0, z=0.15) は `estimate` の仮値なので、
+実機ができたら必ず入れ直すこと。
+
+> ⚠ **既定 (`init_on_startup: true`) では、ROS2 を起動しただけでアームがここへ動く。**
+> 値を決める作業の間は `config.yaml` の `game_state_manager_node.init_on_startup: false`
+> にしておくと安全 (この間も `/catchrobo/game/reset` で明示的に戻せる)。
+
+**`init_pose` は極座標 (r, θ, z) で持つ。** UDP で MCU へ届くのと同じ約束
+(`mcu_spec.md` §3.2/§5) で、**原点はターンテーブル軸・θ は +X から時計回りが正**。
+直交座標ではなく極座標にしてあるおかげで、**後から `turntable_axis_x/y_m` の実測値を
+入れ直しても初期位置は同じ物理点を指したまま**になる (軸からの相対で持っているため)。
+
+### 方法1: ジョグで合わせて `current_pose` から読む (推奨)
+
+1. 周囲を空けて ROS2 を起動する (`init_on_startup: false` のとき `WAITING_FOR_PICK` から始まる)
+2. VR か PS4 のジョグで、アームを**初期位置にしたい姿勢**まで動かす
+3. その場で実姿勢を読む:
+
+   ```bash
+   ros2 topic echo --once /catchrobo/arm/current_pose
+   ```
+
+4. 出てきた `position` の `x, y, z` [m] を極座標へ直す。`axis_x` / `axis_y` は
+   `robot_geometry.yaml` の `kinematics.turntable_axis_x_m` / `_y_m` (未実測なら 0.0):
+
+   ```
+   r = hypot(x − axis_x, y − axis_y)
+   θ = −atan2(y − axis_y, x − axis_x)      ← マイナスが要る (ワイヤ上の θ は時計回りが正)
+   z = z (そのまま)
+   ```
+
+   ```bash
+   # 例 (x=0.212, y=-0.212, z=0.15、軸は原点)
+   python3 -c "import math; x,y,z,ax,ay=0.212,-0.212,0.15,0.0,0.0; \
+     print('r=%.4f theta=%.4f z=%.4f' % (math.hypot(x-ax,y-ay), -math.atan2(y-ay,x-ax), z))"
+   # → r=0.2998 theta=0.7854 z=0.1500
+   ```
+
+   **θ のマイナスを忘れると、初期位置が X 軸について鏡映になった場所になる。**
+
+### 方法2: ROS2 を止めて MCU のフィードバックを直接読む
+
+MCU が返す 0x81 は**既にこの極座標**なので、変換は要らない。手でアームを動かせる
+(サーボを切れる) 場合や、ROS2 を上げたくない場合はこちら。
+
+```bash
+python3 sharmech_core/scripts/probe_mcu_feedback.py     # 受信のみ。何も送らない
+```
+
+表示される `r` / `theta` / `z` を**そのまま**書き写す。
+
+### 書き込みと確認
+
+```yaml
+init_pose:
+  r_red:
+    value: 0.2998
+    unit: m
+    status: measured
+    source: "実機でジョグして current_pose から換算 (2026-09-15)"
+    date: 2026-09-15
+```
+
+```bash
+python3 sharmech/params/generate.py
+python3 sharmech/params/generate.py --check          # exit 0 なら生成物は最新
+ros2 launch sharmech_bringup sharmech.launch.xml field_color:=red
+ros2 param get /game_state_manager_node init_pose_r_red
+```
+
+起動ログに**極座標と、それを直した直交座標の両方**が出るので、そこで確かめられる:
+
+```
+init pose (red): r=0.300 theta=0.785 z=0.150 (axis=(0.000, 0.000)) -> base (0.212, -0.212, 0.150), traverse z=0.200
+```
+
+- **赤・青は別々の値**。`r_blue` / `theta_blue` / `z_blue` も同じ手順で決める
+  (赤のミラーになるとは限らないので、青フィールドでも実機で確かめること)
+- 実行中に `ros2 param set /game_state_manager_node init_pose_r_red 0.31` で試せる
+  (**次の `INIT` から**効く。試して決まったら正本に書き戻すのを忘れない)
+- `r` に 0 以下や非数を入れるとノードが起動時に落ちる (fail-fast)。
+  生成物が古くて値が 0.0 のままのときも同じ症状になる → `generate.py --check`
+- 初期位置は**作業領域 (`workspace.*`) の内側**にあること。外だとゴールが
+  `goal outside workspace` で却下され、`INIT` が `WAITING_FOR_PICK` へ落ちる
+- 初期位置へは「上げる → 水平 → 下ろす」の L 字で動く。水平移動の高さは
+  `shooting_box.retract_clearance_above_top_m` (退避高さ) なので、**そこが障害物より
+  高いことも一緒に確認する** (`game_state_manager_node.md`「初期位置と状態のリセット」)
+
+---
+
 ## 5. 当日 (競技場) にやること・順番
 
 フィールドは会場で組まれるので、CAD の値と現物がずれる前提で臨む。
@@ -182,6 +276,7 @@ MCU 側も IK/FK に同じ値が要る)。ターンテーブル軸が原点か�
 | 5 | 缶を離す高さが高すぎる/低すぎる | `shooting_box.release_below_top_m` | ○ |
 | 6 | 運搬中に何かに当たる | `shooting_box.transport_clearance_above_top_m` (approach / retract も同じ値に) | ○ |
 | 7 | ワークが想定位置に無い | perception が検出するので通常は不要。初期配置の外形 (VR の表示範囲) は `work_placement.*` | — (要再生成) |
+| 8 | 起動直後 / リセットで戻る姿勢を変えたい | `init_pose.r_red / theta_red / z_red` (青は `*_blue`)。極座標 (原点 = ターンテーブル軸、θ は時計回り正)。決め方は §4.5 | ○ (次の `INIT` から) |
 
 1 を先にやる理由: 2 以降は 1 で決めた原点の上に乗るため、後から 1 を変えると 2〜6 を
 やり直すことになる。
@@ -198,7 +293,8 @@ MCU 側も IK/FK に同じ値が要る)。ターンテーブル軸が原点か�
 | `robot_geometry.yaml` | ROS2 (生成物 `robot_geometry.generated.yaml`) | JS (`generated/robotParams.js`) | 実行中変更 |
 |---|---|---|---|
 | `kinematics.shoulder_*` / `knee_*` / `knee_base_height_m` | `kinematics_node.<同名>` | `PARALLEL_ARM.shoulder.{pivotHalfSeparation, proximalLinkLength, distalLinkLength}` 等 | × (再起動) |
-| `kinematics.turntable_axis_x_m / y_m` | `hardware_bridge_node.<同名>` (UDP 極座標の原点) と `kinematics_node.<同名>` (パターンB) の**両方**へ同じ値 | `PARALLEL_ARM.turntableAxisX / Y` | ○ `hardware_bridge_node` (停止中に) / × `kinematics_node` |
+| `kinematics.turntable_axis_x_m / y_m` | `hardware_bridge_node.<同名>` (UDP 極座標の原点)・`kinematics_node.<同名>` (パターンB)・`game_state_manager_node.<同名>` (`init_pose` の極座標の原点。2026-09-11〜) の**3つ**へ同じ値 | `PARALLEL_ARM.turntableAxisX / Y` | ○ `hardware_bridge_node` (停止中に)・`game_state_manager_node` / × `kinematics_node` |
+| `init_pose.r_red / theta_red / z_red`、`*_blue` | `game_state_manager_node.init_pose_r_red / init_pose_theta_red / init_pose_z_red`、`*_blue` (2026-09-11〜) | (生成しない。sim の `actuator.initPosePolar` は MCU 代役の**電源投入位置**であって、ROS2 の `init_pose` とは別物) | ○ (次の `INIT` から) |
 | `workspace.x_min_m` … `z_max_m` | `motion_generator_node.workspace_x_min` … | `WORKSPACE.{xMin … zMax}` | ○ |
 | `cylinder.radius_m` / `length_m` | `game_state_manager_node.cylinder_diameter_m` (= 2 × radius) | `CYLINDER.{radius, length}`、`REAL_FIELD` (派生) | ○ |
 | `shooting_box.center_x_red` 等 | `game_state_manager_node.box_center_x_red` 等 | `SHOOTING_BOX.centerXRed` 等 | ○ |

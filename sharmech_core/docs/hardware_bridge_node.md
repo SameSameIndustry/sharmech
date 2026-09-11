@@ -37,7 +37,7 @@ ROS2 トピックと UDP パケットの間の**変換と輸送のみ**を担う
 
 | トピック | 型 | 条件 |
 |---|---|---|
-| `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `command_mode == cartesian`。位置・速度に加え `enable` (bit0) / `init_request` (bit2) も同乗している。**joint モードでもフラグのためだけに購読する** (下記「動作許可と初期位置要求」) |
+| `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `command_mode == cartesian`。位置・速度に加え `enable` (bit0) も同乗している (`init_request` は 2026-09-11 に廃止)。**joint モードでもフラグのためだけに購読する** (下記「動作許可」) |
 | `/catchrobo/command/joint` | `sensor_msgs/JointState` | `command_mode == joint` (パターンB)。`name` に5モータ名が揃っていることを要求し、**名前で照合して**ワイヤ上の並び順 (`udp_protocol.hpp` の `kJointOrder`) に詰め替える。欠けていればパケットを破棄して警告 (初回のみ)。`velocity` が無い場合は qdot=0 で送り、警告する (「位置と速度の併送」原則の違反として) |
 | `/catchrobo/command/gripper` | `std_msgs/Bool` | 常時 |
 | `/catchrobo/command/orient_vertical` | `std_msgs/Bool` | 常時。グリッパと同じくラッチして次の指令パケットに詰める (`control_flags` bit1。cartesian/joint 両モード共通) |
@@ -51,7 +51,7 @@ config を見て対応する購読とエンコーダの組を生成する (joint
 | トピック | 型 | 説明 |
 |---|---|---|
 | `/catchrobo/arm/current_pose` | `geometry_msgs/PoseStamped` | MCU が FK して返した実姿勢 |
-| `/catchrobo/arm/mcu_status` | `sharmech_msgs/McuStatus` | `status_flags`・疎通・`seq`/`seq_echo`。**latched**。`motion_generator_node` が bit3 / bit5 を見るのに使う |
+| `/catchrobo/arm/mcu_status` | `sharmech_msgs/McuStatus` | `status_flags`・疎通・`seq`/`seq_echo`。**latched**。`motion_generator_node` が bit3 (未初期化) を見るのに使う (bit5 の監視は 2026-09-11 に廃止) |
 | `/joint_states` | `sensor_msgs/JointState` | 実測の関節角。`robot_state_publisher` 経由で rviz に表示できる |
 
 ### パラメータ
@@ -203,7 +203,7 @@ onFeedbackTimer():
 | 2 | ウォッチドッグ作動中(指令途絶により最後の目標位置をホールド中) |
 | 3 | 未初期化 / 原点未確定 |
 | 4 | 直近の指令を破棄した (作業領域外・seq逆転等。破棄後しばらく立てておく) |
-| 5 | 初期位置に到達・静止中 (`control_flags` bit2 への応答。`McuStatus.FLAG_AT_INIT_POSE`) |
+| 5 | **予約 (2026-09-11〜)。** 初期位置到達 (`control_flags` bit2 への応答) だったが、初期位置が ROS2 側へ移り bit2 を送らなくなったため実機では立たない。`McuStatus.FLAG_AT_INIT_POSE` の定義と合成の AND は互換のため残してある |
 | 6-15 | 予約 |
 
 ### 2 基板のフィードバック合成 (2026-09-10)
@@ -219,7 +219,7 @@ MCU は 2 枚あり、基板同士は通信できない (デイジーチェー�
 | `theta`, `joint_positions[2]` (turntable) | θ 基板 (`mcu_theta_ip`) |
 | `pitch`, `yaw`, `gripper_state` | θ 基板 (どれも指令値のエコー) |
 | `status_flags` bit0〜4 | **OR** |
-| `status_flags` bit5 (初期位置到達) | **AND** |
+| `status_flags` bit5 (予約。旧・初期位置到達) | **AND** |
 | `seq`, `seq_echo` (`McuStatus`) | r/z 基板の値 (逆転検出は基板ごと) |
 | `McuStatus.connected` | 全基板が `feedback_timeout` 以内 |
 | `McuStatus.out_of_order_count` | 全基板の合計 |
@@ -227,8 +227,12 @@ MCU は 2 枚あり、基板同士は通信できない (デイジーチェー�
 - **bit3 を OR にする理由**: `motion_generator_node` は bit3 が落ちた瞬間に目標を実姿勢へ
   同期して `enable=1` を送る。片方だけ原点出しが済んだ時点で同期すると、もう片方が
   原点出しの途中で動き出す
-- **bit5 を AND にする理由**: 両基板が初期位置に着くまで `INIT` モードを抜けない。
-  mock 2 台 (θ 側に 2 秒の一次遅れ) で、bit5 が θ 側の到達まで約 10 秒立たないことを確認済み
+- **bit5 を AND にする理由**: 2026-09-10 当時は「両基板が初期位置に着くまで
+  `motion_generator_node` の `INIT` モードを抜けない」ため。mock 2 台 (θ 側に 2 秒の
+  一次遅れ) で、bit5 が θ 側の到達まで約 10 秒立たないことを確認済み。
+  **2026-09-11 に bit2/bit5 が予約になり、この AND を読む側が居なくなった**が、
+  「全基板が満たしたときだけ真」という合成の意味は bit5 に予約以外の用途が付いても
+  正しいままなので、実装 (`feedback_merge.hpp`) とテストはそのまま残してある
 - **片方しか届いていない間は `current_pose` を出さない**。半端な姿勢 (θ だけ 0 など) に
   下流が同期してしまうのを防ぐ (「フィードバックが無いときにエコーしない」と同じ理由)。
   片方が `feedback_timeout` を超えて途絶した場合も同様に出さず、`connected=false` にする
@@ -269,8 +273,8 @@ base 座標系の直交座標なので、`x = r·cos θ`, `y = r·sin θ` で戻
 |---|---|
 | `sockfd_` | UDP ソケット。送信と受信で共用 |
 | `gripper_state_` | ラッチしたグリッパ状態 |
-| `enable_state_` / `init_request_state_` | 直近の Cartesian 指令の `enable` / `init_request` (control_flags bit0 / bit2)。既定 false |
-| `last_sent_theta_` / `has_sent_command_` | θ のアンラップ基準。**ROS2 が駆動していない間 (未送信・`enable=false`・`init_request=true`) は MCU の実 θ で上書きする** (下記) |
+| `enable_state_` | 直近の Cartesian 指令の `enable` (control_flags bit0)。既定 false。`init_request_state_` は 2026-09-11 に削除 (bit2 は常に 0) |
+| `last_sent_theta_` / `has_sent_command_` | θ のアンラップ基準。**ROS2 が駆動していない間 (未送信・`enable=false`) は MCU の実 θ で上書きする** (下記) |
 | `send_seq_` | 送信パケットの連番。送るたびに +1 (全基板に同じ seq を送る) |
 | `boards_` | 基板ごとの宛先アドレス・直近フィードバック・受信時刻・受信済み最大 `seq`・逆転回数。`[0]` = r/z 基板、`[1]` = θ 基板 (1 枚構成なら無し) |
 | `last_feedback_time_` | 全基板が揃って合成フィードバックを出した最後の時刻。途絶の検出に使う |
@@ -313,28 +317,36 @@ PacketEncoder (抽象)
 ノード本体に直書きすると、パターンB 追加時に本体を改造することになる。抽象化しておけば
 **実装クラスを1つ足して config の分岐に1行加えるだけ**で済む。
 
-### 動作許可 (bit0) と初期位置要求 (bit2) は Cartesian ストリームから写す (2026-09-10)
+### 動作許可 (bit0) は Cartesian ストリームから写す (2026-09-10)
 
 `control_flags` bit0 (動作許可) は以前「常に 1」だったが、ROS2 を起動しただけで
-アームが原点の仮目標へ動き出す問題 (`motion_generator_node.md`「起動時の同期と初期位置要求」)
+アームが原点の仮目標へ動き出す問題 (`motion_generator_node.md`「起動時の同期」)
 の対策として、`CartesianCommand.enable` をそのまま写すようにした。
-同じく `CartesianCommand.init_request` が bit2 (`kControlFlagInitRequest = 0x04`) になる。
-立っている間 MCU は r/θ/z を無視して**自前の初期関節角**へ行き、到達を `status_flags`
-bit5 で返す。**初期位置の座標はこのノードにも ROS2 のどこにも無い。**
 
 別トピックにせずメッセージに同乗させる理由は、別トピックだと DDS の発見遅れで
 「位置は届くがフラグは既定値」の窓が数百 ms 開くため (mock_mcu で実測)。
 joint モード (パターンB) では `JointState` にフラグが無いので、Cartesian ストリームを
 フラグ取り出し専用に追加購読する。
 
+**bit2 (初期位置要求) は 2026-09-11 に廃止した。** 当時は
+`CartesianCommand.init_request` を bit2 (`kControlFlagInitRequest = 0x04`) に写し、
+立っている間 MCU が r/θ/z を無視して自前の初期関節角へ行く契約だったが、
+**初期位置の正本が ROS2 側 (`game_state_manager_node` の `init_pose_*`) へ移った**ため、
+このノードは bit2 を**常に 0 で送る**。初期位置への移動は他のゴールと区別が付かない
+普通の 0x01 ストリームとして流れる。ビット割当自体は予約として残っており
+(`udp_protocol.hpp` の `kControlFlagInitRequest`)、MCU 側にその実装が残っていても
+ROS2 が立てないので発動しない (`sharmech/docs/mcu_spec.md` §3.2 / §4.6)。
+
 ### θ のアンラップ基準は「ROS2 が駆動していない間」は MCU の実 θ に合わせる
 
 `last_sent_theta_` は直前に**送った** θ で、次の θ をその近傍へアンラップする。
-だが MCU が自力で動く場面 (電源投入時の初期位置移動・bit2 での復帰) では
-送った値と実 θ が無関係になる。例えば MCU が初期位置で θ=+3.0 に居るのに基準が 0 の
+だが MCU が自力で動く場面 (電源投入時の原点出しとその後の待機位置) では
+送った値と実 θ が無関係になる。例えば MCU が電源投入位置で θ=+3.0 に居るのに基準が 0 の
 ままだと、同期後の最初の指令が -3.28 側の分岐に落ちてターンテーブルが1回転する。
-そこで**未送信・`enable=false`・`init_request=true` の間はフィードバックの θ で基準を
-上書きし**、駆動を再開した瞬間に基準 = 実 θ になるようにしてある。
+そこで**未送信・`enable=false` の間はフィードバックの θ で基準を
+上書きし**、駆動を再開した瞬間に基準 = 実 θ になるようにしてある
+(2026-09-11 まではこれに `init_request=true` の条件も入っていたが、bit2 の廃止で消えた。
+初期位置へ動くのが普通のゴールになったので、その間は基準を上書きしてはいけない)。
 
 ### `control_flags` bit1 = 「縦にする」指示
 
