@@ -150,6 +150,9 @@ public:
     double approach_clearance_z{0.20};
     double transport_clearance_z{0.20};  // TRANSPORT_LIFT/TRANSPORTING中のZ [m] (缶を保持)
     double retract_clearance_z{0.20};    // 設置後に上げるZ [m] (箱に当たらない高さ)
+    // 掴みに降りる先の絶対 Z [m]。pick_request の z は使わず常にこれで上書きする
+    // (VR は缶の底面 z=0 を送ってくる。2026-09-11 ユーザー指示)
+    double pick_z{0.20};
     double grasp_dwell_sec{0.3};         // GRASPING状態での待機時間 [s]
     // ORIENTING状態での待機時間 [s]。ピッチ機構が横→縦を回し切るのに要する時間。
     // MCUがピッチの実状態を返さないため、grasp_dwell_sec と同じく固定時間待ちの
@@ -275,6 +278,7 @@ public:
   {
     if (state_ != GameState::kWaitingForPick) {return;}
     pick_pose_ = pose;
+    pick_pose_.z = config_.pick_z;    // 要求の z は信用しない (上記 Config::pick_z)
     state_ = GameState::kApproaching;
     CartesianState above = pose;
     above.z = config_.approach_clearance_z;
@@ -345,7 +349,7 @@ public:
   {
     switch (state_) {
       case GameState::kApproaching:
-        // ワークの真上に着いた。ここから垂直に降ろす
+        // ワークの真上に着いた。ここから垂直に pick_z まで降ろす
         state_ = GameState::kApproachDescend;
         pending_goal_ = pick_pose_;
         break;

@@ -181,6 +181,8 @@ def ros_sections(p: Params):
              p.get("shooting_box.transport_clearance_above_top_m")),
             ("retract_clearance_above_box_top_m",
              p.get("shooting_box.retract_clearance_above_top_m")),
+            # 掴みに降りる先の絶対 z (pick_request の z を常に上書き)
+            ("pick_z_m", p.get("work_placement.pick_z_m")),
             # 初期位置 (起動時と /catchrobo/game/reset の行き先)。**極座標のまま渡し**、
             # ノード側が turntable_axis_* を原点として直交座標へ直す
             ("init_pose_r_red", p.get("init_pose.r_red")),

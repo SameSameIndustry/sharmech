@@ -253,20 +253,22 @@ shooting_box:
     value: 0.044
     unit: m
     status: decision
-    source: "従来値 (絶対 z=0.20) からの逆算"
+    source: "2026-09-11 ユーザー指示: 絶対 z=0.20 に (0.20 - top_z 0.156。同日 0.28→0.20)"
+    date: 2026-09-11
     note: "接近時に水平移動する高さ。基準面から何m上か。**retract と同じ値にする** (揃っていれば接近が完全な水平移動になる)"
   transport_clearance_above_top_m:
-    value: 0.144
+    value: 0.044
     unit: m
     status: decision
-    source: "2026-09-11 ユーザー指示: 運搬高さを絶対 z=0.30 に (0.30 - top_z 0.156)"
+    source: "2026-09-11 ユーザー指示: 絶対 z=0.20 に (0.20 - top_z 0.156。同日 0.28→0.20)"
     date: 2026-09-11
     note: "運搬中の高さ。缶を縦に持つと下端が更に142mm下がる点に注意"
   retract_clearance_above_top_m:
     value: 0.044
     unit: m
     status: decision
-    source: "同上"
+    source: "2026-09-11 ユーザー指示: 絶対 z=0.20 に (0.20 - top_z 0.156。同日 0.28→0.20)"
+    date: 2026-09-11
     note: "設置後に退避する高さ。approach と同じ値にする"
 
 # -----------------------------------------------------------------------------
@@ -342,6 +344,13 @@ work_placement:
     unit: m
     status: unmeasured
     source: "治具上のワーク中心の高さ。土台厚2.3mmは確定済みだが、土台が乗る面の絶対 Z が未較正"
+  pick_z_m:
+    value: 0.10
+    unit: m
+    status: decision
+    source: "2026-09-11 ユーザー指示 (掴みに降りる目標高さ 0.10 m。同日 0.20→0.10)"
+    date: 2026-09-11
+    note: "★掴みに降りる (APPROACH_DESCEND) 先の絶対 z。game_state_manager_node が pick_request の z をこの値で常に上書きする (VR は缶の底面 z=0 を送ってくるため)。field_origin_offset.z_m が足される"
 
 # -----------------------------------------------------------------------------
 # 本番設置での原点ズレ補正 (現場合わせ)

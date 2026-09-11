@@ -173,6 +173,9 @@ void GameStateManagerNode::declareParameters(const std::string & color_suffix)
   declare_parameter("approach_clearance_above_box_top_m", 0.044);
   declare_parameter("transport_clearance_above_box_top_m", 0.044);
   declare_parameter("retract_clearance_above_box_top_m", 0.044);
+  // 掴みに降りる先の絶対 z。pick_request の z は常にこれで上書きする
+  // (VR は缶オブジェクトの原点 = 底面 z=0 を送ってくるため。2026-09-11 ユーザー指示)
+  declare_parameter("pick_z_m", 0.20);
 
   declare_parameter("slot_clamp_margin_m", 0.03);
   declare_parameter("require_manual_confirm", true);
@@ -272,6 +275,7 @@ GameStateMachine::Config GameStateManagerNode::buildConfig(
     box_top_z + dbl("transport_clearance_above_box_top_m") + offset_z;
   config.retract_clearance_z =
     box_top_z + dbl("retract_clearance_above_box_top_m") + offset_z;
+  config.pick_z = dbl("pick_z_m") + offset_z;
   config.grasp_dwell_sec = dbl("grasp_dwell_sec");
   config.orient_dwell_sec = dbl("orient_dwell_sec");
 

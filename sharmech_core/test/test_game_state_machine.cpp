@@ -22,6 +22,7 @@ GameStateMachine::Config makeConfig()
   config.slot_clamp_margin_m = 0.03;
   config.transport_clearance_z = 0.20;
   config.retract_clearance_z = 0.20;
+  config.pick_z = 0.05;   // 掴みに降りる先の絶対 z (pick_request の z は無視される)
   config.grasp_dwell_sec = 0.3;
   config.orient_dwell_sec = 0.5;
   // 既存のサイクルテストは完全自動モードを対象にする。
@@ -653,14 +654,16 @@ TEST(GameStateMachine, EveryMoveIsEitherPurelyVerticalOrPurelyHorizontal)
   EXPECT_DOUBLE_EQ(approach.y, pick.y);
   EXPECT_DOUBLE_EQ(approach.z, 0.20);   // approach_clearance_z
 
-  // 2. 降下: xyは動かさず、zだけワークの高さへ (完全な垂直移動)
+  // 2. 降下: xyは動かさず、zだけ pick_z へ (完全な垂直移動)。
+  //    pick_request の z (ここでは 0.0 = VR が送る缶の底面) は使わない
   machine.onGoalReached(1.0);
   ASSERT_EQ(machine.state(), GameState::kApproachDescend);
   ASSERT_TRUE(machine.hasPendingGoal());
   const auto descend = machine.consumePendingGoal();
   EXPECT_DOUBLE_EQ(descend.x, approach.x);
   EXPECT_DOUBLE_EQ(descend.y, approach.y);
-  EXPECT_DOUBLE_EQ(descend.z, pick.z);
+  EXPECT_DOUBLE_EQ(descend.z, 0.05);      // config.pick_z
+  EXPECT_NE(descend.z, pick.z);
 
   // 3. 掴む
   machine.onGoalReached(2.0);
