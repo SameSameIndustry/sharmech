@@ -39,10 +39,7 @@ namespace sharmech_core
 // Sub: /catchrobo/game/box_count      (std_msgs/Int32) VRの指定箱にワークを離した通算個数。
 //      置きに行くべきスロット座標のキューになる (count-1 が最新スロットIDの正本)
 // Sub: /catchrobo/arm/status          (sharmech_msgs/MotionStatus) ゴール到達/却下の検知
-// Sub: /catchrobo/command/cartesian   (sharmech_msgs/CartesianCommand) 現在の目標姿勢
-//      (微調整のジョグを含む) と **動作許可 (enable)**。enable の立ち上がりが
-//      「MCU の実姿勢に同期し終えた = 動かしてよい」の合図で、INIT はこれを待つ
-// Pub: /catchrobo/arm/target_pose     自動シーケンスのゴール (INIT の L 字も含む)
+// Pub: /catchrobo/arm/target_pose     自動シーケンスのゴール
 // Pub: /catchrobo/arm/gripper         自動シーケンスのグリッパ指令
 // Pub: /catchrobo/arm/orient_vertical PLACING中のみ true
 // Pub: /catchrobo/game/workspace_clamp PLACING/RETRACTING前後の作業領域クランプ上書き
@@ -51,9 +48,7 @@ namespace sharmech_core
 // Sub: /catchrobo/game/toggle_manual_control  DualSenseの特定ボタン同時押し
 //      (L1+R1+L3+R3) で joy_teleop_node が publish する、自由操作の入/切トグル
 // Sub: /catchrobo/game/reset          (std_msgs/Empty) 状態のリセット要求。
-//      どの状態からでも INIT へ入り、初期位置 (init_pose_*。2026-09-11〜 ROS2 側が正本) へ
-//      L 字で戻ってから WAITING_FOR_PICK に復帰する。起動時も同じ経路を通る
-//      (init_on_startup=true のとき)
+//      どの状態からでも INIT へ入り、MCU 側の初期位置へ戻ってから WAITING_FOR_PICK に復帰する
 class GameStateManagerNode : public rclcpp::Node
 {
 public:
@@ -68,14 +63,13 @@ private:
   // VRが使えない場合の脱出ハッチ。どの状態からでも自由操作(手動ジョグのみ)へ
   // トグルする。詳細は GameStateMachine::toggleManualControl() のコメント参照
   void onToggleManualControl(const std_msgs::msg::Empty::SharedPtr msg);
-  // 状態のリセット要求。どの状態からでも INIT へ入り、初期位置 (init_pose_*) まで
-  // L 字のゴールを1本ずつ出す。動作許可 (enable) がまだなら出るまで待つ
+  // 状態のリセット要求。どの状態からでも INIT へ入り、motion_generator_node へ
+  // 初期位置要求 (/catchrobo/arm/init_request) を1回出す。座標は持たない
   // (詳細は GameStateMachine::requestInit() のコメント参照)
   void onResetRequest(const std_msgs::msg::Empty::SharedPtr msg);
   // 操縦者の確定 (微調整の完了)。ADJUSTING_PICK / ADJUSTING_PLACE でのみ効く
   void onConfirm(const std_msgs::msg::Empty::SharedPtr msg);
-  // motion_generator の現在の目標姿勢と動作許可。微調整でジョグした結果を追うため
-  // (姿勢) と、INIT の移動を始めてよいかの判定 (enable の立ち上がり) に使う
+  // motion_generator の現在の目標姿勢。微調整でジョグした結果を追うために購読する
   void onCommandCartesian(const sharmech_msgs::msg::CartesianCommand::SharedPtr msg);
   void onTimer();
 
@@ -98,6 +92,7 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr orient_vertical_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr init_request_pub_;
   rclcpp::Publisher<sharmech_msgs::msg::WorkspaceClamp>::SharedPtr workspace_clamp_pub_;
   rclcpp::Publisher<sharmech_msgs::msg::JogLimit>::SharedPtr jog_limit_pub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr change_state_sub_;
@@ -117,11 +112,6 @@ private:
     int cols_x, int rows_y, double pitch_x, double pitch_y, double slot_z);
   // 生成した格子が箱に収まっているかを知らせる (はみ出し・缶同士の干渉を警告)
   void logSlotGeometry(
-    const GameStateMachine::Config & config,
-    const std::vector<rclcpp::Parameter> & overrides) const;
-  // 初期位置の極座標と、直交座標へ直した結果を INFO で出す
-  // (極座標 → 直交の変換結果を目で確かめられるように。起動時と param 変更時)
-  void logInitPose(
     const GameStateMachine::Config & config,
     const std::vector<rclcpp::Parameter> & overrides) const;
   // 実行中のパラメータ変更を検証して適用する (再起動なしの現場合わせ)

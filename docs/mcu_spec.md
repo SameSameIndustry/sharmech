@@ -7,12 +7,10 @@
 実装すること。設計の背景・理由づけの詳細は [`sharmech/README.md`](../README.md) の
 「MCU通信仕様 (UDP)」節にあるが、両者に食い違いがあればこの文書が優先する。
 
-最終更新: 2026-09-11 (**初期位置が ROS2 側へ移り、`control_flags` bit2 と `status_flags` bit5 は
-予約になった** (§3.2/§3.5/§4.6/§10)。ROS2 は bit2 を常に 0 で送り bit5 を見ないので、
-マイコンは電源投入後の原点出しとホールドだけを担当すればよい。同日、**θ の正方向を時計回りに変更**
-(§3.2/§3.4/§10。ROS2 側で反転する。MCU 側の `THETA_DEG_PER_RAD_SIGN` は「時計回りに対して
-一致するか」の意味になる)。同日、**指令 (0x01)・フィードバック (0x81) の周期を 100Hz → 10Hz、
-ウォッチドッグを 50ms → 500ms に変更**。パケットレイアウトは不変で `protocol_version` = 2 のまま)
+最終更新: 2026-09-11 (**θ の正方向を時計回りに変更** (§3.2/§3.4/§10。ROS2 側で反転する。MCU 側の
+`THETA_DEG_PER_RAD_SIGN` は「時計回りに対して一致するか」の意味になる)。同日、**指令 (0x01)・
+フィードバック (0x81) の周期を 100Hz → 10Hz、ウォッチドッグを 50ms → 500ms に変更**。
+パケットレイアウトは不変で `protocol_version` = 2 のまま)
 
 ---
 
@@ -70,15 +68,14 @@ ROS2 側 PC の同じ 8889 番へ返す**。合成は ROS2 側 (`hardware_bridge
 
 | 基板 | IP (現物) | ファーム | 担当 (指令で使うもの) | 0x81 で埋めるもの |
 |---|---|---|---|---|
-| r/z 基板 | 192.168.1.100 | `ip_100_section` ブランチ | `r`, `z` (肩・肘/膝の GIM ×4)、`control_flags` bit0 | `r`, `z`, `joint_positions` の肩・肘/膝 (index 0,1,3,4)、`status_flags` |
-| θ 基板 | 192.168.1.101 | `enndeffector_UDP` ブランチ | `theta` (ターンテーブル)、`gripper`、`control_flags` bit0/bit1 | `theta`, `joint_positions[2]` (turntable)、`pitch`, `yaw`, `gripper_state`、`status_flags` |
+| r/z 基板 | 192.168.1.100 | `ip_100_section` ブランチ | `r`, `z` (肩・肘/膝の GIM ×4)、`control_flags` bit0/bit2 | `r`, `z`, `joint_positions` の肩・肘/膝 (index 0,1,3,4)、`status_flags` |
+| θ 基板 | 192.168.1.101 | `enndeffector_UDP` ブランチ | `theta` (ターンテーブル)、`gripper`、`control_flags` bit0/bit1/bit2 | `theta`, `joint_positions[2]` (turntable)、`pitch`, `yaw`, `gripper_state`、`status_flags` |
 
 - 担当外のフィールドは **0 で送る** (ROS2 側は読まない)。`joint_count` は両基板とも 5
 - `status_flags` は基板ごとに自分の状態を立てる。ROS2 側で **bit0〜4 は OR、bit5 は AND**
-  で合成する。**bit3 (未初期化) は片方でも立っていれば ROS2 は動作許可を出さない**ので、
-  原点出しが終わるまで確実に立てること。
-  (2026-09-11 に bit2/bit5 が予約になり、「bit5 は両基板が実装すること」という要求は
-  無くなった。合成規則自体は AND のまま残してある)
+  で合成する。したがって **bit5 (初期位置到達) は両基板が実装すること** —— 片方が bit5 を
+  返さないと `INIT` モードが永久に終わらない。同様に bit3 (未初期化) は片方でも立っていれば
+  ROS2 は動作許可を出さない
 - `seq` は基板ごとに独立でよい (ROS2 側は基板ごとに順序逆転を判定する)。**再起動で 0 から
   振り直してよい** (ROS2 側は途絶後の再開を再起動とみなして基準を捨てる)
 - 2 枚とも 10Hz で自発送信する (§3.4 の送信条件は基板ごとに適用)
@@ -143,7 +140,7 @@ ROS2 側 PC の同じ 8889 番へ返す**。合成は ROS2 側 (`hardware_bridge
 | 48 | `float32` | `pitch_rate` | rad/s |
 | 52 | `float32` | `yaw_rate` | rad/s |
 | 56 | `uint8` | `gripper` | 0=開, 1=閉 |
-| 57 | `uint8` | `control_flags` | bit0=動作許可, bit1=縦にする指示, bit2=**予約 (ROS2 は常に 0 を送る)** |
+| 57 | `uint8` | `control_flags` | bit0=動作許可, bit1=縦にする指示, bit2=初期位置要求 (下記) |
 | 58 | `uint16` | `reserved` | 0埋め。無視すること |
 
 - **`theta` の正方向は上から見て時計回り (+X → −Y)。** ベース座標系 (右手系・z 上向き) の
@@ -177,14 +174,15 @@ ROS2 側 PC の同じ 8889 番へ返す**。合成は ROS2 側 (`hardware_bridge
   **ROS2 は起動直後、マイコンのフィードバックに目標姿勢を同期し終えるまで 0 を送る**
   (§4.6)。同期前の目標は原点 (r=0, z=0) の仮値なので、これに追従すると ROS2 を
   起動しただけでアームが動いてしまう。bit0=0 でもグリッパと bit1 は反映してよい
-- `control_flags` bit2 (0x04): **予約 (2026-09-11〜。ROS2 は常に 0 を送る)。**
-  2026-09-10 の版では「初期位置要求」で、立っている間はマイコン側で定義した初期関節角へ
-  移動して到達を `status_flags` bit5 で返す契約だったが、**初期位置の正本が ROS2 側
-  (`params/robot_geometry.yaml` の `init_pose`) へ移った**ため廃止した。
-  初期位置へは ROS2 が**普通の 0x01 ストリームで動かす**ので、マイコン側に特別な実装は
-  要らない (§4.6)。**既にこのビットを実装したファームでも、そのまま残してよい** ——
-  ROS2 が立てないので発動しない。新規実装なら無視すること。
-  ビット割当自体は将来のために予約として残す
+- `control_flags` bit2 (初期位置要求、0x04): **立っている間、r/θ/z と速度を無視して、
+  マイコン側で定義した初期関節角へ自前のスルーレート制限で移動し、そこで保持する。**
+  初期位置 (各モータの角度) の正本はマイコン側であり、**ROS2 側は座標を一切持たない**
+  (VR の「ステートリセット」= `/catchrobo/game/reset` の実体)。到達して静止したら
+  `status_flags` bit5 を立てる (§3.5)。ROS2 は bit5 を見て bit2 を落とし、その時点の
+  フィードバック位置を目標として通常追従へ戻す (落とした瞬間に飛ばないよう、ROS2 は
+  bit2 中もフィードバックを目標に写し続けている)。bit2 が落ちたら bit5 も落とす。
+  bit0=0 と bit2=1 が同時に来たら bit0 (ホールド) を優先する。
+  bit2 中もグリッパと bit1 は反映すること (リセット時に「開・横」を同時に送る)
 
 ### 3.3 指令 `packet_type = 0x02` (関節指令。パターンB・当面優先度低)
 
@@ -236,9 +234,7 @@ index 4: knee_right      (肘/膝 右モータ)
 
 **2 枚構成での分担は §2.2 を参照。** 各基板は自分の担当フィールドだけを埋め、担当外は 0 で送る
 (r/z 基板は `theta`・`pitch`・`yaw`・`gripper_state`・`joint_positions[2]` を 0、
-θ 基板は `r`・`z`・`joint_positions[0,1,3,4]` を 0)。
-(2026-09-11 まではここに「`status_flags` bit5 は両基板が実装する」とあったが、
-bit5 は予約になったので不要。**bit3 は引き続き両基板が正しく立てること。**)
+θ 基板は `r`・`z`・`joint_positions[0,1,3,4]` を 0)。**`status_flags` bit5 は両基板が実装する。**
 
 **送信条件: 指令の受信と無関係に、マイコン起動直後から10Hz (100ms 間隔) で自発送信する**
 (2026-09-11 に 100Hz から変更。指令と同じ周期)。
@@ -262,7 +258,7 @@ ROS2 側は 0.5 秒 (5 発分) 途絶で警告し `current_pose` を止める (`
 | 2 | ウォッチドッグ作動中 (指令途絶により最後の目標位置をホールド中) |
 | 3 | 未初期化・原点未確定 (原点出しが済むまで立てたまま送る) |
 | 4 | 直近の指令を破棄した (可動域外・seq逆転等。破棄後 目安200ms 立てておく) |
-| 5 | **予約 (2026-09-11〜。ROS2 は見ない。0 でよい)。** 旧「初期位置に到達・静止中」(`control_flags` bit2 への応答)。bit2 の廃止に伴い不要になった (§3.2 / §4.6)。返しても ROS2 の挙動は変わらない |
+| 5 | 初期位置に到達・静止中 (`control_flags` bit2 への応答。bit2 が立っている間だけ意味を持つ。§3.2) |
 | 6-15 | 予約 (0) |
 
 ### 3.6 C構造体定義 (STM32側でそのまま使える形)
@@ -294,7 +290,7 @@ typedef struct {
   float    vz;                   // [m/s]
   float    pitch_rate, yaw_rate; // [rad/s]
   uint8_t  gripper;              // 0=開, 1=閉
-  uint8_t  control_flags;        // bit0=動作許可, bit1=縦にする指示, bit2=予約 (常に0)
+  uint8_t  control_flags;        // bit0=動作許可, bit1=縦にする指示, bit2=初期位置要求
   uint16_t reserved;
 } PolarPayload;                  // 44 bytes
 
@@ -408,42 +404,29 @@ target_theta += theta_dot * dt;
 モータドライバごとの制御方式の差異 (ODrive / DJI C610 / Feetech 等) は
 **すべてマイコン側で吸収する**。ROS2側はハードウェア構成を一切知らない。
 
-### 4.6 起動シーケンスと初期位置 (2026-09-11 改訂。初期位置は ROS2 側)
+### 4.6 起動シーケンスと初期位置 (2026-09-10 ユーザー確定)
 
-**マイコン側でやることは「原点出し」と「ホールド」だけ。** 初期位置 (競技開始姿勢) へ
-動かすのは ROS2 側の仕事になった (2026-09-11)。
+理想の挙動は次の3段階。**ROS2 が起動しても、操縦者が目標を与えるまでアームは動かない。**
 
 ```
 1. マイコン電源投入 (ROS2 は未起動でよい)
-     → 原点出し (エンコーダ基準の確定)
+     → 原点出しの後、マイコン側で定義した初期関節角へ自力で移動する
      → その間 status_flags bit3 を立てたまま 0x81 を送り続ける (§3.4)
-     → 済んだら bit3 を落とし、FK した実姿勢を返す。**その場でホールドしてよい**
-       (どこに居てもよい。指定の姿勢へ自力で動く必要は無い)
+     → 到達したら bit3 を落とし、FK した実姿勢を返す
 2. ROS2 起動
      → ROS2 は bit3 が落ちたフィードバックを受けて目標姿勢を実姿勢に同期する。
        同期が済むまで control_flags bit0 = 0 (ホールド) で送るので、
        この間に届く r/θ/z (原点の仮値) を追ってはいけない
-     → 同期後 bit0 = 1 に切り替わる。目標 = 実姿勢なのでこの瞬間は動かない
-3. ROS2 が初期位置まで動かす (bit0 = 1 の普通の 0x01 ストリーム)
-     → ROS2 側 (game_state_manager_node) が
-       「上げる → 水平移動 → 下ろす」の L 字で初期位置へ動かす。
-       **マイコンから見ると通常の追従と区別が付かない** (特別な処理は不要)
-4. 操縦者が目標 (target_pose / cmd_twist) を与える → 通常運転
+     → 同期後 bit0 = 1 に切り替わるが、目標 = 実姿勢なので動かない
+3. 操縦者が目標 (target_pose / cmd_twist) を与える → ここで初めて動き出す
 ```
 
-- **初期位置 (競技開始姿勢) の正本は ROS2 側**の `params/robot_geometry.yaml` の
-  `init_pose` (極座標 r/θ/z。赤・青で別々)。マイコン側は座標を持たない。
-  **値を変えるのに再ビルド・書き込みが要らない** (`ros2 param set` でも変えられる)
-- 競技中の「初期位置へ戻す」(VR のステートリセット = `/catchrobo/game/reset`) も同じ経路。
-  **bit2 / bit5 は使わない** (§3.2 / §3.5)
-- 2026-09-10 の版では「マイコンが自前の初期関節角へ自力で移動し、競技中は bit2 で
-  そこへ戻す」契約だった。**この方針は 2026-09-11 に撤回した。** 既にそう実装した
-  ファーム (`*_INIT_DEG` への電源投入時移動・bit2 / bit5) はそのまま残してよい ——
-  電源投入時にどこに居るかは ROS2 にとって自由で、bit2 は ROS2 が立てないため発動しない
+- 初期関節角の値は**マイコン側の定数**。ROS2 側 (`robot_geometry.yaml` 等) には
+  無い。変えたいときはマイコン側だけを直せばよい
+- 競技中の「初期位置へ戻す」(VR のステートリセット) は §3.2 の bit2 で要求する。
+  電源投入時と同じ初期関節角へ戻り、到達を bit5 で返す
 - マイコンだけが再起動した場合も同じ: bit3 を立てて送り始めれば ROS2 は同期を
-  取り消して bit0 = 0 に戻り、bit3 が落ちてから同期し直す。
-  **ただし ROS2 は自動では初期位置へ戻らない** (試合中に勝手に動かないため)。
-  戻したいときは操縦者が `/catchrobo/game/reset` を押す
+  取り消して bit0 = 0 に戻り、bit3 が落ちてから同期し直す
 
 ---
 
@@ -491,11 +474,8 @@ IK/FKに必要なリンク長・機構定数はマイコン側が実測して持
 `sharmech/sharmech_core/scripts/mock_mcu.py` は、この契約をROS2側から見て
 再現するリファレンス実装 (Python、ROS2非依存)。**期待される挙動の答え合わせとして
 読める**: 10Hz自発フィードバック・ウォッチドッグフラグ (500ms)・seq逆転破棄+bit4通知・
-起動直後の bit3 (`--init-duration`)・bit0=0 ホールドを実装済み。
-**電源投入直後に居る位置は `--power-on-pose r,theta,z`** (既定 0.30,0.0,0.15)。
-2026-09-11 の改訂で bit2 / bit5 の実装は削除した (§4.6。初期位置へは ROS2 が
-普通の 0x01 ストリームで動かすので、モックは電源投入位置でホールドしているだけでよい)。
-ただし補間・IK・実モータ制御は含まない (そこは実機側の仕事)。
+起動直後の bit3 (`--init-duration`)・bit0=0 ホールド・bit2 で `--init-pose` へ戻り
+bit5 を返す (§4.6) を実装済み。ただし補間・IK・実モータ制御は含まない (そこは実機側の仕事)。
 
 ROS2側スタック全体をこのモックに繋ぐには launch の `mock_mcu:=true` を使う
 (`config.yaml` の実機IPは触らない):
@@ -515,8 +495,6 @@ ros2 launch sharmech_bringup sharmech.launch.xml field_color:=red joy:=false
 # 動作確認:
 ros2 topic echo /catchrobo/arm/current_pose      # マイコンのFK結果が出れば疎通OK
 ros2 topic echo /catchrobo/arm/mcu_status        # status_flags・seq_echo・疎通状態
-#   ★ 同期した瞬間に ROS2 が初期位置へ動かす (§4.6。/catchrobo/game/state が INIT → WAITING_FOR_PICK)。
-#     動かしたくなければ ROS2 側 config.yaml の game_state_manager_node.init_on_startup: false
 ros2 topic pub --once /catchrobo/arm/target_pose geometry_msgs/msg/PoseStamped \
   "{header: {frame_id: field}, pose: {position: {x: 0.3, y: 0.0, z: 0.1}, orientation: {w: 1.0}}}"
 # → 10Hzの0x01ストリームが台形速度プロファイルで動くのが見える
@@ -606,7 +584,7 @@ UDPの指令だけでは動かない。以下はパケットでは送られて�
 | # | 項目 | 状態 |
 |---|---|---|
 | 1 | **機構の幾何パラメータ (IK/FK用)**: リンク長・ピボット間距離・ターンテーブル軸位置・肘/膝機構の基準高さ | **未実測** (ROS2側にも仮値しか無い)。これが無いとIKが解けず動かせない。最優先 |
-| 2 | **原点出し (ホーミング) の手順**: 電源投入時のエンコーダ基準の確定方法 | マイコン側の設計裁量。完了まで `status_flags` bit3 を立てる (§3.5)。**その後どこで待つかは自由** (2026-09-11〜。競技開始姿勢へは ROS2 が動かすので、マイコン側の「初期関節角」は必須ではなくなった。§4.6) |
+| 2 | **原点出し (ホーミング) の手順と初期関節角**: 電源投入時のエンコーダ基準の確定方法と、その後に自力で移動する初期位置 (各モータの角度) | マイコン側の設計裁量・**マイコン側の定数** (ROS2 は座標を持たない)。完了まで `status_flags` bit3 を立てる (§3.5)。bit2 (初期位置要求) でも同じ角度へ戻る (§4.6) |
 | 3 | **モータ・エンコーダ設定**: 回転方向・ギア比・カウント→rad換算 | マイコン側の設計裁量 |
 | 4 | **関節可動域 (joint limits)**: 可動域外破棄 (bit4) 用 | マイコン側の設計裁量。実測後ROS2側の作業領域クランプと整合を取る |
 | 5 | **グリッパ・「縦にする」機構の実物**: アクチュエータ・駆動回路 | 機構未定 (2026-09-01時点)。bit1の指示経路はプロトコル側で確保済み |
@@ -625,7 +603,7 @@ UDPの指令だけでは動かない。以下はパケットでは送られて�
 | ターンテーブル回転軸の位置 | ベース原点からのずれは ROS2 側が吸収する (§5。2026-09-10 実装済み)。値は `sharmech/params/robot_geometry.yaml` の `kinematics.turntable_axis_x/y_m` (未実測。人間が測って入れる) | マイコン側の対応は不要。θ の零点方向 (+X) だけマイコン側で合わせる |
 | θ の可動域 | マイコン側の裁量 | ROS2側は ±π を超える連続値を送りうる (§3.2)。物理的に回れない範囲は §4.1 の可動域外破棄で弾いてよい |
 | 0x02 (関節指令) | ワイヤ仕様は確定・ROS2側実装済み | リンク長が未実測のため当面実機では使わない。実装優先度は低くてよい |
-| 初期位置要求 (bit2) / 到達 (bit5) | **2026-09-10 に追加し、2026-09-11 に予約へ戻した** (初期位置が ROS2 側の `init_pose` へ移ったため。§3.2/§3.5/§4.6)。**パケットレイアウトはどちらの改訂でも不変**なので `protocol_version` は 2 のまま | ROS2 は bit2 を常に 0 で送り、bit5 を見ない。実装済みのファームはそのままでよい |
+| 初期位置要求 (bit2) / 到達 (bit5) | 2026-09-10 追加。**パケットレイアウトは不変** (予約ビットの割当のみ) なので `protocol_version` は 2 のまま | 「到達」の判定基準 (静止の閾値) はマイコン側の裁量。ROS2 は bit5 が立つまで待ち続ける (出口は `/catchrobo/arm/cancel`) |
 | 可動域の値 | マイコン側の裁量 | 実測が揃い次第、ROS2側の作業領域クランプ値と整合を取る |
 
 ---
@@ -643,7 +621,7 @@ UDPの指令だけでは動かない。以下はパケットでは送られて�
 **初版でやること (両基板共通):**
 
 1. UDP 8888 番で 0x01 を受信し、§4.1 の検証 (version / type / length / seq) を通す
-2. `control_flags` bit0 (動作許可) に従って目標を決める (§4.6。bit2 は予約で来ない)
+2. `control_flags` bit0 (動作許可)・bit2 (初期位置要求) に従って目標を決める (§4.6)
 3. 自分の担当フィールドだけを各モータの角度へ変換し、**既存の CAN 送信経路**でモータへ送る
 4. 0x81 を **起動直後から 10Hz** で ROS2 側 PC へ返す (§3.4)。担当外のフィールドは 0 (§2.2)
 5. 500ms 指令が途絶えたら bit2 を立てる (§4.3)。目標を更新しないだけでホールドになる
@@ -695,25 +673,20 @@ ROS2 が動いている間にベンチ GUI から送ると競合するが、運�
 - 1 行ずつ `/* ★HUMAN: 〜 */` のコメントを付け、**単位を名前に含める** (`_DEG`, `_M`, `_MS`)
 - **寸法 (リンク長など未実測のもの) は `NAN` で初期化する。** `NAN` が残っている間、
   ファームは IK を走らせず、0x01 を毎回 bit4 (破棄) で応答して現在位置をホールドする。
-  (2026-09-11 まではここに「bit2 は関節空間で完結するので寸法が無くても動く」と
-  書いてあったが、bit2 は予約になった。**寸法が入るまでは Cartesian 指令で
-  一切動かせない**ので、それまでは 5003 番の手動ジョグで動かすこと)
+  ただし bit2 (初期位置要求) は関節空間で完結するので **寸法が無くても動く**
 - 角度 [deg] の基準は **既存の 5003 番プロトコルと同じ** (`*_INITIAL_NATIVE_TURNS` からの
   偏差を出力軸 deg で表したもの。ユーザー決定)。IK の関節角 [rad] との間は
   `deg = SIGN × rad × 180/π + OFFSET_DEG` の 1 次式で結び、`SIGN` と `OFFSET_DEG` を人間が入れる
-- `*_INIT_DEG` (電源投入後に自力で行く角度) は **2026-09-11 以降は任意** ——
-  競技開始姿勢へは ROS2 が動かすので、**`*_INIT_AT_POWER_ON_POSE = 1` (電源投入時の
-  現在位置をそのまま初期位置にし、起動時に動かさない) を推奨既定とする** (§4.6)。
-  実装済みなら残してよい。既存の `*_INITIAL_NATIVE_TURNS` は「deg=0 の基準点」として
-  **そのまま残す** (意味を変えない)
+- 初期位置 (bit2 と電源投入時の到達先) も deg で持つ (`*_INIT_DEG`)。既存の
+  `*_INITIAL_NATIVE_TURNS` は「deg=0 の基準点」として**そのまま残す** (意味を変えない)
 
 **フラグの共通処理:**
 
 | 受信 | 動作 |
 |---|---|
 | bit0 = 0 | 目標を**更新しない** (直前の目標のまま = ホールド)。CAN へは既存の再送だけが流れる |
-| bit0 = 1 | 担当フィールドを角度に変換して目標にする |
-| bit2 = 1 | **来ない** (2026-09-11〜 ROS2 は常に 0 を送る)。旧実装 (`*_INIT_DEG` へ移動 → bit5) を残していても発動しない |
+| bit0 = 1, bit2 = 0 | 担当フィールドを角度に変換して目標にする |
+| bit2 = 1 | `r/θ/z` を無視し、各軸の目標を `*_INIT_DEG` にする。全軸が許容差内に入ったら bit5 |
 | seq 逆転・length 不一致・可動域外・IK 不能 | 破棄して bit4 を 200ms 立てる。目標は変えない |
 
 ### 10.2 r/z 基板 (192.168.1.100、`ip_100_section` ブランチ)
@@ -766,12 +739,12 @@ ROS2 が動いている間にベンチ GUI から送ると競合するが、運�
 | `ARM_SHOULDER_PAIR` | — | — (どちらの対が肩か) | 要確認 |
 | `GIM6010_DEG_PER_RAD_SIGN` / `GIM8018_DEG_PER_RAD_SIGN` | ±1 | — (IK の φ の正方向と 5003 deg の正方向が一致するか) | 要確認 |
 | `GIM6010_DEG_OFFSET` / `GIM8018_DEG_OFFSET` | deg | — (φ = 0 のときの 5003 deg) | 要実測 |
-| `GIM6010_INIT_DEG` / `GIM8018_INIT_DEG` | deg | — (電源投入時の到達先) | **任意** (2026-09-11〜。下の `ARM_INIT_AT_POWER_ON_POSE = 1` なら不要) |
-| `ARM_INIT_AT_POWER_ON_POSE` | 0/1 | — (1 なら電源投入時の現在位置を初期位置にし、起動時に動かさない) | **1 (推奨既定。競技開始姿勢へは ROS2 が動かす。§4.6)** |
+| `GIM6010_INIT_DEG` / `GIM8018_INIT_DEG` | deg | — (電源投入時・bit2 の到達先) | 要決定 |
+| `ARM_INIT_AT_POWER_ON_POSE` | 0/1 | — (1 なら電源投入時の現在位置を初期位置にし、起動時に動かさない) | 1 |
 | `GIM6010_MIN_DEG` / `MAX_DEG`、`GIM8018_MIN_DEG` / `MAX_DEG` | deg | — (bit4 の可動域。GIM6010 は既存クランプ 0〜60 の内側) | 要決定 |
 | `GIM6010_LEFT_NODE` / `GIM8018_LEFT_NODE` | node id | — (`joint_positions` の `*_left` にどちらを載せるか) | 要確認 |
 | `ARM_TRACKING_ERROR_DEG` | deg | — (bit0 の閾値) | 5 |
-| `ARM_INIT_TOLERANCE_DEG` | deg | — (電源投入時の到達判定。bit3 を落とす条件) | 1 |
+| `ARM_INIT_TOLERANCE_DEG` | deg | — (bit5 の許容差) | 1 |
 | `ROS2_PC_IP` | — | — | 192,168,1,2 |
 
 測り方は `sharmech/docs/measurement_checklist.md`。ROS2 側の `robot_geometry.yaml` にも同じ値を
@@ -803,9 +776,8 @@ uint8_t HLControlUDP_FlushOneAxis(void);
 **これは現状 (起動後は現在位置をホールドするだけ) からの挙動変更**なので、
 `ARM_INIT_AT_POWER_ON_POSE = 1` のときは電源投入時に捕捉した現在位置 (既存の
 `CaptureHold` が記憶する `pos_estimate`) をそのまま初期位置として扱い、起動時に動かさない。
-**2026-09-11 以降はこの 1 (現状維持) を推奨既定とする** —— 競技開始姿勢へは ROS2 が
-同期後に動かすので (§4.6)、電源投入時にどこに居ても構わない。
-`*_INIT_DEG` へ自力で行かせたい場合だけ人間が 0 に切り替える。
+その場合 bit2 (競技中の初期位置要求) もその位置へ戻る。既定は 1 (現状維持) とし、
+`*_INIT_DEG` を決めた時点で人間が 0 に切り替える。
 
 **0x81 の中身:**
 
@@ -817,9 +789,9 @@ uint8_t HLControlUDP_FlushOneAxis(void);
 | bit0 | いずれかの軸で `|pos_estimate − 目標| > ARM_TRACKING_ERROR_DEG` |
 | bit1 | いずれかの軸で `axis_error != 0`、または heartbeat が 1 秒以上来ていない |
 | bit2 | 最終受信から 500ms 超 |
-| bit3 | 上記の起動シーケンス完了前 (`GIM6010_IsClosedLoop` × 2 と `GIM8018_IsStartupNormalized` × 2、`ARM_INIT_AT_POWER_ON_POSE = 0` なら初期位置到達も) |
+| bit3 | 上記の起動シーケンス完了前 (`GIM6010_IsClosedLoop` × 2 と `GIM8018_IsStartupNormalized` × 2 と初期位置到達) |
 | bit4 | 直近 200ms 以内に破棄あり (seq 逆転・可動域外・IK 不能・寸法が `NAN`) |
-| bit5 | **常に 0 でよい** (2026-09-11〜 予約。旧: bit2 受信中かつ全軸が `*_INIT_DEG` の `ARM_INIT_TOLERANCE_DEG` 内) |
+| bit5 | bit2 受信中かつ全軸が `*_INIT_DEG` の `ARM_INIT_TOLERANCE_DEG` 内 |
 
 `pos_estimate` は ODrive の周期送信 (`encoder_rate_ms`。GIM6010 は 10〜50ms、GIM8018 は 97ms に
 設定されている) で更新されるので、0x81 の値は最大 100ms 古い。初版では許容する
@@ -840,7 +812,7 @@ uint8_t HLControlUDP_FlushOneAxis(void);
 | 0x11 / 0x12 | wave motor ×2 (受信専用基板、差動機構) | 5003 番 0x01/0x08/0x09: ピッチ = 2 台逆回転、ヨー = 同回転。`HLControlUDP_WaveTick()` が起動時に 0 を送って整定を待ち、以後は目標変更時にバースト再送 | **bit1 (縦にする)** |
 | 0x21 | TTL サーボ (受信専用) | 5003 番 0x02/0x03: open = −25°、close = +50°。ヨー軸に機械連動しているため `TtlYawFollowTick()` がヨー角へ追従 | **`gripper`** |
 
-**担当:** `theta`・`gripper`・bit1、それに bit0 (bit2 は予約)。`r`・`z`・`pitch`/`yaw` の連続値は無視する。
+**担当:** `theta`・`gripper`・bit1、それに bit0/bit2。`r`・`z`・`pitch`/`yaw` の連続値は無視する。
 
 **θ → ターンテーブル:** 受信 `theta` [rad] は ±π を超えた連続値で届く (§3.2)。
 **正方向は上から見て時計回り (+X → −Y)** (2026-09-11〜。ROS2 側で反転済みなので、
@@ -878,13 +850,13 @@ float HLControlUDP_GetC610MeasDeg(void);                      /* AS5600 由来�
 uint8_t HLControlUDP_IsC610FeedbackAlive(void);               /* AS5600 サンプルが途絶していないか */
 ```
 
-**起動シーケンス (§4.6):** 現状は最初の 0x07 が来るまでターンテーブルはフリー。
-2026-09-11 の改訂で**電源投入時に指定角へ自力で行く必要は無くなった** (競技開始姿勢へは
-ROS2 が同期後に動かす) ので、**`TURNTABLE_INIT_AT_POWER_ON_POSE = 1` を推奨既定とする** ——
-起動から 2 秒 (`C610_CURRENT_STARTUP_DELAY_MS`) 経過かつ AS5600 が有効 (`ok=1`, `mag=1`) に
-なった時点の `meas_deg` をそのまま目標にして制御を始める (**その場で保持するだけで動かない**)。
-0 に切り替えると `TURNTABLE_INIT_DEG` を setter で書いて**電源投入でターンテーブルが動く**ので、
-人間はそれを承知の上で値を決めること。いずれの場合も、制御を始めるまでは bit3 を立てておく。
+**起動シーケンス (§4.6) —— 既存挙動への追加が 1 点ある:** 現状は最初の 0x07 が来るまで
+ターンテーブルはフリーだが、ROS2 の契約では**電源投入時に自力で初期位置へ行く**。
+新モジュールは、起動から 2 秒 (`C610_CURRENT_STARTUP_DELAY_MS`) 経過かつ AS5600 が有効
+(`ok=1`, `mag=1`) になったら `TURNTABLE_INIT_DEG` を setter で書いて制御を始める。
+**電源投入でターンテーブルが動く**ことになるので、人間はこれを承知の上で
+`TURNTABLE_INIT_DEG` を決めること (現在位置のまま動かさない運用にしたければ、起動時に
+`meas_deg` を読んでそれを INIT にする実装に切り替える定数 `TURNTABLE_INIT_AT_POWER_ON_POSE` を用意する)。
 wave motor は既存の `WaveTick()` が起動時にオフセット 0 を送る (= `WRIST_PITCH_HORIZONTAL_DEG` を 0 に
 しておけば「横倒し」が初期姿勢)。到達を確認する手段が無いので、`WRIST_INIT_SETTLE_MS` 経過で到達扱い。
 
@@ -895,11 +867,11 @@ wave motor は既存の `WaveTick()` が起動時にオフセット 0 を送る 
 | `THETA_DEG_PER_RAD_SIGN` | ±1 | θ の正方向 (**+X → −Y、時計回り**。2026-09-11 に反時計回りから変更) と AS5600 の増加方向が一致するか | 要確認 |
 | `TURNTABLE_ENC_DEG_PER_TABLE_DEG` | — | AS5600 が測っている軸 1° あたりのターンテーブル角。出力軸直付なら 1.0 | 要確認 |
 | `C610_POS_ORIGIN_DEG` (既存、`main.c`) | deg | θ = 0 (+X) のときの `meas_deg`。既存の意味のまま | 要実測 |
-| `TURNTABLE_INIT_DEG` | deg | 電源投入時の到達先 (ターンテーブル角) | **任意** (2026-09-11〜。下が 1 なら不要) |
-| `TURNTABLE_INIT_AT_POWER_ON_POSE` | 0/1 | 1 なら電源投入時の現在角を INIT にする (起動時に動かさない。現状維持) | **1 (推奨既定。§4.6)** |
+| `TURNTABLE_INIT_DEG` | deg | 電源投入時・bit2 の到達先 (ターンテーブル角) | 要決定 |
+| `TURNTABLE_INIT_AT_POWER_ON_POSE` | 0/1 | 1 なら電源投入時の現在角を INIT にする (起動時に動かさない。現状維持) | 1 |
 | `TURNTABLE_MIN_DEG` / `MAX_DEG` | deg | bit4 の可動域 (1 回転未満) | 要決定 |
 | `TURNTABLE_TRACKING_ERROR_DEG` | deg | bit0 の閾値 | 5 |
-| `TURNTABLE_INIT_TOLERANCE_DEG` | deg | 電源投入時の到達判定 (bit3 を落とす条件) | 1 |
+| `TURNTABLE_INIT_TOLERANCE_DEG` | deg | bit5 の許容差 | 1 |
 | `WRIST_PITCH_VERTICAL_DEG` / `WRIST_PITCH_HORIZONTAL_DEG` | deg | bit1 = 1 / 0 のピッチ (5003 番 0x01 と同じ定義) | 要実測 / 0 |
 | `WRIST_YAW_HOLD_DEG` | deg | ヨーの固定値 | 0 |
 | `WRIST_INIT_SETTLE_MS` | ms | wave/TTL の「到達」とみなす待ち時間 | 1500 |
@@ -918,9 +890,9 @@ wave motor は既存の `WaveTick()` が起動時にオフセット 0 を送る 
 | bit0 | `|meas_deg − target| > TURNTABLE_TRACKING_ERROR_DEG` |
 | bit1 | AS5600 の磁石未検出 (`mag=0`) または AS5600 サンプル途絶 (`C610Position_Failsafe` が電流を 0 にした状態) |
 | bit2 | 最終受信から 500ms 超 |
-| bit3 | 起動 2 秒前、AS5600 無効、または (`TURNTABLE_INIT_AT_POWER_ON_POSE = 0` のとき) 初期位置未到達 |
+| bit3 | 起動 2 秒前、AS5600 無効、または初期位置未到達 |
 | bit4 | 直近 200ms 以内に破棄あり (seq 逆転・可動域外) |
-| bit5 | **常に 0 でよい** (2026-09-11〜 予約。旧: bit2 受信中かつ `|meas_deg − INIT| < TURNTABLE_INIT_TOLERANCE_DEG` かつ `WRIST_INIT_SETTLE_MS` 経過) |
+| bit5 | bit2 受信中かつ `|meas_deg − INIT| < TURNTABLE_INIT_TOLERANCE_DEG` かつ `WRIST_INIT_SETTLE_MS` 経過 |
 
 **CAN バスの注意:** C610 の 1kHz フィードバックで wave motor 基板の受信が飽和する問題は
 既存のバースト再送で対処済み。新モジュールは wave/TTL への送信を「変化時のみ」にして
@@ -936,15 +908,8 @@ wave motor は既存の `WaveTick()` が起動時にオフセット 0 を送る 
    (config.yaml の `mcu_ip` / `mcu_theta_ip` が両基板)。`ros2 topic echo /catchrobo/arm/mcu_status` で
    `connected: true`、`status_flags: 0` になること。**片方の基板だけでも `mcu_status` は出るが
    `/catchrobo/arm/current_pose` は両方揃うまで出ない** (ROS2 側の仕様。§2.2)
-4. **初期位置 (2026-09-11 改訂。マイコン側に特別な実装は不要):** 手順 3 で ROS2 を上げると、
-   同期が済んだ瞬間に **ROS2 が初期位置まで動かす** (`/catchrobo/game/state` が `INIT` の間に
-   「上げる → 水平 → 下ろす」の L 字で動き、着いたら `WAITING_FOR_PICK` になる)。
-   マイコンから見ると bit0=1 の通常の 0x01 追従でしかない。**bit2 は来ないので、
-   実装していてもしていなくても結果は同じ。** 途中でやり直すには
-   `ros2 topic pub --once /catchrobo/game/reset std_msgs/msg/Empty '{}'` (どの状態からでも `INIT` へ戻る)。
-   **アームが動く**ので周囲を空けてから ROS2 を起動すること。
-   動かしたくない場合は ROS2 側の `config.yaml` で
-   `game_state_manager_node.init_on_startup: false` にしてもらう
+4. **初期位置:** `ros2 topic pub --once /catchrobo/game/reset std_msgs/msg/Empty '{}'` で bit2 が届き、
+   両基板が `*_INIT_DEG` へ行って bit5 を返し、`/catchrobo/game/state` が `WAITING_FOR_PICK` に戻ること
 5. **追従:** `ros2 topic pub --once /catchrobo/arm/target_pose geometry_msgs/msg/PoseStamped ...` で
    初期位置から数 cm 離れた目標を与え、r/z 基板 (r, z) と θ 基板 (θ) がそれぞれ動くこと
 6. **途絶:** ROS2 を止めて 500ms 後に bit2 (ウォッチドッグ) が立ち、位置を保持すること。再開で bit2 が落ちること

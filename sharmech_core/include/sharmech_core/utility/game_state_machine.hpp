@@ -2,7 +2,6 @@
 #define SHARMECH_CORE__UTILITY__GAME_STATE_MACHINE_HPP_
 
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -19,15 +18,11 @@ namespace sharmech_core
 // /catchrobo/game/state (std_msgs/String) としてそのまま配信する。
 //
 // 各状態での動作:
-//   kInit           初期位置へ動かしている最中。**起動時 (Config::init_on_startup) と
-//                   /catchrobo/game/reset のとき**に、どの状態からでもここへ入る
+//   kInit           初期位置へ戻している最中。/catchrobo/game/reset を受けると
+//                   **どの状態からでも**ここへ入り、motion_generator_node へ初期位置要求を
+//                   出す (座標はこちらでは持たない。MCU が自前の初期関節角へ動く)
 //                   (グリッパは開・縦は解除・作業領域クランプはデフォルトへ)。
-//                   行き先は Config::init_pose (2026-09-11〜 ROS2 側が正本。
-//                   robot_geometry.yaml の init_pose をノードが直交座標へ直したもの)。
-//                   motion_generator_node が MCU の実姿勢へ同期して動作許可 (enable) を
-//                   出すまでは**動かずに待ち**、出た瞬間に「上げる → 水平 → 下ろす」の
-//                   L 字プランを組んでゴールを1本ずつ出す。全部到達したら
-//                   kWaitingForPick へ戻る (requestInit() / beginInitMotion() 参照)
+//                   到達したら kWaitingForPick へ戻る (requestInit() のコメント参照)
 //   kWaitingForPick 次に運ぶワークの選択待ち。VR からの pick_request を受理する
 //   kApproaching    ワークの真上まで approach_clearance_z のまま**水平移動**する
 //                   (グリッパは開)。斜めに降りながら近づくと、200mmピッチで並んだ
@@ -161,39 +156,14 @@ public:
     // false なら止まらずそのまま掴む/離す (完全自動)。
     // 実機で位置合わせの精度が出るまでは true を推奨
     bool require_manual_confirm{true};
-    // 初期位置 (kInit の行き先)。**ベース座標系の直交座標** で入れる ——
-    // 正本は robot_geometry.yaml の init_pose (極座標 r/θ/z) で、
-    // game_state_manager_node が PolarUtils で直交座標へ直してここへ渡す。
-    // pitch/yaw は 0 (この機構の姿勢は初期位置では指定しない)。
-    // 2026-09-11 に MCU 側 (UDP control_flags bit2) から ROS2 側へ移した
-    CartesianState init_pose{};
-    // true なら起動直後に kInit から始まり、動作許可が出た時点で初期位置へ動く。
-    // false なら従来どおり kWaitingForPick から始まる (reset での INIT は使える)。
-    // **起動時にだけ効く** (実行中に変えても今の状態は変わらない)
-    bool init_on_startup{true};
-  };
-
-  // kInit の中での進み具合。
-  //   kIdle             kInit ではない (または初期位置への移動を持っていない)
-  //   kWaitingForMotion 動作許可 (enable) の立ち上がり待ち。**まだ動かない**
-  //   kMoving           L 字プランのゴールを1本ずつ出している最中
-  enum class InitPhase : uint8_t
-  {
-    kIdle,
-    kWaitingForMotion,
-    kMoving,
+    // 初期位置 (kInit の行き先) は **持たない**。/catchrobo/game/reset の実体は
+    // motion_generator_node への初期位置要求で、座標は MCU 側が定義する
+    // (control_flags bit2。docs/game_state_manager_node.md「状態のリセット」)
   };
 
   explicit GameStateMachine(Config config)
   : config_(std::move(config))
   {
-    if (config_.init_on_startup) {
-      // 起動直後は初期位置へ動く。ただし実際に動き出すのは motion_generator_node が
-      // MCU の実姿勢へ同期し終えてから (onMotionEnabled の立ち上がり)。
-      // 同期前の目標姿勢は仮値なので、軌道の始点に使えない
-      state_ = GameState::kInit;
-      init_phase_ = InitPhase::kWaitingForMotion;
-    }
   }
 
   GameState state() const {return state_;}
@@ -230,12 +200,10 @@ public:
   // (kManualControl・kComplete を含む)。試合中に手順が崩れたときの立て直しや、
   // 練習のやり直しのために、VR / PS4 のどちらからでも押せる1つの出口として置く。
   //
-  // 「リセット」は**アームを初期位置 (Config::init_pose) へ戻すところまで**を指す。
-  // 2026-09-11 に MCU 側 (control_flags bit2) から ROS2 側へ移したので、行き先の
-  // 座標はこのクラスが持ち、普通のゴールとして1本ずつ出す (L 字 = beginInitMotion)。
-  // 動作許可がまだ出ていなければプランを組まずに待ち、onMotionEnabled の
-  // 立ち上がりで動き出す。全区間の到達 (last_result = SUCCEEDED) で
-  // kWaitingForPick へ戻る (onGoalReached)。
+  // 「リセット」は**アームを初期位置へ戻すところまで**を指す。ただし初期位置の
+  // 座標はこのクラスも ROS2 側も持たず、motion_generator_node への「初期位置要求」
+  // (→ UDP control_flags bit2) を1回出すだけ。MCU が自前の初期関節角へ動き、
+  // 到達 (last_result = SUCCEEDED) で kWaitingForPick へ戻る (onGoalReached)。
   // 却下・中断されたときは他の自動シーケンスと同じ扱いで kWaitingForPick へ落ちる
   // (onGoalRejectedOrAborted。理由はノード側が警告ログに出す)。
   //
@@ -247,10 +215,8 @@ public:
   void requestInit()
   {
     state_ = GameState::kInit;
-    init_phase_ = InitPhase::kWaitingForMotion;
-    init_plan_.clear();
-    init_plan_index_ = 0;
-    pending_goal_.reset();             // 組み直すので古いゴールは捨てる
+    pending_goal_.reset();             // ゴールは出さない (座標を持たない)
+    pending_init_request_ = true;
     pending_gripper_ = false;          // 掴んだままにしない
     pending_orient_vertical_ = false;  // 縦にしていたら横へ戻す
     WorkspaceClampCommand reset_clamp;
@@ -261,34 +227,7 @@ public:
     // (kManualControl は「VRが使えないときの脱出ハッチ」)。
     // 退避先 (pre_manual_state_) はここでは触らない —— 次に自由操作へ
     // 入るときに、そのときの状態で上書きされるため
-
-    // 動作許可が既に出ていれば即プランを組む。まだなら onMotionEnabled 待ち
-    // (起動直後に reset が来た場合など)
-    if (motionEnabled()) {beginInitMotion();}
   }
-
-  // motion_generator_node が出している動作許可 (/catchrobo/command/cartesian の
-  // enable)。MCU の実姿勢へ目標を同期し終えると false → true になる。
-  //
-  // **立ち上がりで動き出すのは「kInit で同期待ちのとき」だけ。** 通常運転中
-  // (WAITING_FOR_PICK で次のワークを待っている間など) に MCU が再起動して同期し直しても、
-  // 勝手に初期位置へ動いてはいけない (試合中の予期しない移動を作らない)。
-  // 再ホーミングは操縦者の /catchrobo/game/reset で行う
-  void onMotionEnabled(bool enabled)
-  {
-    const bool rising = enabled && !motion_enabled_.value_or(false);
-    motion_enabled_ = enabled;
-    if (!rising) {return;}
-    if (state_ == GameState::kInit && init_phase_ == InitPhase::kWaitingForMotion) {
-      beginInitMotion();
-    }
-  }
-
-  // 直近の動作許可 (未受信なら false)
-  bool motionEnabled() const {return motion_enabled_.value_or(false);}
-
-  // 初期位置移動の進み具合 (ログとテスト用)
-  InitPhase initPhase() const {return init_phase_;}
 
   // ワークへは「水平移動 → 垂直降下」の2段で近づく (斜めに降りない)。
   // ここで出すのは1段目、ワークの**真上**までのゴール
@@ -401,15 +340,8 @@ public:
         advanceSlot();
         break;
       case GameState::kInit:
-        // L 字プランの1区間に到達した。残りがあれば次の区間を出し、
-        // 無ければ初期位置へ着いたので普通に pick_request を受けられる状態へ戻る
-        if (init_phase_ != InitPhase::kMoving) {break;}
-        ++init_plan_index_;
-        if (init_plan_index_ < init_plan_.size()) {
-          pending_goal_ = init_plan_[init_plan_index_];
-        } else {
-          finishInit();
-        }
+        // 初期位置へ戻り切った。ここから普通に pick_request を受けられる
+        state_ = GameState::kWaitingForPick;
         break;
       default:
         break;
@@ -427,11 +359,6 @@ public:
     {
       state_ = GameState::kWaitingForPick;
     }
-    // 初期位置への移動も同じ扱いで捨てる。途中のプランを残すと、次に何かが
-    // 到達したときに L 字の残り区間が出てしまう
-    init_phase_ = InitPhase::kIdle;
-    init_plan_.clear();
-    init_plan_index_ = 0;
   }
 
   // 経過時間 (grasp dwell / orient dwell) と box_count キューによる遷移を進める。
@@ -464,16 +391,12 @@ public:
   // 通常の遷移と違い、その状態の目標姿勢・グリッパ・作業領域クランプは
   // 一切セットしない。状態だけを見たいのに実機/シムが勝手に動き出すのを
   // 避けるため (保留中の指令が残っていれば破棄する)。
-  // 動かしたい場合は遷移後に通常のイベント (pick_request 等) を送ること。
-  // **forceState(kInit) でも初期位置へは動かない** (init_phase_ は kIdle のまま。
-  // 実際に動かすのは /catchrobo/game/reset = requestInit)
+  // 動かしたい場合は遷移後に通常のイベント (pick_request 等) を送ること
   void forceState(GameState state, double now_sec)
   {
     state_ = state;
     pending_goal_.reset();
-    init_phase_ = InitPhase::kIdle;
-    init_plan_.clear();
-    init_plan_index_ = 0;
+    pending_init_request_ = false;
     pending_gripper_.reset();
     pending_orient_vertical_.reset();
     pending_clamp_.reset();
@@ -507,9 +430,7 @@ public:
       state_ = GameState::kManualControl;
     }
     pending_goal_.reset();
-    init_phase_ = InitPhase::kIdle;
-    init_plan_.clear();
-    init_plan_index_ = 0;
+    pending_init_request_ = false;
     pending_gripper_.reset();
     pending_orient_vertical_.reset();
     WorkspaceClampCommand reset_clamp;
@@ -518,17 +439,18 @@ public:
     // GRASPING / ORIENTING に戻った場合、経過時間で次へ進むので基準時刻を入れ直す
     if (state_ == GameState::kGrasping) {grasp_start_sec_ = now_sec;}
     if (state_ == GameState::kOrienting) {orient_start_sec_ = now_sec;}
-    // **kInit へ戻る場合だけは例外的にゴールを出す。** 初期位置への移動が
-    // 途中だったので、そのまま止まるのではなく続きをやる。ただし古いプランは
-    // 捨てて**現在位置から組み直す** —— 自由操作中にジョグで動かした後に
-    // 古い区間の続きを出すと、L 字のはずが斜め移動になるため
-    if (state_ == GameState::kInit) {
-      init_phase_ = InitPhase::kWaitingForMotion;
-      if (motionEnabled()) {beginInitMotion();}
-    }
   }
 
   // --- 保留中の指令。状態遷移直後にのみセットされる (edge-triggered) ---
+
+  // 初期位置要求 (kInit 進入時に1回だけ真)。消費すると偽に戻る
+  bool hasPendingInitRequest() const {return pending_init_request_;}
+  bool consumePendingInitRequest()
+  {
+    const bool v = pending_init_request_;
+    pending_init_request_ = false;
+    return v;
+  }
 
   bool hasPendingGoal() const {return pending_goal_.has_value();}
   CartesianState consumePendingGoal()
@@ -563,72 +485,6 @@ public:
   }
 
 private:
-  // 初期位置までの L 字プランを組み、最初の区間のゴールを出す。
-  //   ① 現在の xy のまま retract_clearance_z (= 退避高さ) へ上げる
-  //   ② その高さで初期位置の xy へ水平移動する
-  //   ③ 初期位置の z へ降ろす
-  // 長さがほぼ 0 (kEps 以下) の区間は省略する。xy が既に一致していれば
-  // 垂直1本だけ (上げてから下ろす、という無駄をしない)。
-  //
-  // 箱の中 (PLACING の途中) やワークを保持したままリセットされても、箱の壁や
-  // 隣のワークに当たらないよう斜めには動かない (「すべての移動を垂直→水平→垂直に
-  // 分解する」既存方針と同じ)。pitch/yaw は 0 にそろえる
-  void beginInitMotion()
-  {
-    constexpr double kEps = 1e-4;
-    const double traverse_z = config_.retract_clearance_z;
-    CartesianState init = config_.init_pose;
-    init.pitch = 0.0;
-    init.yaw = 0.0;
-
-    init_plan_.clear();
-    init_plan_index_ = 0;
-    if (current_pose_) {
-      const double dx = init.x - current_pose_->x;
-      const double dy = init.y - current_pose_->y;
-      if (std::hypot(dx, dy) <= kEps) {
-        // 既に初期位置の真上か真下。垂直1本で済む
-        if (std::abs(current_pose_->z - init.z) > kEps) {init_plan_.push_back(init);}
-      } else {
-        if (std::abs(current_pose_->z - traverse_z) > kEps) {
-          CartesianState lift = init;
-          lift.x = current_pose_->x;
-          lift.y = current_pose_->y;
-          lift.z = traverse_z;
-          init_plan_.push_back(lift);
-        }
-        CartesianState traverse = init;
-        traverse.z = traverse_z;
-        init_plan_.push_back(traverse);
-        if (std::abs(init.z - traverse_z) > kEps) {init_plan_.push_back(init);}
-      }
-    } else {
-      // 現在位置が未受信 (/catchrobo/command/cartesian を1度も受けていない)。
-      // 動作許可より先に届くのが普通なので通常は起きないが、起きた場合も
-      // いきなり初期位置の z へ向かわず退避高さを経由する
-      CartesianState traverse = init;
-      traverse.z = traverse_z;
-      init_plan_.push_back(traverse);
-      if (std::abs(init.z - traverse_z) > kEps) {init_plan_.push_back(init);}
-    }
-
-    if (init_plan_.empty()) {
-      finishInit();   // 既に初期位置に居る。1本も動かさない
-      return;
-    }
-    init_phase_ = InitPhase::kMoving;
-    pending_goal_ = init_plan_.front();
-  }
-
-  // 初期位置へ着いた (または最初から居た)。ここから普通に pick_request を受けられる
-  void finishInit()
-  {
-    state_ = GameState::kWaitingForPick;
-    init_phase_ = InitPhase::kIdle;
-    init_plan_.clear();
-    init_plan_index_ = 0;
-  }
-
   void enterGrasping(double now_sec)
   {
     state_ = GameState::kGrasping;
@@ -736,15 +592,8 @@ private:
   // motion_generator の現在の目標姿勢 (微調整のジョグを含む)。未受信なら nullopt
   std::optional<CartesianState> current_pose_;
 
-  // 初期位置への移動 (kInit) の進み具合とプラン。kInit 以外では空
-  InitPhase init_phase_{InitPhase::kIdle};
-  std::vector<CartesianState> init_plan_;   // L 字の各区間のゴール (先頭から順に出す)
-  std::size_t init_plan_index_{0};
-  // motion_generator_node の動作許可 (/catchrobo/command/cartesian の enable)。
-  // 未受信なら nullopt。false → true の立ち上がりで INIT の移動を始める
-  std::optional<bool> motion_enabled_;
-
   std::optional<CartesianState> pending_goal_;
+  bool pending_init_request_{false};
   std::optional<bool> pending_gripper_;
   std::optional<bool> pending_orient_vertical_;
   std::optional<WorkspaceClampCommand> pending_clamp_;

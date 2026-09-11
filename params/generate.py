@@ -181,17 +181,6 @@ def ros_sections(p: Params):
              p.get("shooting_box.transport_clearance_above_top_m")),
             ("retract_clearance_above_box_top_m",
              p.get("shooting_box.retract_clearance_above_top_m")),
-            # 初期位置 (起動時と /catchrobo/game/reset の行き先)。**極座標のまま渡し**、
-            # ノード側が turntable_axis_* を原点として直交座標へ直す
-            ("init_pose_r_red", p.get("init_pose.r_red")),
-            ("init_pose_theta_red", p.get("init_pose.theta_red")),
-            ("init_pose_z_red", p.get("init_pose.z_red")),
-            ("init_pose_r_blue", p.get("init_pose.r_blue")),
-            ("init_pose_theta_blue", p.get("init_pose.theta_blue")),
-            ("init_pose_z_blue", p.get("init_pose.z_blue")),
-            # 上の極座標の原点。hardware_bridge_node へ渡すのと同じ値
-            ("turntable_axis_x_m", p.get("kinematics.turntable_axis_x_m")),
-            ("turntable_axis_y_m", p.get("kinematics.turntable_axis_y_m")),
         ] + origin),
         # UDP 極座標 (r, θ) の原点 = ターンテーブル軸。送受信の両方でこの値を使う
         ("hardware_bridge_node", [

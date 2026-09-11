@@ -59,7 +59,7 @@ TEST(UdpProtocol, EncodePolarOrientVerticalSetsBit1)
 {
   const auto buffer = UdpProtocol::encodePolar(
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    /*gripper_closed=*/ false, ControlFlags{true, true}, 0, 0);
+    /*gripper_closed=*/ false, ControlFlags{true, true, false}, 0, 0);
   PolarPacket packet;
   std::memcpy(&packet, buffer.data(), sizeof(packet));
   EXPECT_EQ(packet.payload.control_flags, kControlFlagEnable | kControlFlagOrientVertical);
@@ -75,21 +75,16 @@ TEST(UdpProtocol, EncodePolarOrientVerticalFalseLeavesBit1Clear)
   EXPECT_EQ(packet.payload.control_flags, kControlFlagEnable);
 }
 
-TEST(UdpProtocol, EncodePolarNeverSetsReservedBit2)
+TEST(UdpProtocol, EncodePolarInitRequestSetsBit2)
 {
-  // bit2 (旧・初期位置要求) は 2026-09-11 に予約になった。初期位置は ROS2 側
-  // (game_state_manager_node) が普通のゴールで動かすので、ワイヤ上は常に 0
+  // 初期位置要求 (bit2)。MCU はこれが立っている間 r/θ/z を無視して自前の初期角へ行く
+  const auto buffer = UdpProtocol::encodePolar(
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /*gripper_closed=*/ false, ControlFlags{true, false, true}, 0, 0);
+  PolarPacket packet;
+  std::memcpy(&packet, buffer.data(), sizeof(packet));
+  EXPECT_EQ(packet.payload.control_flags, kControlFlagEnable | kControlFlagInitRequest);
   EXPECT_EQ(kControlFlagInitRequest, 0x04);
-  for (const auto flags : {ControlFlags{}, ControlFlags{true, true},
-      ControlFlags{false, false}, ControlFlags{false, true}})
-  {
-    const auto buffer = UdpProtocol::encodePolar(
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-      /*gripper_closed=*/ false, flags, 0, 0);
-    PolarPacket packet;
-    std::memcpy(&packet, buffer.data(), sizeof(packet));
-    EXPECT_EQ(packet.payload.control_flags & kControlFlagInitRequest, 0);
-  }
 }
 
 TEST(UdpProtocol, EncodePolarEnableFalseClearsBit0)
@@ -97,17 +92,18 @@ TEST(UdpProtocol, EncodePolarEnableFalseClearsBit0)
   // 動作許可 0 (起動直後・同期前)。他のビットはそのまま載る
   const auto buffer = UdpProtocol::encodePolar(
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    /*gripper_closed=*/ false, ControlFlags{false, false}, 0, 0);
+    /*gripper_closed=*/ false, ControlFlags{false, false, false}, 0, 0);
   PolarPacket packet;
   std::memcpy(&packet, buffer.data(), sizeof(packet));
   EXPECT_EQ(packet.payload.control_flags, 0);
-  EXPECT_EQ((ControlFlags{false, true}).pack(), kControlFlagOrientVertical);
+  EXPECT_EQ(
+    (ControlFlags{false, true, true}).pack(),
+    kControlFlagOrientVertical | kControlFlagInitRequest);
 }
 
 TEST(UdpProtocol, StatusAtInitPoseIsBit5)
 {
-  // フィードバック側の「初期位置到達」ビット (2026-09-11〜 予約。ROS2 は使わないが
-  // ビット割当は互換のため残す)。既存ビットと重ならない
+  // フィードバック側の「初期位置到達」ビット。既存ビットと重ならない
   EXPECT_EQ(kStatusAtInitPose, 1 << 5);
   EXPECT_EQ(
     kStatusAtInitPose & (kStatusTrackingError | kStatusDriverFault |
@@ -148,10 +144,10 @@ TEST(UdpProtocol, EncodeJointHasSameSizeAndFlagSemanticsAsPolar)
   // であることをバイト列レベルで確認する (MCU側が共通処理にできる根拠)
   const std::array<float, kJointCount> zeros{};
   const auto joint_buf = UdpProtocol::encodeJoint(
-    zeros, zeros, /*gripper_closed=*/ true, ControlFlags{true, true}, 0, 0);
+    zeros, zeros, /*gripper_closed=*/ true, ControlFlags{true, true, false}, 0, 0);
   const auto polar_buf = UdpProtocol::encodePolar(
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    /*gripper_closed=*/ true, ControlFlags{true, true}, 0, 0);
+    /*gripper_closed=*/ true, ControlFlags{true, true, false}, 0, 0);
 
   ASSERT_EQ(joint_buf.size(), polar_buf.size());
   EXPECT_EQ(joint_buf[56], polar_buf[56]);  // gripper

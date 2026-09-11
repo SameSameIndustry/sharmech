@@ -16,7 +16,6 @@
 #include <mutex>
 #include <optional>
 #include <string>
-#include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -72,6 +71,8 @@ public:
       "/catchrobo/arm/current_pose", 10);
     mcu_status_pub_ = node_->create_publisher<sharmech_msgs::msg::McuStatus>(
       "/catchrobo/arm/mcu_status", rclcpp::QoS(1).transient_local());
+    init_request_pub_ = node_->create_publisher<std_msgs::msg::Empty>(
+      "/catchrobo/arm/init_request", 10);
     cancel_pub_ = node_->create_publisher<std_msgs::msg::Empty>(
       "/catchrobo/arm/cancel", 10);
 
@@ -87,11 +88,6 @@ public:
       [this](sharmech_msgs::msg::MotionStatus::SharedPtr msg) {
         std::lock_guard<std::mutex> lock(mutex_);
         latest_status_ = *msg;
-        // last_result の**変化の並び**を見たいテストがあるので履歴も残す
-        // (game_state_manager_node は last_result の変化でしか到達を知らない)
-        if (result_history_.empty() || result_history_.back() != msg->last_result) {
-          result_history_.push_back(msg->last_result);
-        }
       });
   }
 
@@ -174,9 +170,10 @@ public:
     mcu_status_pub_->publish(status);
   }
 
+  void publishInitRequest() {init_request_pub_->publish(std_msgs::msg::Empty{});}
   void publishCancel() {cancel_pub_->publish(std_msgs::msg::Empty{});}
 
-  // 動作許可は Cartesian ストリームに同乗する
+  // 動作許可 / 初期位置要求は Cartesian ストリームに同乗する
   std::optional<bool> latestEnable()
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -184,17 +181,11 @@ public:
     return latest_cartesian_->enable;
   }
 
-  // 観測できた last_result の遷移 (同じ値の連続は畳んである)
-  std::vector<uint8_t> resultHistory()
+  std::optional<bool> latestInitRequest()
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    return result_history_;
-  }
-
-  void clearResultHistory()
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    result_history_.clear();
+    if (!latest_cartesian_) {return std::nullopt;}
+    return latest_cartesian_->init_request;
   }
 
   std::optional<sharmech_msgs::msg::MotionStatus> latestStatus()
@@ -217,6 +208,7 @@ private:
   rclcpp::Publisher<sharmech_msgs::msg::JogLimit>::SharedPtr jog_limit_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr current_pose_pub_;
   rclcpp::Publisher<sharmech_msgs::msg::McuStatus>::SharedPtr mcu_status_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr init_request_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr cancel_pub_;
   rclcpp::Subscription<sharmech_msgs::msg::CartesianCommand>::SharedPtr cartesian_sub_;
   rclcpp::Subscription<sharmech_msgs::msg::MotionStatus>::SharedPtr status_sub_;
@@ -224,7 +216,6 @@ private:
   std::mutex mutex_;
   std::optional<sharmech_msgs::msg::CartesianCommand> latest_cartesian_;
   std::optional<sharmech_msgs::msg::MotionStatus> latest_status_;
-  std::vector<uint8_t> result_history_;
 };
 
 // predicate() が真になるまで、両ノードを spin しながら待つ
@@ -831,44 +822,105 @@ TEST(MotionGeneratorNode, DoesNotSyncWhileMcuReportsUninitialized)
   EXPECT_NEAR(harness.latestCartesian()->pose.position.x, 0.10, 1e-6);
 }
 
-// ---- status の即時 publish (2026-09-11) ----
-// 所要時間が status_rate の周期より短いゴール (INIT の L 字の短い区間など) では、
-// タイマーだけだと NONE → SUCCEEDED の変化がサンプルの間に埋もれて、
-// last_result の変化を見ている game_state_manager_node が到達を取りこぼす
+// ---- 初期位置要求 (control_flags bit2) ----
+// /catchrobo/game/reset の実体。座標は ROS2 側に無く、MCU が自前の初期角へ動く。
+// ROS2 は bit2 を立てて実姿勢を追いかけ、McuStatus FLAG_AT_INIT_POSE で完了とみなす
 
-TEST(MotionGeneratorNode, StatusIsPublishedImmediatelyOnResultChange)
+TEST(MotionGeneratorNode, InitRequestRaisesBit2UntilMcuReportsArrival)
 {
-  TestHarness harness("status_immediate");
-  // status タイマーを 2Hz (500ms) まで落とす。制御は 20Hz なので、ゴール受理から
-  // 到達までは 50ms しかなく、タイマー頼みでは NONE を観測できない
-  rclcpp::NodeOptions options;
-  options.parameter_overrides(
-  {
-    rclcpp::Parameter("control_rate", 20.0),
-    rclcpp::Parameter("status_rate", 2.0),
-    rclcpp::Parameter("twist_timeout", 0.1),
-  });
-  auto motion_node = std::make_shared<sharmech_core::MotionGeneratorNode>(options);
+  TestHarness harness("init");
+  auto motion_node = std::make_shared<sharmech_core::MotionGeneratorNode>(fastTestOptions());
 
   rclcpp::executors::SingleThreadedExecutor executor;
   executor.add_node(harness.node());
   executor.add_node(motion_node);
   ASSERT_TRUE(syncWithFeedback(harness, executor, 0.10, 0.05, 0.12));
 
-  // 現在の目標と同じ位置 = 長さ 0 のゴールを2回続けて出す。
-  // それぞれ NONE (受理) → SUCCEEDED (到達) が観測できること
-  for (int i = 0; i < 2; ++i) {
-    harness.clearResultHistory();
-    harness.publishTargetPose(0.10, 0.05, 0.12);
-    ASSERT_TRUE(
-      waitUntil(
-        executor, [&harness]() {
-          const auto history = harness.resultHistory();
-          return history.size() >= 2 &&
-          history[0] == sharmech_msgs::msg::MotionStatus::RESULT_NONE &&
-          history[1] == sharmech_msgs::msg::MotionStatus::RESULT_SUCCEEDED;
-        }, 2.0)) << "cycle " << i << " missed the NONE -> SUCCEEDED transition";
-  }
+  harness.publishInitRequest();
+  ASSERT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        auto st = harness.latestStatus();
+        auto ir = harness.latestInitRequest();
+        return st && st->mode == sharmech_msgs::msg::MotionStatus::MODE_INIT && ir && *ir;
+      }, 1.0));
+  EXPECT_TRUE(*harness.latestEnable());  // MCU が動く必要があるので動作許可は 1
+
+  // 要求中のゴールは却下される
+  harness.publishTargetPose(0.05, 0.05, 0.05);
+  ASSERT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        auto st = harness.latestStatus();
+        return st && st->last_result == sharmech_msgs::msg::MotionStatus::RESULT_REJECTED;
+      }, 1.0));
+  EXPECT_EQ(harness.latestStatus()->mode, sharmech_msgs::msg::MotionStatus::MODE_INIT);
+
+  // MCU が初期位置 (0.30, 0.00, 0.15) へ動いた: 目標は実姿勢を追いかける
+  ASSERT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        harness.publishFeedback(0.30, 0.00, 0.15);
+        auto c = harness.latestCartesian();
+        return c && std::abs(c->pose.position.x - 0.30) < 1e-6;
+      }, 1.0));
+  EXPECT_TRUE(*harness.latestInitRequest());  // 到達フラグが来るまで bit2 は立ったまま
+
+  // 到達 (bit5) → IDLE + SUCCEEDED、bit2 は落ちる、目標は初期位置のまま
+  ASSERT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        harness.publishFeedback(0.30, 0.00, 0.15, sharmech_msgs::msg::McuStatus::FLAG_AT_INIT_POSE);
+        auto st = harness.latestStatus();
+        auto ir = harness.latestInitRequest();
+        return st && st->mode == sharmech_msgs::msg::MotionStatus::MODE_IDLE &&
+        st->last_result == sharmech_msgs::msg::MotionStatus::RESULT_SUCCEEDED &&
+        ir && !*ir;
+      }, 1.0));
+  EXPECT_NE(harness.latestStatus()->message.find("init"), std::string::npos);
+  EXPECT_NEAR(harness.latestCartesian()->pose.position.x, 0.30, 1e-6);
+  EXPECT_NEAR(harness.latestCartesian()->pose.position.z, 0.15, 1e-6);
+  EXPECT_TRUE(*harness.latestEnable());
+}
+
+TEST(MotionGeneratorNode, InitRequestPreemptsGoalAndCancelAbortsInit)
+{
+  TestHarness harness("init_cancel");
+  auto motion_node = std::make_shared<sharmech_core::MotionGeneratorNode>(fastTestOptions());
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(harness.node());
+  executor.add_node(motion_node);
+  ASSERT_TRUE(syncWithFeedback(harness, executor));
+
+  harness.publishTargetPose(0.15, 0.15, 0.1);
+  ASSERT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        auto st = harness.latestStatus();
+        return st && st->mode == sharmech_msgs::msg::MotionStatus::MODE_GOAL;
+      }, 1.0));
+
+  // ゴール実行中でも初期位置要求が横取りする
+  harness.publishInitRequest();
+  ASSERT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        auto st = harness.latestStatus();
+        return st && st->mode == sharmech_msgs::msg::MotionStatus::MODE_INIT;
+      }, 1.0));
+
+  // 到達を返さない MCU (未対応ファーム等) からの出口は cancel
+  harness.publishCancel();
+  ASSERT_TRUE(
+    waitUntil(
+      executor, [&harness]() {
+        auto st = harness.latestStatus();
+        auto ir = harness.latestInitRequest();
+        return st && st->mode == sharmech_msgs::msg::MotionStatus::MODE_IDLE &&
+        st->last_result == sharmech_msgs::msg::MotionStatus::RESULT_ABORTED &&
+        ir && !*ir;
+      }, 1.0));
 }
 
 int main(int argc, char ** argv)

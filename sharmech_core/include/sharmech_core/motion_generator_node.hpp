@@ -33,21 +33,17 @@ namespace sharmech_core
 // Sub: /catchrobo/arm/cmd_twist     ジョグ入力 (ベース座標系)
 // Sub: /catchrobo/arm/gripper       グリッパ指令
 // Sub: /catchrobo/arm/orient_vertical  「縦にする」指令 (game_state_manager_node の PLACING 用)
-// Sub: /catchrobo/arm/cancel        ゴール中断
-// Sub: /catchrobo/arm/current_pose  実姿勢 (起動時の同期・残距離計算に使用)
-// Sub: /catchrobo/arm/mcu_status    MCU の status_flags (未初期化の間は同期しない)
+// Sub: /catchrobo/arm/cancel        ゴール中断 (初期位置要求の中断も兼ねる)
+// Sub: /catchrobo/arm/init_request  初期位置要求 (game_state_manager_node の INIT。MCU 側の初期角へ)
+// Sub: /catchrobo/arm/current_pose  実姿勢 (起動時の同期・残距離計算・INIT 中の追従に使用)
+// Sub: /catchrobo/arm/mcu_status    MCU の status_flags (未初期化の間は同期しない / INIT 到達の検出)
 // Sub: /catchrobo/game/workspace_clamp  作業領域クランプの動的上書き (game_state_manager_node)
 // Sub: /catchrobo/game/jog_limit    ジョグ速度上限の動的上書き (同上)
 // Pub: /catchrobo/command/cartesian 位置 + 速度ストリーム (control_rate)。
-//                                   動作許可 (enable) も同乗 (実姿勢に同期するまで false)
+//                                   動作許可 (enable) と初期位置要求 (init_request) も同乗
 // Pub: /catchrobo/command/gripper   調停後のグリッパ指令
 // Pub: /catchrobo/command/orient_vertical  調停後の「縦にする」指令
-// Pub: /catchrobo/arm/status        現在状態 (latched, status_rate。**mode /
-//                                   last_result が変わった瞬間にも即時 publish する**)
-//
-// **初期位置へ動かすのはこのノードの仕事ではない** (2026-09-11〜)。
-// game_state_manager_node が INIT で普通のゴール (target_pose) として出してくる。
-// このノードは「起動時に実姿勢へ同期するまで enable=false」だけを担当する
+// Pub: /catchrobo/arm/status        現在状態 (latched, status_rate)
 class MotionGeneratorNode : public rclcpp::Node
 {
 public:
@@ -59,6 +55,10 @@ private:
     kIdle = sharmech_msgs::msg::MotionStatus::MODE_IDLE,
     kGoal = sharmech_msgs::msg::MotionStatus::MODE_GOAL,
     kJog  = sharmech_msgs::msg::MotionStatus::MODE_JOG,
+    // 初期位置要求中。目標姿勢は MCU のフィードバックを追いかけるだけで、
+    // 実際に動かしているのは MCU (自前の初期関節角へ移動)。到達は
+    // McuStatus の FLAG_AT_INIT_POSE で知り、kIdle + SUCCEEDED へ抜ける
+    kInit = sharmech_msgs::msg::MotionStatus::MODE_INIT,
   };
 
   // コールバック: 入力の記録と状態遷移の判定のみ。target_ は書き換えない
@@ -67,6 +67,7 @@ private:
   void onGripper(const std_msgs::msg::Bool::SharedPtr msg);
   void onOrientVertical(const std_msgs::msg::Bool::SharedPtr msg);
   void onCancel(const std_msgs::msg::Empty::SharedPtr msg);
+  void onInitRequest(const std_msgs::msg::Empty::SharedPtr msg);
   void onCurrentPose(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
   void onMcuStatus(const sharmech_msgs::msg::McuStatus::SharedPtr msg);
   void onJogLimit(const sharmech_msgs::msg::JogLimit::SharedPtr msg);
@@ -75,14 +76,6 @@ private:
   // 制御タイマー: target_ を書き換える唯一の場所
   void onControlTimer();
   void onStatusTimer();
-  // 現在の状態を1回 publish する (タイマーからも即時通知からも通る唯一の経路)
-  void publishStatus();
-  // **mode / last_result が変わっていたら即 publish する。**
-  // status_rate (10Hz) のタイマーだけだと、所要時間が 100ms 未満のゴール
-  // (L 字の短い区間など) で NONE → SUCCEEDED の変化がサンプルの間に埋もれ、
-  // last_result の変化を見ている game_state_manager_node が到達を取りこぼす。
-  // コンテナは単一スレッドなので排他は要らない
-  void publishStatusIfChanged();
 
   void rejectGoal(const std::string & reason);
   // 直近のフィードバックを CartesianState に直す (無ければ nullopt)
@@ -97,6 +90,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr gripper_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr orient_vertical_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr cancel_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr init_request_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr current_pose_sub_;
   rclcpp::Subscription<sharmech_msgs::msg::McuStatus>::SharedPtr mcu_status_sub_;
   rclcpp::Subscription<sharmech_msgs::msg::WorkspaceClamp>::SharedPtr workspace_clamp_sub_;
@@ -173,10 +167,6 @@ private:
   // 同期前の target_ は原点の仮値なので、これを MCU に追従させると起動しただけで
   // アームが動く。MCU が未初期化 (bit3) を報告したら false に戻す (MCU 再起動)
   bool synced_with_feedback_{false};
-  // 直近に publish した status の mode / last_result (即時 publish の判定用)。
-  // 初期値は起動直後の実値と同じなので、最初の余計な publish は起きない
-  Mode last_published_mode_{Mode::kIdle};
-  uint8_t last_published_result_{sharmech_msgs::msg::MotionStatus::RESULT_NONE};
 };
 
 }  // namespace sharmech_core

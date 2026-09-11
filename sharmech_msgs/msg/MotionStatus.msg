@@ -7,8 +7,7 @@
 uint8 MODE_IDLE=0
 uint8 MODE_GOAL=1            # ゴールへの軌道を実行中
 uint8 MODE_JOG=2             # ジョグ(速度指令)で動作中
-# MODE_INIT=3 は 2026-09-11 に廃止。初期位置へは game_state_manager_node が
-# 普通のゴール (target_pose) を出すので、このノードから見れば MODE_GOAL
+uint8 MODE_INIT=3            # 初期位置要求中 (MCU が自前の初期関節角へ移動中。到達で IDLE + SUCCEEDED)
 
 uint8 RESULT_NONE=0
 uint8 RESULT_SUCCEEDED=1

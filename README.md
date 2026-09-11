@@ -109,7 +109,7 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 | `motion_generator_node` | `sharmech_core` | **中核**。軌道生成・速度積分・両モードの合流と調停・作業領域クランプ・ジョグ速度上限 (`jog_v_max`)・ウォッチドッグ・起動時の実姿勢同期 |
 | `hardware_bridge_node` | `sharmech_core` | UDP 送受信、パケット組立。送信直前に xy を極座標 (r, θ) へ変換し、フィードバックを直交座標へ戻す |
 | `kinematics_node` | `sharmech_core` | パターンB用。**実装済み**。詳細は [`sharmech_core/docs/kinematics_node.md`](sharmech_core/docs/kinematics_node.md) |
-| `game_state_manager_node` | `sharmech_core` | **実装済み**。「掴む→運ぶ→置く→退避」の自動配置シーケンスとゲーム全体の状態を管理。**初期位置 (`init_pose`) もここが持ち、起動時と `/catchrobo/game/reset` で L 字で戻る** (2026-09-11〜)。詳細は [`sharmech_core/docs/game_state_manager_node.md`](sharmech_core/docs/game_state_manager_node.md) |
+| `game_state_manager_node` | `sharmech_core` | **実装済み**。「掴む→運ぶ→置く→退避」の自動配置シーケンスとゲーム全体の状態を管理。詳細は [`sharmech_core/docs/game_state_manager_node.md`](sharmech_core/docs/game_state_manager_node.md) |
 | `cylinder_detector_node` | `catchrobo_perception` | フィールド上の物体位置を画像認識し `PoseArray` で配信。`scan_interval_sec` 周期の間欠スキャン + 手動トリガー |
 
 ### 軌道生成と速度積分を1ノードにまとめた理由
@@ -132,8 +132,8 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 | `/catchrobo/arm/orient_vertical` | `std_msgs/Bool` | `game_state_manager_node` → `motion_generator_node`。PLACING中のみtrue | |
 | `/catchrobo/arm/current_pose` | `geometry_msgs/PoseStamped` | `hardware_bridge_node` → 各ノード / WebXR / RViz | ○ |
 | `/catchrobo/arm/mcu_status` | `sharmech_msgs/McuStatus` | `hardware_bridge_node` → 観測者 (疎通状態・`status_flags`・`seq`/`seq_echo`・連番逆転回数)。**latched** | ○ |
-| `/catchrobo/arm/cancel` | `std_msgs/Empty` | 操縦層 → `motion_generator_node`。実行中のゴールを中断する | ○ |
-| ~~`/catchrobo/arm/init_request`~~ | — | **2026-09-11 廃止。** 初期位置が ROS2 側 (`game_state_manager_node` の `init_pose_*`) へ移り、普通のゴール (`target_pose`) として出すようになったため | |
+| `/catchrobo/arm/cancel` | `std_msgs/Empty` | 操縦層 → `motion_generator_node` (初期位置要求の取り下げも兼ねる) | ○ |
+| `/catchrobo/arm/init_request` | `std_msgs/Empty` | `game_state_manager_node` → `motion_generator_node`。初期位置要求 (`/catchrobo/game/reset` の実体)。座標は持たず、UDP `control_flags` bit2 で MCU 側の初期関節角へ戻す | |
 | `/catchrobo/arm/status` | `sharmech_msgs/MotionStatus` | `motion_generator_node` → 操縦層 / WebXR / `game_state_manager_node`。**latched** | ○ |
 | `/catchrobo/field/cylinders` | `geometry_msgs/PoseArray` | `cylinder_detector_node` → WebXR。**latched**、`scan_interval_sec`毎+手動トリガー | ○ |
 | `/catchrobo/field/rescan_request` | `std_msgs/Empty` | WebXR → `cylinder_detector_node`。手動即時再スキャン | ○ |
@@ -142,11 +142,11 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 | `/catchrobo/game/state` | `std_msgs/String` | `game_state_manager_node` → WebXR / `joy_teleop_node` (`MANUAL_CONTROL` 中の LED 表示のみ)。**latched** | ○ |
 | `/catchrobo/game/toggle_manual_control` | `std_msgs/Empty` | `joy_teleop_node` (4ボタン同時押し) / WebXR → `game_state_manager_node`。自由操作 (`MANUAL_CONTROL`) のトグル | ○ |
 | `/catchrobo/game/confirm` | `std_msgs/Empty` | `joy_teleop_node` (確定ボタン) / WebXR (サムズアップ) → `game_state_manager_node`。微調整 (`ADJUSTING_PICK`/`ADJUSTING_PLACE`) の確定 | ○ |
-| `/catchrobo/game/reset` | `std_msgs/Empty` | WebXR → `game_state_manager_node`。状態のリセット要求。どの状態からでも `INIT` へ入り、**初期位置** (`robot_geometry.yaml` の `init_pose`。2026-09-11〜 ROS2 側が正本) へ L 字で戻ってから `WAITING_FOR_PICK` に復帰する | ○ |
+| `/catchrobo/game/reset` | `std_msgs/Empty` | WebXR → `game_state_manager_node`。状態のリセット要求。どの状態からでも `INIT` へ入り、**MCU 側で定義した初期位置**へ戻ってから `WAITING_FOR_PICK` に復帰する (ROS2 は座標を持たない) | ○ |
 | `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | `game_state_manager_node` → `motion_generator_node`。PLACING/RETRACTING 中にスロット周辺へ作業領域を絞る | |
 | `/catchrobo/game/jog_limit` | `sharmech_msgs/JogLimit` | `game_state_manager_node` → `motion_generator_node`。場面ごとのジョグ速度上限 (微調整中は減速、自動シーケンス中は遮断)。2026-09-10 追加 | |
 | `/catchrobo/debug/change_state` | `std_msgs/String` | デバッグ用 → `game_state_manager_node`。ステートを強制遷移させる (その状態の目標姿勢は配信しない) | ○ |
-| `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `motion_generator_node` → 下流。位置 + 速度 + `enable` (動作許可 bit0。起動時の同期完了まで false。**この立ち上がりが `game_state_manager_node` の `INIT` の動き出しの合図も兼ねる**) | |
+| `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `motion_generator_node` → 下流。位置 + 速度 + `enable` (動作許可 bit0。起動時の同期完了まで false) + `init_request` (初期位置要求 bit2) | |
 | `/catchrobo/debug/command_pose` | `geometry_msgs/PoseStamped` | `motion_generator_node` → RViz。上の pose だけを写した可視化専用 (制御には使わない) | |
 | `/catchrobo/vr/spectator/image/compressed` | `sensor_msgs/CompressedImage` | WebXR → RViz / rqt_image_view。ヘッドセット内の一人称映像 (JPEG)。ROS2 ノードは購読しない | ○ |
 | `/catchrobo/command/joint` | `sensor_msgs/JointState` (`name`=5モータ個別名) | `kinematics_node` → `hardware_bridge_node` (`command_mode: "joint"`、packet_type=0x02。2026-09-01 接続済み。`pattern_b:=true` 時のみ流れる) | |
@@ -210,8 +210,8 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 
 | メッセージ | 用途 |
 |---|---|
-| `MotionStatus` | `motion_generator_node` の状態 (latched)。`mode` = IDLE / GOAL / JOG (INIT は 2026-09-11 廃止)、`last_result` = none / succeeded / aborted / rejected。**`mode` / `last_result` が変わった瞬間にも即時 publish する** (2026-09-11) |
-| `CartesianCommand` | 確定指令のストリーム1サンプル。位置 + 速度 + `enable` |
+| `MotionStatus` | `motion_generator_node` の状態 (latched)。`mode` = IDLE / GOAL / JOG / INIT、`last_result` = none / succeeded / aborted / rejected |
+| `CartesianCommand` | 確定指令のストリーム1サンプル。位置 + 速度 + `enable` + `init_request` |
 | `WorkspaceClamp` | 作業領域クランプの実行時上書き (`game_state_manager_node` → `motion_generator_node`) |
 | `JogLimit` | ジョグ速度上限の実行時上書き・遮断 (同上。2026-09-10 追加) |
 | `McuStatus` | MCU フィードバックの姿勢以外 (疎通・`status_flags`・連番)。latched |
@@ -219,7 +219,7 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 ```
 # MotionStatus.msg
 std_msgs/Header header
-uint8   mode                  # 0=IDLE, 1=GOAL, 2=JOG  (3=INIT は 2026-09-11 廃止)
+uint8   mode                  # 0=IDLE, 1=GOAL, 2=JOG, 3=INIT (初期位置要求中)
 geometry_msgs/Pose goal_pose
 float64 distance_remaining
 float64 time_remaining
@@ -233,15 +233,12 @@ std_msgs/Header header
 geometry_msgs/Pose  pose
 geometry_msgs/Twist twist
 bool enable                   # 動作許可 (UDP control_flags bit0)。実姿勢に同期するまで false
-# init_request (bit2) は 2026-09-11 廃止 (初期位置は ROS2 側が持つ)
+bool init_request             # 初期位置要求 (bit2)。/catchrobo/game/reset の実体
 ```
 
-`enable` を別トピックにせず位置と同じメッセージに載せるのは、
+`enable` / `init_request` を別トピックにせず位置と同じメッセージに載せるのは、
 別トピックだと DDS の発見遅れで「位置は届くがフラグは既定値」の窓が数百 ms 開き、
 起動直後に動作許可のまま原点の仮目標へ動き出したため (2026-09-10 mock_mcu で実測)。
-2026-09-11 以降はもう1つ意味があり、`game_state_manager_node` が
-**位置と同じメッセージで `enable` の立ち上がり (= MCU の実姿勢に同期し終えた) を知る**
-ので、「同期したはずなのにフラグがまだ来ない」という窓が原理的に無い。
 
 `geometry_msgs/PoseStamped` ではなく独自型にするのは、**速度を一緒に運ぶため**。
 `motion_generator_node` は速度を既に知っている(軌道生成なら速度プロファイルから、ジョグなら Twist そのもの)ので、捨てずに流す。下流での数値微分を避けられる。
@@ -265,14 +262,6 @@ bool enable                   # 動作許可 (UDP control_flags bit0)。実姿�
   各段階で一旦止まってよく、操縦層が複数のゴールを順番に送る。
   `motion_generator_node` は直線1本の軌道生成のみでよい
 - **CRC は入れない。** UDP チェックサムに委ねる。シンプルな実装を優先し、必要になったら追加する
-- **初期位置は ROS2 側が持つ (2026-09-11 ユーザー確定)。** 正本は
-  `params/robot_geometry.yaml` の `init_pose` (UDP と同じ極座標 r/θ/z。赤・青で別々) で、
-  `game_state_manager_node` が起動時と `/catchrobo/game/reset` で普通のゴールとして
-  そこへ動かす。MCU は電源投入時の原点出しとその後のホールドだけを担当し、
-  **UDP `control_flags` bit2 / `status_flags` bit5 は予約** (ROS2 は bit2 を常に 0 で送る)。
-  2026-09-10 は逆に「初期位置の正本は MCU 側の定数」と決めていたが、この方針は
-  2026-09-11 に撤回した。MCU は電源投入後どこに居てもよく (0x81 で実姿勢さえ返れば
-  よい)、ROS2 が同期してからそこを始点に初期位置へ動かす
 
 ## MCU通信仕様 (UDP)
 
@@ -457,11 +446,8 @@ UDPフィードバックの3箇所で1つの順序。定義は `udp_protocol.hpp
 12. `control_flags` bit0 (動作許可) が 0 のパケットを受けたら、ウォッチドッグ発動時と
     同じ挙動(最後の目標位置をホールド)を取ること。**ROS2 は起動直後、フィードバックに
     目標姿勢を同期し終えるまで 0 を送る** (2026-09-10〜。それ以前は常に 1 だった)。
-    **bit2 (初期位置要求) と `status_flags` bit5 (初期位置到達) は 2026-09-11 に
-    予約となった。** 初期位置は ROS2 側 (`robot_geometry.yaml` の `init_pose`) が持ち、
-    普通の 0x01 ストリームでそこへ動かすので、MCU 側に特別な実装は要らない
-    (ROS2 は bit2 を常に 0 で送り、bit5 を見ない。`docs/mcu_spec.md` §3.2 / §4.6)。
-    2026-09-10 の仕様で bit2/bit5 を実装済みのファームでも、そのままで害は無い
+    bit2 (初期位置要求) が 1 の間は r/θ/z を無視して MCU 側の初期関節角へ移動し、
+    到達を `status_flags` bit5 で返すこと (`docs/mcu_spec.md` §4.6)
 
 ### 要求2(補間)が必要な理由
 
@@ -582,7 +568,6 @@ MCU までの経路は 2026-09-01 に繋がった (`packet_type = 0x02`)。残�
 | フィードバック途絶時の停止 | 現状は警告のみ。自動停止させるべきか。なお 2026-09-10 以降、起動時にフィードバックが無ければ同期できず `enable=false` のまま動かない | 安全 |
 | 機構の幾何パラメータ・Z 方向の高さ | `robot_geometry.yaml` の `status: unmeasured` (リンク長・ピボット間隔・ターンテーブル軸・肘/膝基準高さ・ワーク高さ)。測り方は `docs/measurement_checklist.md` | **実機稼働の前提**。無いと IK が解けない |
 | `motion_generator_node` の作業領域パラメータ (`workspace_z_min/max`) | X/Yは2026-08-30の実測(赤フィールド)で確定済み(詳細は `sharmech/docs/field_dimensions.md`)。**Zのみ未確定のまま** | 安全・実用性。VR/PS4からの実際の指令がこの範囲外だと全て却下される |
-| 初期位置 (`robot_geometry.yaml` の `init_pose`) の値 | 2026-09-11 に ROS2 側が正本になったが、赤・青とも `status: estimate` の仮値 (r=0.30, θ=0.0, z=0.15。sim/mock の起動位置と同じ)。**青は赤と同値のままで未決定。** 実機で決める手順は `docs/parameter_tuning.md` §4.5 | 既定 (`init_on_startup: true`) では**起動しただけでここへ動く**。作業領域の外だとゴール却下で `INIT` を抜ける |
 | 「相手チームエリア・進入禁止エリアへの侵入禁止」ルールへの対応 | ルールブック上、上空含め侵入すると違反・失格の対象。今の作業領域クランプ(軸並行の箱)だけで守れるかは要検討 | 「禁止区域」機能([主要な設計判断](#主要な設計判断とその理由)で検討済みの拡張)が実際に必要になる可能性がある |
 
 ### 経由点についての注意
@@ -610,7 +595,7 @@ MCU までの経路は 2026-09-01 に繋がった (`packet_type = 0x02`)。残�
 実際に `kinematics_node` が使う運動学は別ヘッダー `parallel_arm_kinematics.hpp`
 (2026-08-27 ロボット構成確認後に新規追加。厳密解)。
 
-残作業 (2026-09-11 時点):
+残作業 (2026-09-10 時点):
 
 - **実測で決まるもの (最優先)**: `robot_geometry.yaml` の `status: unmeasured` 全項目
   (機構の幾何 9 値・ワーク高さ)、作業領域と箱の Z (`workspace_z_*`・`box_top_z_m`)、
@@ -618,12 +603,8 @@ MCU までの経路は 2026-09-01 に繋がった (`packet_type = 0x02`)。残�
   手順は [`docs/measurement_checklist.md`](docs/measurement_checklist.md)・
   [`docs/parameter_tuning.md`](docs/parameter_tuning.md)
 - PS4 の軸・ボタン番号の実機合わせ (`config.yaml`。`ros2 topic echo /joy` で確認)。
-  `home_pose` は未設定 (初期位置の正本は `robot_geometry.yaml` の `init_pose` なので、
-  ホームボタンも将来は `/catchrobo/game/reset` へ寄せる想定)
-- **初期位置 (`robot_geometry.yaml` の `init_pose`) の値が仮値 (`status: estimate`)。**
-  2026-09-11 に ROS2 側が正本になったので、実機で決めて入れること
-  ([`docs/parameter_tuning.md`](docs/parameter_tuning.md)「初期位置を実機で決める手順」)。
-  既定では**起動しただけでこの位置へ動く** (`init_on_startup`)
+  `home_pose` は未設定 (初期位置の正本が MCU 側へ移ったため、ホームボタンも将来は
+  `/catchrobo/game/reset` へ寄せる想定)
 - MCU 側ファームウェアの `docs/mcu_spec.md` 対応 (別担当者)。それまで
   `/catchrobo/arm/current_pose` は流れず、`motion_generator_node` は同期できないため
   `enable=false` のままゴールを却下する (mock_mcu / シミュレータで代替可能)
@@ -632,9 +613,8 @@ MCU までの経路は 2026-09-01 に繋がった (`packet_type = 0x02`)。残�
 - `control_flags` bit1 (「縦にする」指示) を実際に受けてワークを立てる機構自体が
   MCU側で未確定・未実装
 - URDF (`sharmech_description`) が旧 5 節リンク設計のままで関節名が契約と一致せず、
-  RViz のモデルは実機の姿勢で動かない (`rviz/sharmech.rviz` は 2026-09-11 に作成済みだが
-  RobotModel は入れていない。`rviz.launch.xml` で開く)。可視化のみの問題で、
-  リンク長の実測後に URDF を作り直す
+  RViz のモデルは実機の姿勢で動かない。`rviz/sharmech.rviz` も未作成。可視化のみの問題で、
+  リンク長の実測後に作り直す
 - 上記のうち ROS2 側の未決定事項は「未決定事項」節を参照。VR 側 (`pick_request` /
   `rescan_request` / `confirm` の送信) は 2026-09-05〜08 に実装済みを確認
 
