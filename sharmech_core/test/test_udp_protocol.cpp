@@ -323,7 +323,7 @@ TEST(PolarUtils, PureTangentialVelocityGivesZeroRadialRate)
 
 TEST(PolarUtils, UnwrapsThetaAcrossNegativeXAxis)
 {
-  // 作業領域は X が -2.045〜+0.941 なので -x 軸 (θ = ±π) を実際にまたぐ。
+  // 作業領域は X が -2.045〜+0.981 なので -x 軸 (θ = ±π) を実際にまたぐ。
   // atan2 の生値なら ±3.14 で飛ぶところを、直前値の近傍へ連続化する
   // (時計回り正なので +y 側の点は負: (-1, 0.05) ≒ -3.09、(-1, -0.05) は生値で +3.09)
   const double before = PolarUtils::toPolar(-1.0, 0.05, 0, 0, 0.0).theta;   // ≒ -3.09
@@ -412,7 +412,7 @@ TEST(PolarUtils, OriginSingularityHoldsThetaAndZeroesRates)
 TEST(PolarUtils, RoundTripsBackToCartesian)
 {
   for (const auto & xy : {std::pair<double, double>{0.5, -0.3},
-      {-2.045, 0.675}, {-1.0, 0.0}, {0.941, -0.675}})
+      {-2.045, 0.675}, {-1.0, 0.0}, {0.981, -0.675}})
   {
     const auto p = PolarUtils::toPolar(xy.first, xy.second, 0, 0, 0.0);
     EXPECT_NEAR(PolarUtils::toX(p.r, p.theta), xy.first, 1e-9);
