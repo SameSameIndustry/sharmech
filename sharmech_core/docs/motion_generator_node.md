@@ -106,7 +106,7 @@ bool                 enable        # 動作許可 (UDP control_flags bit0)。同
 | `alpha_max` | 2.0 | 最大角加速度 [rad/s²] |
 | `workspace_x_min` / `x_max` | -2.045 / 0.941 | 作業領域 X [m]。2026-08-30実測確定 (赤フィールド)。詳細は `sharmech/docs/field_dimensions.md` |
 | `workspace_y_min` / `y_max` | -0.675 / 0.675 | 作業領域 Y [m]。同上 |
-| `workspace_z_min` / `z_max` | 0.00 / 0.30 | 作業領域 Z [m]。**未確定のまま** (今回の実測は上面図のみでZ情報を含まない) |
+| `workspace_z_min` / `z_max` | 0.00 / 0.2098 | 作業領域 Z [m]。z_max は 2026-09-12 に実機の可動上限を実測 (`scripts/mark_pose.py`)。**z_min は未確定のまま** |
 | `field_origin_offset_x_m` / `_y_m` | 0.0 / 0.0 | 本番設置での原点ズレ補正 [m]。上記 workspace_x/y_min/max 全体をこの分だけ平行移動する |
 | `jog_v_max` | 1.0 | **ジョグの並進速度上限 [m/s]。** 受信した `cmd_twist` の大きさをこの値で頭打ちにする (下記) |
 | `twist_timeout` | 0.4 | ジョグのウォッチドッグ [s] (300〜500ms) |

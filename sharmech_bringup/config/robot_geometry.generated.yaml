@@ -28,7 +28,7 @@ motion_generator_node:
     workspace_y_min: -0.675
     workspace_y_max: 0.675
     workspace_z_min: 0.0
-    workspace_z_max: 0.3
+    workspace_z_max: 0.2098
     field_origin_offset_x_m: 0.0
     field_origin_offset_y_m: 0.0
     field_origin_offset_z_m: 0.0

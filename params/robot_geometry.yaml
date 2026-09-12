@@ -141,10 +141,12 @@ workspace:
     status: estimate
     source: "仮値。床・治具に当たらない下限を要実測"
   z_max_m:
-    value: 0.30
+    value: 0.2098
     unit: m
-    status: estimate
-    source: "仮値。機構の可動上限か上空の禁止区域の低い方を要実測"
+    status: measured
+    source: "実機を PS5 ジョグで上限まで上げ mark_pose.py で記録 (pose_marks_20260912_095114.csv id 4、r=0.61)"
+    date: 2026-09-12
+    note: "肘/膝機構の可動上限。運搬・退避の高さ (shooting_box の *_above_top_m) はこれ未満に保つこと"
 
 # -----------------------------------------------------------------------------
 # ワーク (チップスターS の円柱)

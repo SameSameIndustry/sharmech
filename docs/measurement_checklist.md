@@ -100,7 +100,7 @@ d=0 は幾何的には EE がその線上にある状態だが、実機では到
 
 ---
 
-## 3. Z方向の作業領域・高さ (現在すべて仮値。実測すると安全側が決まる)
+## 3. Z方向の作業領域・高さ (z_max_m 以外は仮値。実測すると安全側が決まる)
 
 Z は 2026-08-30 のフィールド実測が上面図のみだったため、**X/Yと違って一切
 確定していない。** ここが仮値のままだと「Zに動かすと全部クランプで却下される」
@@ -109,7 +109,7 @@ Z は 2026-08-30 のフィールド実測が上面図のみだったため、**X
 | パラメータ (`robot_geometry.yaml`) | 生成先 (ROS2 側の名前) | 現在値 | 実測値 | 定義 |
 |---|---|---|---|---|
 | `workspace.z_min_m` | `motion_generator_node.workspace_z_min` | 0.00 (仮) | ______ | EEが下がってよい下限。床・治具に当たらない高さ |
-| `workspace.z_max_m` | `motion_generator_node.workspace_z_max` | 0.30 (仮) | ______ | 上限。機構の可動上限か、上空の禁止区域の低い方 |
+| `workspace.z_max_m` | `motion_generator_node.workspace_z_max` | 0.2098 (実測 2026-09-12) | 0.2098 | 上限。機構の可動上限か、上空の禁止区域の低い方 |
 | **`shooting_box.top_z_m`** | `game_state_manager_node.box_top_z_m` | 0.156 (CAD) | ______ | **★高さの基準面 (箱の上端)。2026-09-06 以降、Z方向で実測が要るのは実質これ1個。** 下の相対値がすべてこれに追従する |
 | `shooting_box.release_below_top_m` | `slot_release_below_box_top_m` | 0.106 (仮) | ______ | 缶を離す高さ。基準面から何m下か。グリッパ形状が決まらないと定まらない |
 | `shooting_box.transport_clearance_above_top_m` | `transport_clearance_above_box_top_m` | 0.044 (仮) | ______ | 運搬中に上げる高さ。基準面から何m上か。**缶を縦に持つと下端が更に142mm下がる点に注意** |
