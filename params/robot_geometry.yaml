@@ -350,11 +350,11 @@ work_placement:
     status: unmeasured
     source: "治具上のワーク中心の高さ。土台厚2.3mmは確定済みだが、土台が乗る面の絶対 Z が未較正"
   pick_z_m:
-    value: 0.10
+    value: 0.05
     unit: m
     status: decision
-    source: "2026-09-11 ユーザー指示 (掴みに降りる目標高さ 0.10 m。同日 0.20→0.10)"
-    date: 2026-09-11
+    source: "2026-09-12 ユーザー指示 (掴みに降りる目標高さ 0.05 m。2026-09-11 に 0.20→0.10、翌日 0.05)"
+    date: 2026-09-12
     note: "★掴みに降りる (APPROACH_DESCEND) 先の絶対 z。game_state_manager_node が pick_request の z をこの値で常に上書きする (VR は缶の底面 z=0 を送ってくるため)。field_origin_offset.z_m が足される"
 
 # -----------------------------------------------------------------------------

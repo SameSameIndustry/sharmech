@@ -51,7 +51,7 @@ game_state_manager_node:
     approach_clearance_above_box_top_m: 0.044
     transport_clearance_above_box_top_m: 0.044
     retract_clearance_above_box_top_m: 0.044
-    pick_z_m: 0.1
+    pick_z_m: 0.05
     init_pose_r_red: 0.15
     init_pose_theta_red: 2.356194
     init_pose_z_red: 0.2
