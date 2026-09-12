@@ -13,9 +13,9 @@ field_geometry:
     normal_work_pitch_x_m: 0.2
     normal_work_pitch_y_m: -0.2
     common_work_pitch_m: -0.2
-    first_work_x_m: 0.27
+    first_work_x_m: 0.31
     first_work_y_m: 0.5
-    common_work_x_m: 0.87
+    common_work_x_m: 0.91
     common_work_first_y_m: 0.5
     first_work_z_m: 0.0
     field_origin_offset_x_m: 0.0
@@ -24,7 +24,7 @@ field_geometry:
 motion_generator_node:
   ros__parameters:
     workspace_x_min: -2.045
-    workspace_x_max: 0.941
+    workspace_x_max: 0.981
     workspace_y_min: -0.675
     workspace_y_max: 0.675
     workspace_z_min: 0.0
@@ -52,10 +52,10 @@ game_state_manager_node:
     transport_clearance_above_box_top_m: 0.044
     retract_clearance_above_box_top_m: 0.044
     pick_z_m: 0.05
-    init_pose_r_red: 0.15
+    init_pose_r_red: 0.2
     init_pose_theta_red: 2.356194
     init_pose_z_red: 0.2
-    init_pose_r_blue: 0.15
+    init_pose_r_blue: 0.2
     init_pose_theta_blue: -2.356194
     init_pose_z_blue: 0.2
     turntable_axis_x_m: 0.0
