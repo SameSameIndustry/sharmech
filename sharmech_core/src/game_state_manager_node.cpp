@@ -113,6 +113,9 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
     "/catchrobo/game/workspace_clamp", 10);
   jog_limit_pub_ = create_publisher<sharmech_msgs::msg::JogLimit>(
     "/catchrobo/game/jog_limit", 10);
+  // INIT の z 速度上限を ros2 param set 相当で motion_generator_node へ入れる (syncInitSpeedLimit)
+  motion_params_client_ = std::make_shared<rclcpp::AsyncParametersClient>(
+    this, "motion_generator_node");
   // latched: 後から接続したVRクライアント・観測用ダッシュボードにも現在状態が即座に届く
   state_pub_ = create_publisher<std_msgs::msg::String>(
     "/catchrobo/game/state", rclcpp::QoS(1).transient_local());
@@ -206,6 +209,11 @@ void GameStateManagerNode::declareParameters(const std::string & color_suffix)
   declare_parameter("init_on_startup", true);
   // INIT で動作許可が出てから初期位置へのゴールを出すまでの待ち [s]
   declare_parameter("init_delay_sec", 3.0);
+  // INIT (初期位置への直線 1 本) の間だけ motion_generator_node の v_max_z に入れる
+  // z 速度の上限 [m/s]。肘/膝機構は可動上限 (workspace z_max 0.2098) の近くを動くので、
+  // 初期位置へ戻るときだけ z をゆっくりにする (ユーザー指示 2026-09-12)。r/θ はそのまま。
+  // 0 なら z の別上限なし。INIT を抜けたら motion_generator_node 側を 0 に戻す
+  declare_parameter("init_v_max_z", 0.02);
 }
 
 // overrides に載っているものはそ担ってるよねの値を、載っていないものは現在値を使って設定を組む。
@@ -580,6 +588,9 @@ void GameStateManagerNode::onCommandCartesian(
   const bool was_enabled = machine_->motionEnabled();
   machine_->onMotionEnabled(msg->enable, now().seconds());
   if (msg->enable != was_enabled) {
+    // 動作許可の立ち上がり = motion_generator_node が (再) 起動して同期した合図。
+    // パラメータが既定 (v_max_z=0) に戻っている可能性があるので入れ直す
+    if (msg->enable) {sent_v_max_z_.reset();}
     RCLCPP_WARN(
       get_logger(), "Motion %s by motion_generator_node: %s -> %s%s",
       msg->enable ? "enabled" : "disabled",
@@ -635,6 +646,27 @@ void GameStateManagerNode::publishState()
   msg.data = toString(machine_->state());
   state_pub_->publish(msg);
   publishJogLimitIfChanged();
+  syncInitSpeedLimit();
+}
+
+// INIT の間だけ motion_generator_node の v_max_z を init_v_max_z に絞る。
+//
+// 専用トピック (jog_limit のような) を増やさず、`ros2 param set /motion_generator_node
+// v_max_z` と同じことをパラメータクライアントで行う (ユーザー判断 2026-09-12)。
+// INIT のゴールは動作許可から init_delay_sec (既定 3s) 後に出るので、その前に
+// 届いている。応答は待たない (motion_generator_node 側が受理時にログを出す)。
+// 相手のサービスがまだ無い起動直後は送らず、次の tick (state_publish_rate) で再試行する
+void GameStateManagerNode::syncInitSpeedLimit()
+{
+  const double desired = machine_->state() == GameState::kInit ?
+    get_parameter("init_v_max_z").as_double() : 0.0;
+  if (sent_v_max_z_ && *sent_v_max_z_ == desired) {return;}
+  if (!motion_params_client_->service_is_ready()) {return;}
+  motion_params_client_->set_parameters({rclcpp::Parameter("v_max_z", desired)});
+  sent_v_max_z_ = desired;
+  RCLCPP_INFO(
+    get_logger(), "motion_generator_node v_max_z -> %.3f m/s (state=%s)",
+    desired, toString(machine_->state()).c_str());
 }
 
 // 状態ごとにジョグの扱いを決めて motion_generator_node へ伝える。

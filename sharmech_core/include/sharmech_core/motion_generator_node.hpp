@@ -110,6 +110,11 @@ private:
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
   double v_max_, a_max_;        // 並進 [m/s], [m/s²]。軌道生成とジョグで共用
+  // ゴールの z 成分の速度上限 [m/s]。0 以下なら無効 (v_max_ だけ)。直線軌道の
+  // 速度ベクトルは変位方向に比例するので、v ≤ v_max_z · |Δ| / |Δz| で v を絞れば
+  // z 速度が v_max_z を超えない。INIT の間だけ game_state_manager_node が
+  // ros2 param set で入れ (init_v_max_z)、抜けたら 0 に戻す。ジョグには効かない
+  double v_max_z_{0.0};
   double w_max_, alpha_max_;    // 姿勢 [rad/s], [rad/s²]。同上
   // 起動時 (config.yaml) の作業領域。/catchrobo/game/workspace_clamp の
   // reset=true で戻る先であり、上書き値の安全上限としても使う (下記 active_* 参照)

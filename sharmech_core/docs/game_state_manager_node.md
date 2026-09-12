@@ -90,6 +90,7 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 | `slot_x_blue` / `slot_y_blue` / `slot_z_blue` | 2026-08-30確定 (X/Yのみ) | 青フィールドのスロット座標。`field`がロボット自身のベース座標系であることと「赤の線対称」という前提から、redと同じローカル数値になっている(下記) |
 | `placement_order` | `[0..23]` (箱単位で埋める順) | 配置する順番のスロットID列。「ちょうど6個」ボーナスを狙うなら箱単位が既定として妥当 |
 | `slot_clamp_margin_m` | 0.03 | ORIENTING〜PLACING中の作業領域クランプの片側マージン [m] (ADJUSTING_PLACE に入った時点で解除。2026-09-12) |
+| `init_v_max_z` | 0.02 | **INIT の間だけ `motion_generator_node` の `v_max_z` に入れる z 速度上限 [m/s]** (2026-09-12 ユーザー指示。肘/膝機構は可動上限 z=0.2098 の近くを動くので初期位置へ戻るときだけ z をゆっくりに。r/θ は `v_max` のまま)。専用トピックではなく `ros2 param set` 相当 (`AsyncParametersClient`) で送り、INIT を抜けたら 0 (無効) に戻す。相手のサービスが無い起動直後は次の tick で再試行、動作許可の立ち上がり (= `motion_generator_node` の (再) 同期) でも入れ直す。ゴールは `init_delay_sec` 後に出るので先に届く |
 | `require_manual_confirm` | true | true: 掴む直前・離す直前で止まり操縦者の確定を待つ / false: 止まらず完全自動。実機で位置合わせの精度が出るまでは true 推奨 |
 | `box_top_z_m` | 0.156 | **高さの基準面。箱の上端の高さ [m]。当日実測して入れるのはこれ1個でよく、下の相対値がすべて追従する** |
 | `pick_z_m` | 0.20 | **掴みに降りる先の絶対 z [m]。`pick_request` の z は常にこれで上書きする** (VR は缶オブジェクトの原点 = 底面 z=0 を送ってくるため、そのまま使うと z=0 まで降りる。2026-09-11 ユーザー指示)。`field_origin_offset_z_m` が足される。正本は `robot_geometry.yaml` の `work_placement.pick_z_m` |

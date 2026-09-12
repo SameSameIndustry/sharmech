@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -83,6 +84,11 @@ private:
   // 状態を知っているのはROS2側だけ、という役割分担を保つための経路で、
   // これがあるおかげで操縦層 (VR/PS4) はゲーム状態を知らなくてよい
   void publishJogLimitIfChanged();
+  // INIT の間だけ motion_generator_node の v_max_z を init_v_max_z に絞り、抜けたら
+  // 0 (無効) へ戻す。専用トピックではなく ros2 param set 相当 (パラメータクライアント)
+  // で行う (ユーザー判断 2026-09-12)。publishState() から毎回呼ばれ、送るべき値が
+  // 変わったときだけ送る。相手のサービスがまだ無ければ次の tick で再試行
+  void syncInitSpeedLimit();
 
   // slot_x_<color_suffix> / slot_y_<color_suffix> / slot_z_<color_suffix>
   // パラメータ (等長の配列) からスロット姿勢の一覧を組み立てる
@@ -97,6 +103,12 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr orient_vertical_pub_;
   rclcpp::Publisher<sharmech_msgs::msg::WorkspaceClamp>::SharedPtr workspace_clamp_pub_;
   rclcpp::Publisher<sharmech_msgs::msg::JogLimit>::SharedPtr jog_limit_pub_;
+  // motion_generator_node の v_max_z を実行時に書き換えるためのクライアント (INIT 専用)
+  rclcpp::AsyncParametersClient::SharedPtr motion_params_client_;
+  // 直近に motion_generator_node へ送った v_max_z。nullopt なら次の publishState() で必ず送る
+  // (動作許可の立ち上がりで nullopt に戻し、motion_generator_node が再起動して
+  // パラメータが既定に戻っていても入れ直す)
+  std::optional<double> sent_v_max_z_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr change_state_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr toggle_manual_control_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub_;

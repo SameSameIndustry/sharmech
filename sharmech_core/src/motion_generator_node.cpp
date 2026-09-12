@@ -73,6 +73,9 @@ MotionGeneratorNode::MotionGeneratorNode(const rclcpp::NodeOptions & options)
   // 既定 1.0 はWebXRクライアントの通常時の上限と同じで、現状の挙動を変えない。
   // MANUAL_CONTROL 中にVRが送る 10 m/s はここで 1.0 に落ちる
   declare_parameter("jog_v_max", 1.0);
+  // ゴールの z 成分の速度上限 [m/s]。0 で無効。INIT の間だけ game_state_manager_node が
+  // 実行時に入れる (init_v_max_z)。ヘッダの v_max_z_ 参照
+  declare_parameter("v_max_z", 0.0);
   declare_parameter("goal_mode", std::string("goal_priority"));
 
   // 本番設置での原点ズレ補正 (sharmech/docs/field_dimensions.md 参照)。既定0.0。
@@ -203,9 +206,17 @@ void MotionGeneratorNode::onTargetPose(
   }
 
   // 新しいゴールは実行中のゴールを上書きする。
-  // 軌道の始点は現在指令中の目標姿勢 (このノードが唯一の所有者)
+  // 軌道の始点は現在指令中の目標姿勢 (このノードが唯一の所有者)。
+  // v_max_z が有効なら、直線軌道の z 速度成分 (= v · |Δz| / |Δ|) がそれを超えない
+  // ように並進速度の上限を絞る (INIT で肘/膝機構だけをゆっくり動かすため)
+  double v_max = v_max_;
+  const double dz = std::abs(goal.z - target_.z);
+  if (v_max_z_ > 0.0 && dz > 1e-9) {
+    const double dist = std::hypot(goal.x - target_.x, goal.y - target_.y, dz);
+    v_max = std::min(v_max, v_max_z_ * dist / dz);
+  }
   trajectory_ = TrapezoidalTrajectory(
-    target_, goal, v_max_, a_max_, w_max_, alpha_max_);
+    target_, goal, v_max, a_max_, w_max_, alpha_max_);
   trajectory_start_time_ = now();
   goal_ = goal;
   mode_ = Mode::kGoal;
@@ -214,8 +225,8 @@ void MotionGeneratorNode::onTargetPose(
 
   RCLCPP_INFO(
     get_logger(),
-    "Goal accepted: (%.3f, %.3f, %.3f) pitch=%.2f yaw=%.2f, duration=%.2f s",
-    goal.x, goal.y, goal.z, goal.pitch, goal.yaw, trajectory_.duration());
+    "Goal accepted: (%.3f, %.3f, %.3f) pitch=%.2f yaw=%.2f, v_max=%.3f, duration=%.2f s",
+    goal.x, goal.y, goal.z, goal.pitch, goal.yaw, v_max, trajectory_.duration());
   // 受理 (RESULT_NONE) を即時に出す。status_rate のタイマーだけだと、短いゴールが
   // 次のタイマーまでに到達したとき NONE が一度も出ず、last_result の変化で到達を
   // 検知している game_state_manager_node が SUCCEEDED→SUCCEEDED を見逃す
@@ -413,6 +424,7 @@ rcl_interfaces::msg::SetParametersResult MotionGeneratorNode::applyParameters(
   const double alpha_max = dbl("alpha_max");
   const double twist_timeout = dbl("twist_timeout");
   const double jog_v_max = dbl("jog_v_max");
+  const double v_max_z = dbl("v_max_z");
   if (v_max <= 0.0 || a_max <= 0.0 || w_max <= 0.0 || alpha_max <= 0.0 ||
     twist_timeout <= 0.0 || jog_v_max <= 0.0)
   {
@@ -420,9 +432,14 @@ rcl_interfaces::msg::SetParametersResult MotionGeneratorNode::applyParameters(
       "v_max / a_max / w_max / alpha_max / twist_timeout / jog_v_max must be positive";
     return result;
   }
+  if (v_max_z < 0.0) {
+    result.reason = "v_max_z must be >= 0 (0 disables the z limit)";
+    return result;
+  }
 
   goal_mode_ = goal_mode;
   v_max_ = v_max;
+  v_max_z_ = v_max_z;
   a_max_ = a_max;
   w_max_ = w_max;
   alpha_max_ = alpha_max;
@@ -462,9 +479,9 @@ rcl_interfaces::msg::SetParametersResult MotionGeneratorNode::onSetParameters(
   if (result.successful) {
     RCLCPP_INFO(
       get_logger(),
-      "parameters updated at runtime (%zu changed); v_max=%.3f a_max=%.3f "
+      "parameters updated at runtime (%zu changed); v_max=%.3f v_max_z=%.3f a_max=%.3f "
       "workspace z=[%.3f, %.3f] goal_mode=%s",
-      parameters.size(), v_max_, a_max_, workspace_z_min_, workspace_z_max_,
+      parameters.size(), v_max_, v_max_z_, a_max_, workspace_z_min_, workspace_z_max_,
       goal_mode_.c_str());
   } else {
     RCLCPP_WARN(get_logger(), "parameter update rejected: %s", result.reason.c_str());

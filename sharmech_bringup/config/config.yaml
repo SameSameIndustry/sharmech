@@ -51,6 +51,9 @@ motion_generator_node:
     # **微調整中 (ADJUSTING_*) はさらに game_state_manager_node が
     # /catchrobo/game/jog_limit で一時的に絞る** (下記 adjusting_jog_v_max)
     jog_v_max: 1.0
+    # ゴールの z 速度上限 [m/s]。0 で無効。**通常は触らない**: INIT の間だけ
+    # game_state_manager_node が ros2 param set 相当で init_v_max_z を入れ、抜けたら 0 に戻す
+    v_max_z: 0.0
     # ゴール(target_pose)とジョグ(cmd_twist)の調停。
     #   goal_priority  … ゴール実行中の cmd_twist は無視し、ジョグ中に来たゴールはジョグを止めて受理する
     #   twist_priority … ゼロでない cmd_twist がゴールを abort する (旧既定)
@@ -191,6 +194,10 @@ game_state_manager_node:
     # 缶が斜めのまま箱へ降下して干渉する。**実機のピッチ機構の速度が未実測なので
     # 0.5は仮値** (実測後に詰めること。1サイクルあたりこの分だけ試合時間を消費する)
     orient_dwell_sec: 0.5
+    # INIT (初期位置への直線 1 本) の間だけ motion_generator_node の v_max_z に入れる
+    # z 速度上限 [m/s] (ユーザー指示 2026-09-12。肘/膝機構は可動上限の近くを動くので
+    # 初期位置へ戻るときだけ z をゆっくりに。r/θ は v_max のまま)。0 なら z の別上限なし
+    init_v_max_z: 0.02
     state_publish_rate: 10.0      # /catchrobo/game/state の配信周期 [Hz]
 
     # true: 起動直後に INIT から始まり、motion_generator_node が MCU の実姿勢へ

@@ -913,6 +913,59 @@ TEST(MotionGeneratorNode, ZeroLengthGoalPublishesAcceptThenSucceeded)
       }, 1.0));
 }
 
+// v_max_z (INIT の間だけ game_state_manager_node が ros2 param set で入れる z 速度上限) が
+// 有効なら、直線軌道の z 速度成分がそれを超えない。斜めのゴールでも z 成分で判定する。
+// 実行時 (ros2 param set 相当) に 0 へ戻すと v_max のままの速さに戻る
+TEST(MotionGeneratorNode, VMaxZLimitsVerticalSpeedOfGoalAndZeroDisablesIt)
+{
+  TestHarness harness("v_max_z");
+  auto motion_node = std::make_shared<sharmech_core::MotionGeneratorNode>(
+    fastTestOptions(
+      {rclcpp::Parameter("v_max", 0.10),
+        rclcpp::Parameter("a_max", 5.0),          // 上限へすぐ到達させる
+        rclcpp::Parameter("v_max_z", 0.02)}));
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(harness.node());
+  executor.add_node(motion_node);
+  ASSERT_TRUE(syncWithFeedback(harness, executor, 0.0, 0.10, 0.10));
+
+  // Δ = (0.04, 0, 0.03): 並進上限 0.10 のままなら z 速度は 0.06 になるところ、
+  // v_max_z=0.02 で v ≤ 0.02·0.05/0.03 ≈ 0.033 に絞られ z 速度は 0.02 以下
+  double max_vz = 0.0;
+  double max_speed = 0.0;
+  harness.publishTargetPose(0.04, 0.10, 0.13);
+  ASSERT_TRUE(waitUntil(
+      executor, [&]() {
+        if (auto c = harness.latestCartesian()) {
+          max_vz = std::max(max_vz, std::abs(c->twist.linear.z));
+          max_speed = std::max(max_speed, std::hypot(c->twist.linear.x, c->twist.linear.z));
+        }
+        auto s = harness.latestStatus();
+        return s && s->last_result == sharmech_msgs::msg::MotionStatus::RESULT_SUCCEEDED;
+      }, 5.0));
+  EXPECT_LE(max_vz, 0.02 + 1e-6);
+  EXPECT_GT(max_speed, 0.03);   // 絞られているが 0.02 そのものではない (z 成分で判定している証拠)
+
+  // 0 に戻す (ros2 param set 相当) → 同じ移動が並進上限 0.10 で走る
+  ASSERT_TRUE(motion_node->set_parameter(rclcpp::Parameter("v_max_z", 0.0)).successful);
+  max_vz = 0.0;
+  harness.publishTargetPose(0.0, 0.10, 0.10);
+  ASSERT_TRUE(waitUntil(
+      executor, [&]() {
+        if (auto c = harness.latestCartesian()) {
+          max_vz = std::max(max_vz, std::abs(c->twist.linear.z));
+        }
+        auto s = harness.latestStatus();
+        // max_vz は新しいゴールが動き出してからしか増えない (その間 last_result は NONE)
+        return s && s->last_result == sharmech_msgs::msg::MotionStatus::RESULT_SUCCEEDED &&
+               max_vz > 0.03;
+      }, 5.0));
+  EXPECT_NEAR(max_vz, 0.06, 0.01);   // 0.10 · 0.03/0.05
+
+  // 負値は却下される (直前の設定のまま)
+  EXPECT_FALSE(motion_node->set_parameter(rclcpp::Parameter("v_max_z", -0.01)).successful);
+}
+
 int main(int argc, char ** argv)
 {
   testing::InitGoogleTest(&argc, argv);
