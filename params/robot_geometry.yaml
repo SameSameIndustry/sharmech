@@ -177,8 +177,11 @@ cylinder:
 #   箱を動かした            → center_x_* / center_y_* を変える
 #   缶が当たる / 入らない    → slot_gap_x_m / slot_gap_y_m を変える  ★当日調整の主役
 #   フィールド全体がずれた   → field_origin_offset (下) を変える
-# 赤・青は「線対称 + field がロボット自身のベース座標系」という前提で同じ数値
-# (ロボット本体の左右組み方まで鏡映なら崩れる。要注意)。
+# 赤・青のフィールドは中央線で線対称で、ロボットは両色ともフィールド中央を向いて置かれる
+# (点対称に 180° 回して置くのではない) ので、ロボットのベース座標系 (= field) から見ると
+# 箱は左右が入れ替わる。**X は同じ、Y は符号反転** (2026-09-12 ユーザー確認。それ以前の
+# 「同じローカル数値」は点対称の場合の話で誤り)。WebXR の指定箱 (赤 +Y / 青 -Y) と
+# init_pose (θ_blue = -θ_red) も同じ前提。
 # スロットID・placement_order の意味は sharmech_core/docs/game_state_manager_node.md。
 shooting_box:
   center_x_red:
@@ -198,14 +201,14 @@ shooting_box:
     value: [-0.081, -0.231, -0.381, -0.531]
     unit: m
     status: cad
-    source: "赤と同じ (線対称の前提)"
+    source: "赤と同じ (線対称なので X は共通)"
     date: 2026-09-06
   center_y_blue:
-    value: 0.5255
+    value: -0.5255
     unit: m
     status: cad
-    source: "赤と同じ (線対称の前提)"
-    date: 2026-09-06
+    source: "赤の Y を符号反転 (線対称。ユーザー確認 2026-09-12。それ以前は +0.5255 で誤り)"
+    date: 2026-09-12
   inner_size_x_m:
     value: 0.138
     unit: m
@@ -394,40 +397,40 @@ field_origin_offset:
 #   (決まるまで動かしたくなければ config.yaml の game_state_manager_node.init_on_startup: false)。
 init_pose:
   r_red:
-    value: 0.30
+    value: 0.15
     unit: m
     status: estimate
-    source: "仮値 (sim/mock の起動位置と同じ)。★実機で決める"
-    date: 2026-09-11
+    source: "実機で調整 (ユーザー指示、0.30 → 0.15)"
+    date: 2026-09-12
     note: "ターンテーブル軸からの距離。起動直後にここへ動く"
   theta_red:
-    value: 0.0
+    value: 2.356194   # = 135 deg (3π/4)
     unit: rad
     status: estimate
-    source: "同上"
-    date: 2026-09-11
+    source: "実機で調整 (ユーザー指示 135°、0.0 → 2.356194 rad)"
+    date: 2026-09-12
     note: "+X から時計回りが正 (0.0 = +X 方向)"
   z_red:
+    value: 0.20
+    unit: m
+    status: estimate
+    source: "実機で調整 (ユーザー指示、0.15 → 0.20)"
+    date: 2026-09-12
+  r_blue:
     value: 0.15
     unit: m
     status: estimate
-    source: "同上"
-    date: 2026-09-11
-  r_blue:
-    value: 0.30
-    unit: m
-    status: estimate
-    source: "赤と同じ仮値。青の値は未決定"
-    date: 2026-09-11
+    source: "赤と同じ (ユーザー指示、0.30 → 0.15)"
+    date: 2026-09-12
   theta_blue:
-    value: 0.0
+    value: -2.356194   # = -135 deg (赤 +135° の鏡映)
     unit: rad
     status: estimate
-    source: "赤と同じ仮値。青の値は未決定"
-    date: 2026-09-11
+    source: "実機で調整 (ユーザー指示 -135°、0.0 → -2.356194 rad)"
+    date: 2026-09-12
   z_blue:
-    value: 0.15
+    value: 0.20
     unit: m
     status: estimate
-    source: "赤と同じ仮値。青の値は未決定"
-    date: 2026-09-11
+    source: "赤と同じ (ユーザー指示、0.15 → 0.20)"
+    date: 2026-09-12

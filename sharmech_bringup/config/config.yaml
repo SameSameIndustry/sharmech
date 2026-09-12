@@ -22,9 +22,9 @@
 # 現状これを読む ROS2 ノードは無い (perception が実カメラで動的に検出するため)。
 field_geometry:
   ros__parameters:
-    field_color: "red"   # この実測データの由来。ただし赤/青は線対称かつ`field`は
-                          # ロボット自身のベース座標系なので、値自体は赤・青共通
-                          # (詳細は sharmech/docs/field_dimensions.md)
+    field_color: "red"   # この実測データの由来。赤/青は線対称なので青で使うときは
+                          # Y の符号を反転すること (2026-09-12。読むノードは無い。
+                          # 詳細は sharmech/docs/field_dimensions.md)
 
 motion_generator_node:
   ros__parameters:

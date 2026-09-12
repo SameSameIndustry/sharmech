@@ -38,7 +38,7 @@ game_state_manager_node:
     box_center_x_red: [-0.081, -0.231, -0.381, -0.531]
     box_center_y_red: 0.5255
     box_center_x_blue: [-0.081, -0.231, -0.381, -0.531]
-    box_center_y_blue: 0.5255
+    box_center_y_blue: -0.5255
     box_inner_size_x_m: 0.138
     box_inner_size_y_m: 0.255
     slot_cols_x: 2
@@ -52,12 +52,12 @@ game_state_manager_node:
     transport_clearance_above_box_top_m: 0.044
     retract_clearance_above_box_top_m: 0.044
     pick_z_m: 0.1
-    init_pose_r_red: 0.3
-    init_pose_theta_red: 0.0
-    init_pose_z_red: 0.15
-    init_pose_r_blue: 0.3
-    init_pose_theta_blue: 0.0
-    init_pose_z_blue: 0.15
+    init_pose_r_red: 0.15
+    init_pose_theta_red: 2.356194
+    init_pose_z_red: 0.2
+    init_pose_r_blue: 0.15
+    init_pose_theta_blue: -2.356194
+    init_pose_z_blue: 0.2
     turntable_axis_x_m: 0.0
     turntable_axis_y_m: 0.0
     field_origin_offset_x_m: 0.0
