@@ -142,7 +142,7 @@ public:
   {
     std::vector<CartesianState> slots;   // インデックス = スロットID (0..N-1)
     std::vector<int> placement_order;    // 配置する順番のスロットID列 (長さ = N)
-    double slot_clamp_margin_m{0.03};    // ORIENTING〜RETRACTING中の作業領域クランプの片側マージン
+    double slot_clamp_margin_m{0.03};    // ORIENTING〜PLACING中の作業領域クランプの片側マージン (ADJUSTING_PLACE に入った時点で解除)
     // ワーク上空まで水平移動するときのZ [m] (グリッパは空)。**retract_clearance_z と
     // 同じ値にしておくこと。** 揃っていれば RETRACTING の到達高さのまま
     // APPROACHING に入るので、接近が完全な水平移動になる (揃っていないとその差分
@@ -368,9 +368,16 @@ public:
         break;
       case GameState::kPlacing:
         // スロットへ降ろし切った。require_manual_confirm なら、離す前に
-        // 止まって操縦者の確定を待つ
+        // 止まって操縦者の確定を待つ。**微調整は操縦者が意図してジョグするので
+        // 位置の範囲制限は要らない** —— enterOrienting() で絞ったクランプをここで
+        // 既定の作業領域へ戻す (2026-09-12 ユーザー判断。WebXR で ADJUSTING_PLACE 中に
+        // ±slot_clamp_margin_m より外へ動かせなかったため)。速度上限 (jog_limit の
+        // adjusting_jog_v_max) はノード側でこの状態の間そのまま掛かる
         if (config_.require_manual_confirm) {
           state_ = GameState::kAdjustingPlace;
+          WorkspaceClampCommand reset_clamp;
+          reset_clamp.reset = true;
+          pending_clamp_ = reset_clamp;
         } else {
           enterRetracting();
         }
@@ -642,6 +649,8 @@ private:
     // **縦のまま抜く。** ここで横に戻すと箱の中でグリッパを回すことになり、
     // 壁に当たりうる。横へ戻すのは次の kApproaching (空中の長い移動なので安全)
 
+    // require_manual_confirm=true なら kAdjustingPlace 入口で解除済みだが、
+    // false の経路 (PLACING → RETRACTING 直行) ではここが解除点。二重に送っても害は無い
     WorkspaceClampCommand reset_clamp;
     reset_clamp.reset = true;
     pending_clamp_ = reset_clamp;

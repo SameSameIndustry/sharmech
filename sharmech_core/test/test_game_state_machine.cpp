@@ -566,6 +566,10 @@ TEST(GameStateMachine, ManualConfirmStopsBeforeGraspAndBeforeRelease)
   ASSERT_EQ(machine.state(), GameState::kAdjustingPlace);
   EXPECT_FALSE(machine.hasPendingGoal());     // 止まったまま
   EXPECT_FALSE(machine.hasPendingGripper());  // まだ開かない
+  // 微調整中は位置の範囲制限をしない: ORIENTING で絞ったクランプを入口で解除する
+  // (2026-09-12。速度上限 adjusting_jog_v_max はノード側で別途掛かる)
+  ASSERT_TRUE(machine.hasPendingWorkspaceClamp());
+  EXPECT_TRUE(machine.consumePendingWorkspaceClamp().reset);
 
   machine.tick(200.0);
   EXPECT_EQ(machine.state(), GameState::kAdjustingPlace);

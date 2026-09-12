@@ -164,7 +164,7 @@ game_state_manager_node:
     placement_order: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
                        12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
 
-    slot_clamp_margin_m: 0.03     # PLACING/RETRACTING中の作業領域クランプの片側マージン [m]
+    slot_clamp_margin_m: 0.03     # ORIENTING〜PLACING中の作業領域クランプの片側マージン [m]。ADJUSTING_PLACE に入った時点で解除 (微調整中は位置の範囲制限なし。2026-09-12)
     # true: 「掴む直前」(ADJUSTING_PICK) と「離す直前」(ADJUSTING_PLACE) で必ず止まり、
     #       操縦者がジョグで微調整してから確定ボタン (/catchrobo/game/confirm) を
     #       押すまで待つ。止まっている間はゴールが無いのでジョグを入れても

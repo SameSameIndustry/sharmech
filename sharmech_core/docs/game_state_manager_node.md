@@ -35,7 +35,7 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 |---|---|
 | 状態管理 | `GameState` enum で管理し、`/catchrobo/game/state` (string, latched) に配信する |
 | 自動シーケンス | 各状態1本の直線ゴールを `/catchrobo/arm/target_pose` へ順に publish する |
-| 安全性 | PLACING/RETRACTING 中だけ作業領域クランプをスロット周辺に一時的に絞る |
+| 安全性 | ORIENTING〜PLACING の自動移動中だけ作業領域クランプをスロット周辺に一時的に絞る (ADJUSTING_PLACE に入った時点で解除) |
 
 ### やらないこと
 
@@ -72,7 +72,7 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 | `/catchrobo/arm/target_pose` | `geometry_msgs/PoseStamped` | 自動シーケンスのゴール。**既存の VR/PS4 と同じトピックに直接 publish する**(下記)。**`INIT` の初期位置へのゴールもここから出る** (2026-09-11〜。専用の経路は持たない) |
 | `/catchrobo/arm/gripper` | `std_msgs/Bool` | 自動シーケンスのグリッパ指令 |
 | `/catchrobo/arm/orient_vertical` | `std_msgs/Bool` | PLACING 中のみ `true` |
-| `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | PLACING/RETRACTING 前後の作業領域クランプ上書き。詳細は [`motion_generator_node.md`](motion_generator_node.md) |
+| `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | ORIENTING〜PLACING の作業領域クランプ上書きとその解除 (ADJUSTING_PLACE 入口 / RETRACTING 入口)。詳細は [`motion_generator_node.md`](motion_generator_node.md) |
 | `/catchrobo/game/jog_limit` | `sharmech_msgs/JogLimit` | **微調整中 (ADJUSTING_*) のジョグ速度上限。** 下記「微調整中はジョグを遅くする」 |
 | `/catchrobo/game/state` | `std_msgs/String` | 現在のゲームステート。**latched (transient_local)**、`state_publish_rate` (既定10Hz) |
 
@@ -89,7 +89,7 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 | `box_inner_size_x_m` / `_y_m` | 0.138 / 0.255 | 箱の内寸 [m]。**はみ出し警告に使うだけで座標計算には入らない** |
 | `slot_x_blue` / `slot_y_blue` / `slot_z_blue` | 2026-08-30確定 (X/Yのみ) | 青フィールドのスロット座標。`field`がロボット自身のベース座標系であることと「赤の線対称」という前提から、redと同じローカル数値になっている(下記) |
 | `placement_order` | `[0..23]` (箱単位で埋める順) | 配置する順番のスロットID列。「ちょうど6個」ボーナスを狙うなら箱単位が既定として妥当 |
-| `slot_clamp_margin_m` | 0.03 | ORIENTING〜RETRACTING中の作業領域クランプの片側マージン [m] |
+| `slot_clamp_margin_m` | 0.03 | ORIENTING〜PLACING中の作業領域クランプの片側マージン [m] (ADJUSTING_PLACE に入った時点で解除。2026-09-12) |
 | `require_manual_confirm` | true | true: 掴む直前・離す直前で止まり操縦者の確定を待つ / false: 止まらず完全自動。実機で位置合わせの精度が出るまでは true 推奨 |
 | `box_top_z_m` | 0.156 | **高さの基準面。箱の上端の高さ [m]。当日実測して入れるのはこれ1個でよく、下の相対値がすべて追従する** |
 | `pick_z_m` | 0.20 | **掴みに降りる先の絶対 z [m]。`pick_request` の z は常にこれで上書きする** (VR は缶オブジェクトの原点 = 底面 z=0 を送ってくるため、そのまま使うと z=0 まで降りる。2026-09-11 ユーザー指示)。`field_origin_offset_z_m` が足される。正本は `robot_geometry.yaml` の `work_placement.pick_z_m` |
@@ -242,7 +242,7 @@ stateDiagram-v2
 | 3b | `kTransportLift` → `kTransporting` | `last_result = SUCCEEDED` (上昇完了) | 掴んだ場所の真上まで上がってから、水平移動に入る |
 | 4 | `kTransporting` → `kOrienting` | `last_result = SUCCEEDED` (スロット上空に到達) | 「置け」の指示は `box_count` が既に兼ねている (下記「box_count とスロットのキュー」)。`orient_vertical=true` とクランプ絞りをここで発行 |
 | 5 | `kOrienting` → `kPlacing` | 経過時間 ≥ `orient_dwell_sec` (既定0.5s) | ピッチ機構の実フィードバックは無い (下記「縦にするタイミング」)。ゴールは xy=スロット・z=`transport_clearance_z` (**降下しない**。実質その場) |
-| 5b | `kPlacing` → `kAdjustingPlace` | `last_result = SUCCEEDED` **かつ** `require_manual_confirm` | ゴールを出さず静止して待つ。離す前に位置を微調整できる |
+| 5b | `kPlacing` → `kAdjustingPlace` | `last_result = SUCCEEDED` **かつ** `require_manual_confirm` | ゴールを出さず静止して待つ。離す前に位置を微調整できる。**作業領域クランプを既定へ戻す** (`reset=true`) |
 | 5c | `kAdjustingPlace` → `kRetracting` | `/catchrobo/game/confirm` 受信 | グリッパ open + 退避を発行 |
 | 6 | `kPlacing` → `kRetracting` | `last_result = SUCCEEDED` | グリッパ open・クランプ解除を同時発行 |
 | 7 | `kRetracting` → `kWaitingForPick` | `last_result = SUCCEEDED` かつ 未処理のスロットが残っている | 次のスロットへ進む |
@@ -264,7 +264,7 @@ stateDiagram-v2
 | `kApproaching` | グリッパを開いたまま、選択されたワークの**真上**まで `approach_clearance_z` の高さで水平移動中 |
 | `kApproachDescend` | ワークの真上から**垂直に降下**して掴む位置 (z = `pick_z_m`。`pick_request` の z は使わない) へ着ける |
 | `kAdjustingPick` | **掴む直前の微調整待ち** (`require_manual_confirm=true` のときのみ)。ゴールを出さず静止し、操縦者がジョグで位置を合わせて確定するのを待つ |
-| `kAdjustingPlace` | **離す直前の微調整待ち** (同上)。スロット上空 (運搬高さ) の姿勢のまま静止して待つ |
+| `kAdjustingPlace` | **離す直前の微調整待ち** (同上)。スロット上空 (運搬高さ) の姿勢のまま静止して待つ。入口で ORIENTING の作業領域クランプを解除する (位置の範囲制限なし) |
 | `kGrasping` | 到達直後にグリッパを閉じ、`grasp_dwell_sec` だけ待つ(下記「grasp判定が時間待ちである理由」)。**`box_count` のキューが空ならここで宛先の指示待ちになる** |
 | `kTransportLift` | 掴んだ位置で `transport_clearance_z` まで**垂直に上昇**する |
 | `kTransporting` | 高さを保ったまま、キュー先頭のスロットの**真上**まで水平移動中。到達したら `kOrienting` へ |
@@ -332,6 +332,7 @@ xy がずれ、ワークを保持したまま別の箱の上へ動くことに�
 | 止まり方 | **ゴールを発行しない。** アームはその場に留まる |
 | 調整の入力 | ジョグ (`/catchrobo/arm/cmd_twist`)。VR・PS4 どちらでもよい |
 | 再開 | `/catchrobo/game/confirm` (PS4の確定ボタン / VRのサムズアップ) |
+| 位置の制限 | **無い。** `kAdjustingPlace` に入った時点で ORIENTING〜PLACING の作業領域クランプ (`slot_clamp_margin_m`) を既定へ戻す (`reset=true`)。`kAdjustingPick` はもともと絞っていない。効くのは速度上限 `adjusting_jog_v_max` (`jog_limit`) だけ。**2026-09-12 変更**: それまでは `enterRetracting()` まで解除が無く、WebXR で ADJUSTING_PLACE 中にスロット中心から ±30mm より外へ動かせなかった (微調整は操縦者が意図してジョグしているので範囲制限は要らない、というユーザー判断) |
 
 **この状態ではジョグを入れても自動シーケンスが中断されない。** 通常、自動シーケンスの
 移動中にゼロでない Twist が来ると `motion_generator_node` がゴールを abort し
@@ -596,9 +597,11 @@ ROS2 側で使えるようになったら、時間待ちを「実際に閉じた
   `block`。「ジョグの速度制限と場面ごとの抑止」節)。手動ゴール (`target_pose`) は
   `goal_priority` の調停で実行中のゴールが優先される。操縦層に状態依存のロジックは置かない
 
-ただし「UI の契約だけに頼る」のは事故時の保険として弱いため、**PLACING/RETRACTING 中だけ
-作業領域クランプをスロット周辺に動的に絞る**ことで、仮に人間の手動ゴールが紛れ込んでも
-遠方へは物理的に動けないようにしている(詳細は
+ただし「UI の契約だけに頼る」のは事故時の保険として弱いため、**ORIENTING〜PLACING の
+自動移動中だけ作業領域クランプをスロット周辺に動的に絞る**ことで、仮に人間の手動ゴールが
+紛れ込んでも遠方へは物理的に動けないようにしている。`kAdjustingPlace` に入った時点で
+既定へ戻す (微調整に範囲制限は掛けない。2026-09-12。`require_manual_confirm=false` なら
+`kRetracting` 入口で戻す) (詳細は
 [`motion_generator_node.md`](motion_generator_node.md) の「作業領域クランプの動的上書き」)。
 
 ## 内部状態 (`GameStateMachine`)

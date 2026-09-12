@@ -39,7 +39,7 @@
 | `/catchrobo/arm/cancel` | `std_msgs/Empty` | 実行中のゴールを中断する |
 | `/catchrobo/arm/current_pose` | `geometry_msgs/PoseStamped` | 実姿勢。起動時の同期・状態トピックの残距離に使う |
 | `/catchrobo/arm/mcu_status` | `sharmech_msgs/McuStatus` | MCU の `status_flags` と `connected`。bit3 (未初期化) の間、および `connected=false` (フィードバック途絶) のときは同期を取り消す (2026-09-11、bit5 の監視は廃止) |
-| `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | 作業領域クランプの動的上書き。`game_state_manager_node` が PLACING/RETRACTING 前後に送る (詳細は下記) |
+| `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | 作業領域クランプの動的上書き。`game_state_manager_node` が ORIENTING 入口で絞り、ADJUSTING_PLACE 入口 (または RETRACTING 入口) で戻す (詳細は下記) |
 | `/catchrobo/game/jog_limit` | `sharmech_msgs/JogLimit` | ジョグ速度上限の動的上書き。`game_state_manager_node` が微調整中 (ADJUSTING_*) の出入りで送る (詳細は下記) |
 
 `/catchrobo/arm/` 名前空間は「調停前の生の操縦入力」であることを示す。VR と PS4 の両方がここへ publish する。
@@ -159,7 +159,7 @@ float64 v_max     # 並進ジョグの速度上限 [m/s]。0以下は不正と�
 
 上記の `workspace_x/y/z_min/max` は**起動時のデフォルト**。実際にゴール判定・ジョグクランプに
 使われるのは内部の `active_workspace_*` で、通常はデフォルトと同じ値だが、
-`game_state_manager_node` が PLACING/RETRACTING 中だけシューティングボックスの
+`game_state_manager_node` が ORIENTING〜PLACING の自動移動中だけ (ADJUSTING_PLACE の微調整に入った時点で解除。2026-09-12) シューティングボックスの
 スロット周辺に一時的に絞ることができる (`sharmech_msgs/WorkspaceClamp`)。
 
 ```
