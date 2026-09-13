@@ -65,11 +65,6 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
   pick_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
     "/catchrobo/game/pick_request", 10,
     std::bind(&GameStateManagerNode::onPickRequest, this, std::placeholders::_1));
-  // VRが仮想フィールドの指定箱にワークを離すたびに届く通算個数 (1始まり)。
-  // 「置きに行くべきスロット座標のキュー」として扱う (下記 onBoxCount)
-  box_count_sub_ = create_subscription<std_msgs::msg::Int32>(
-    "/catchrobo/game/box_count", 10,
-    std::bind(&GameStateManagerNode::onBoxCount, this, std::placeholders::_1));
   status_sub_ = create_subscription<sharmech_msgs::msg::MotionStatus>(
     "/catchrobo/arm/status", rclcpp::QoS(10).transient_local(),   // depth は publisher 側と揃える
     std::bind(&GameStateManagerNode::onArmStatus, this, std::placeholders::_1));
@@ -108,6 +103,11 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
   finish_sub_ = create_subscription<std_msgs::msg::Empty>(
     "/catchrobo/game/finish", 10,
     std::bind(&GameStateManagerNode::onFinishRequest, this, std::placeholders::_1));
+
+  // 配置の進み具合のリセット。VR の「置き直す」から届く。アームは動かさない
+  reset_progress_sub_ = create_subscription<std_msgs::msg::Empty>(
+    "/catchrobo/game/reset_progress", 10,
+    std::bind(&GameStateManagerNode::onResetProgress, this, std::placeholders::_1));
 
   target_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
     "/catchrobo/arm/target_pose", 10);
@@ -467,40 +467,19 @@ void GameStateManagerNode::onPickRequest(const geometry_msgs::msg::PoseStamped::
   pose.z = msg->pose.position.z;
   pose.pitch = pitch_yaw.pitch;
   pose.yaw = pitch_yaw.yaw;
+  const auto previous = machine_->state();
   machine_->onPickPoseReceived(pose);
-  publishPendingOutputs();
-}
-
-// VRの指定箱にワークを離した通算個数。box_count = N は
-// 「placement_order[N-1] のスロットへ置きに行く」ことを意味する
-// (0->1 なら placement_order[0])。**受け取った値が常に正本**なので、飛び・減少・
-// 0リセットも警告を出したうえでその値に追従する (詳細は GameStateMachine::onBoxCount)。
-//
-// このイベント自体は動き出しの契機ではなく、キューに積むだけ。実際に動くのは
-// GRASPING の dwell 経過後にキューが空でないときで、そこから TRANSPORTING →
-// PLACING → RETRACTING まで自動で進む (place_request 相当の指示も box_count が兼ねる)
-void GameStateManagerNode::onBoxCount(const std_msgs::msg::Int32::SharedPtr msg)
-{
-  const int count = msg->data;
-  const int capacity = static_cast<int>(machine_->placementCount());
-  if (count < 0 || count > capacity) {
+  // 行き先スロットを使い切っているときの却下は、黙って無視すると原因が分からないので知らせる
+  // (状態違いによる無視は今までどおり無音)
+  if (machine_->state() == previous && previous == GameState::kWaitingForPick &&
+    !machine_->currentSlotId())
+  {
     RCLCPP_WARN(
       get_logger(),
-      "box_count %d is out of range [0, %d]; clamped", count, capacity);
-  } else if (count != prev_box_count_ + 1) {
-    RCLCPP_WARN(
-      get_logger(),
-      "box_count changed %d -> %d (expected +1); following the received value as-is",
-      prev_box_count_, count);
+      "pick_request rejected: no slot remains (placement_order exhausted). "
+      "Send /catchrobo/game/reset_progress to start over");
   }
-  prev_box_count_ = count;
-
-  machine_->onBoxCount(count);
-  // キュー投入で GRASPING → TRANSPORTING に進める場合があるので、
-  // 次のタイマー周期を待たずにここで一度評価する
-  machine_->tick(now().seconds());
   publishPendingOutputs();
-  publishState();
 }
 
 void GameStateManagerNode::onArmStatus(const sharmech_msgs::msg::MotionStatus::SharedPtr msg)
@@ -564,8 +543,8 @@ void GameStateManagerNode::onToggleManualControl(const std_msgs::msg::Empty::Sha
 // 状態のリセット要求 (/catchrobo/game/reset)。どの状態からでも INIT へ入り、
 // 初期位置 (init_pose) へのゴールを出す (動作許可がまだなら立ち上がりで出す)。
 // 到達 (last_result = SUCCEEDED) したら WAITING_FOR_PICK へ戻る。
-// **配置の進み具合 (box_count のキュー) は消さない** ——
-// 正本は VR 側の通算カウントなので、こちらだけ巻き戻すと食い違う
+// **配置の進み具合 (order_index_) は消さない** ——
+// 消すと既に缶が入っているスロットへもう一度置きに行くため
 // (GameStateMachine::requestInit() のコメント参照)
 void GameStateManagerNode::onResetRequest(const std_msgs::msg::Empty::SharedPtr)
 {
@@ -596,6 +575,26 @@ void GameStateManagerNode::onFinishRequest(const std_msgs::msg::Empty::SharedPtr
     toString(previous).c_str(), finish.x, finish.y,
     machine_->motionEnabled() ? "" : "; waiting for motion enable");
   publishPendingOutputs();
+  publishState();
+}
+
+// 配置の進み具合のリセット (/catchrobo/game/reset_progress)。VR の「置き直す」から届く。
+// **アームは動かさない** —— 次に置くスロットを placement_order の先頭へ戻すだけ。
+// 運搬中 (APPROACHING〜RETRACTING) は行き先が変わると危ないので無視する
+// (GameStateMachine::resetProgress() のコメント参照)
+void GameStateManagerNode::onResetProgress(const std_msgs::msg::Empty::SharedPtr)
+{
+  const auto previous = machine_->state();
+  if (!machine_->resetProgress()) {
+    RCLCPP_WARN(
+      get_logger(), "reset_progress ignored during sequence (state=%s)",
+      toString(previous).c_str());
+    return;
+  }
+  RCLCPP_INFO(
+    get_logger(),
+    "Placement progress reset: next slot = placement_order[0] (%s -> %s)",
+    toString(previous).c_str(), toString(machine_->state()).c_str());
   publishState();
 }
 

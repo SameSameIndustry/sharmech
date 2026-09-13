@@ -48,8 +48,6 @@ CartesianState makePose(double x, double y, double z)
   return s;
 }
 
-// pick から退避完了までの1サイクルを一気に進める。box_count は
-// 「通算何個目か」なので、サイクルごとに1ずつ増やして渡す
 // ワークを掴むところまで進める。接近は「水平移動 → 垂直降下」の2段なので
 // onGoalReached が2回要る
 void advanceToGrasping(GameStateMachine & machine, const CartesianState & pose)
@@ -61,11 +59,11 @@ void advanceToGrasping(GameStateMachine & machine, const CartesianState & pose)
   machine.onGoalReached(0.0);   // 降下完了 → GRASPING
 }
 
-void runOneCycle(GameStateMachine & machine, int box_count)
+// pick から退避完了までの1サイクルを一気に進める
+void runOneCycle(GameStateMachine & machine)
 {
   advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
-  machine.onBoxCount(box_count);
-  machine.tick(1.0);            // → TRANSPORT_LIFT (掴んだ位置で垂直上昇)
+  machine.tick(1.0);            // dwell 経過 → TRANSPORT_LIFT (掴んだ位置で垂直上昇)
   machine.consumePendingGoal();
   machine.onGoalReached(1.5);   // 上昇完了 → TRANSPORTING (水平移動)
   machine.consumePendingGoal();
@@ -137,12 +135,8 @@ TEST(GameStateMachine, GoalReachedWhileApproachingClosesGripperAndDwells)
   EXPECT_EQ(machine.state(), GameState::kGrasping);
   EXPECT_FALSE(machine.hasPendingGoal());
 
-  // dwellが経過しても、box_count が来ていない (キューが空の) 間は待ち続ける
-  machine.tick(10.4);
-  EXPECT_EQ(machine.state(), GameState::kGrasping);
-  EXPECT_FALSE(machine.hasPendingGoal());
-
-  machine.onBoxCount(1);        // 1個目 → placement_order[0] へ置きに行く
+  // dwell が経過したら、外部からの合図を待たずに placement_order[0] へ動き出す
+  // (2026-09-13 に box_count のキュー待ちを廃止。PS5 単独でも最後まで進む)
   machine.tick(10.4);
   EXPECT_EQ(machine.state(), GameState::kTransportLift);
   ASSERT_TRUE(machine.hasPendingGoal());
@@ -163,28 +157,20 @@ TEST(GameStateMachine, GoalReachedWhileApproachingClosesGripperAndDwells)
   EXPECT_DOUBLE_EQ(goal.z, 0.20);
 }
 
-// box_count はキューに積むだけで、それ自体は状態を動かさない
-TEST(GameStateMachine, BoxCountAloneDoesNotChangeState)
-{
-  GameStateMachine machine(makeConfig());
-  machine.onBoxCount(1);
-  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
-  EXPECT_TRUE(machine.hasQueuedSlot());
-  EXPECT_FALSE(machine.hasPendingGoal());
-}
-
-// 掴んだ後に box_count が届いたら、その時点で運搬を始める
-// (0->1 なら placement_order[0] のスロットへ)
-TEST(GameStateMachine, BoxCountWhileGraspingStartsTransportToFirstSlot)
+// 掴んだら外部からの合図を待たず、dwell 経過だけで placement_order[0] へ運び始める。
+// **2026-09-13 に /catchrobo/game/box_count のキュー待ちを廃止した回帰テスト** ——
+// VR のブラウザ再起動や「置き直す」で VR 側のカウントだけが 0 に戻ると、
+// GRASPING から永久に進めなくなる事故が起きたため (PS5 単独でも進めなくなる)
+TEST(GameStateMachine, GraspingAdvancesWithoutExternalGoAhead)
 {
   GameStateMachine machine(makeConfig());
   advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
   machine.consumePendingGripper();
-  machine.tick(1.0);            // dwellは経過済みだがキューが空
+
+  machine.tick(0.1);            // dwell (0.3s) 前は動かない
   ASSERT_EQ(machine.state(), GameState::kGrasping);
 
-  machine.onBoxCount(1);
-  machine.tick(1.1);
+  machine.tick(1.0);            // dwell 経過だけで進む
   ASSERT_EQ(machine.state(), GameState::kTransportLift);
   machine.consumePendingGoal();
   machine.onGoalReached(1.5);
@@ -193,59 +179,6 @@ TEST(GameStateMachine, BoxCountWhileGraspingStartsTransportToFirstSlot)
   const auto goal = machine.consumePendingGoal();
   EXPECT_DOUBLE_EQ(goal.x, 0.0);   // placement_order[0] = スロット0
   EXPECT_DOUBLE_EQ(goal.z, 0.20);  // transport_clearance_z
-}
-
-// 受け取った値が常に正本。0リセット・飛び・減少にそのまま追従する
-TEST(GameStateMachine, BoxCountIsAuthoritativeAndFollowsResetAndJumps)
-{
-  GameStateMachine machine(makeConfig());
-  machine.onBoxCount(3);            // 一気に3個目まで飛んでもキューは残る
-  EXPECT_TRUE(machine.hasQueuedSlot());
-
-  machine.onBoxCount(0);            // フィールド再設置等でのリセット
-  EXPECT_FALSE(machine.hasQueuedSlot());
-  ASSERT_TRUE(machine.currentSlotId().has_value());
-  EXPECT_EQ(*machine.currentSlotId(), 0);
-
-  machine.onBoxCount(99);           // placement_order の長さ(4)を超える値はクランプ
-  EXPECT_TRUE(machine.hasQueuedSlot());
-  machine.onBoxCount(-1);           // 負値は0扱い
-  EXPECT_FALSE(machine.hasQueuedSlot());
-}
-
-// 宛先を確定済みのサイクル (TRANSPORTING/PLACING/RETRACTING) の途中で
-// box_count が減っても、そのサイクルは中断しない (ワークを保持したまま
-// 別の箱の上へ動いてしまわないようにするため)
-TEST(GameStateMachine, BoxCountDecreaseDoesNotInterruptCommittedCycle)
-{
-  GameStateMachine machine(makeConfig());
-  advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
-  machine.onBoxCount(1);
-  machine.tick(1.0);
-  machine.consumePendingGoal();
-  machine.onGoalReached(1.5);
-  ASSERT_EQ(machine.state(), GameState::kTransporting);
-  machine.consumePendingGoal();
-
-  machine.onBoxCount(0);            // 運搬中のリセットは効かせない
-  EXPECT_EQ(machine.state(), GameState::kTransporting);
-  ASSERT_TRUE(machine.currentSlotId().has_value());
-  EXPECT_EQ(*machine.currentSlotId(), 0);
-}
-
-// 全スロット消化後 (COMPLETE) に box_count が巻き戻ったら待機状態へ戻る
-TEST(GameStateMachine, BoxCountRewindLeavesComplete)
-{
-  GameStateMachine::Config config = makeConfig();
-  config.placement_order = {0};
-  GameStateMachine machine(config);
-  runOneCycle(machine, 1);
-  ASSERT_EQ(machine.state(), GameState::kComplete);
-
-  machine.onBoxCount(0);
-  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
-  ASSERT_TRUE(machine.currentSlotId().has_value());
-  EXPECT_EQ(*machine.currentSlotId(), 0);
 }
 
 TEST(GameStateMachine, FullCycleAdvancesToNextSlot)
@@ -257,8 +190,7 @@ TEST(GameStateMachine, FullCycleAdvancesToNextSlot)
   machine.onGoalReached(0.0);   // ワーク上空 → APPROACH_DESCEND
   machine.consumePendingGoal();
   machine.onGoalReached(0.2);   // 降下完了 → GRASPING
-  machine.onBoxCount(1);        // 1個目のスロットをキューへ
-  machine.tick(1.0);            // dwell経過 + キューあり → TRANSPORT_LIFT
+  machine.tick(1.0);            // dwell経過 → TRANSPORT_LIFT
   ASSERT_EQ(machine.state(), GameState::kTransportLift);
   machine.consumePendingGoal();
   machine.onGoalReached(1.5);   // 上昇完了 → TRANSPORTING (水平移動)
@@ -309,7 +241,7 @@ TEST(GameStateMachine, CompletesAfterLastSlot)
   config.placement_order = {0};  // スロット1つだけの構成でCOMPLETEまで確認する
   GameStateMachine machine(config);
 
-  runOneCycle(machine, 1);      // 最後のスロットなのでCOMPLETEへ
+  runOneCycle(machine);      // 最後のスロットなのでCOMPLETEへ
   EXPECT_EQ(machine.state(), GameState::kComplete);
   EXPECT_FALSE(machine.currentSlotId().has_value());
 }
@@ -368,11 +300,10 @@ TEST(GameStateMachine, ForceStateDoesNotEmitPendingCommands)
 }
 
 // GRASPING へ飛ばしたときは待機時間の基準時刻が入り直り、
-// grasp_dwell_sec 経過後 (かつ box_count のキューがある状態) で TRANSPORTING へ進む
+// grasp_dwell_sec 経過後に TRANSPORTING へ進む
 TEST(GameStateMachine, ForceStateToGraspingResetsDwellTimer)
 {
   GameStateMachine machine(makeConfig());
-  machine.onBoxCount(1);
   machine.forceState(GameState::kGrasping, 100.0);
   ASSERT_EQ(machine.state(), GameState::kGrasping);
 
@@ -441,7 +372,6 @@ TEST(GameStateMachine, ToggleManualControlFromPlacingResetsNarrowedClamp)
   machine.onGoalReached(0.0);
   machine.consumePendingGoal();
   machine.onGoalReached(0.2);
-  machine.onBoxCount(1);
   machine.tick(1.0);
   machine.consumePendingGoal();
   machine.onGoalReached(1.5);   // 上昇完了 → TRANSPORTING
@@ -473,8 +403,8 @@ TEST(GameStateMachine, ManualControlIgnoresGoalRejectedOrAborted)
 }
 
 // 自由操作中は pick_request を受理しない (kWaitingForPick 以外では無視される
-// 既存ガードがそのまま効く)。box_count はキューに積まれるだけで状態は動かない
-TEST(GameStateMachine, ManualControlIgnoresPickRequestAndOnlyQueuesBoxCount)
+// 既存ガードがそのまま効く)
+TEST(GameStateMachine, ManualControlIgnoresPickRequest)
 {
   GameStateMachine machine(makeConfig());
   machine.toggleManualControl(0.0);
@@ -484,10 +414,8 @@ TEST(GameStateMachine, ManualControlIgnoresPickRequestAndOnlyQueuesBoxCount)
   EXPECT_EQ(machine.state(), GameState::kManualControl);
   EXPECT_FALSE(machine.hasPendingGoal());
 
-  machine.onBoxCount(1);
   machine.tick(1.0);
   EXPECT_EQ(machine.state(), GameState::kManualControl);
-  EXPECT_TRUE(machine.hasQueuedSlot());
   EXPECT_FALSE(machine.hasPendingGoal());
 }
 
@@ -498,7 +426,6 @@ TEST(GameStateMachine, OrientingHoldsPositionUntilDwellElapses)
 {
   GameStateMachine machine(makeConfig());
   advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
-  machine.onBoxCount(1);
   machine.tick(1.0);
   machine.consumePendingGoal();
   machine.onGoalReached(1.5);   // 上昇完了 → TRANSPORTING
@@ -554,7 +481,6 @@ TEST(GameStateMachine, ManualConfirmStopsBeforeGraspAndBeforeRelease)
   EXPECT_TRUE(machine.consumePendingGripper());   // 閉じる
 
   // 離す直前: スロットへ降ろしきっても開かず、ADJUSTING_PLACE で待つ
-  machine.onBoxCount(1);
   machine.tick(101.4);                   // grasp dwell 経過 → TRANSPORT_LIFT
   machine.consumePendingGoal();
   machine.onGoalReached(102.0);          // → TRANSPORTING
@@ -601,7 +527,6 @@ TEST(GameStateMachine, ManualAdjustmentShiftsTheFollowingVerticalMove)
   // 操縦者がジョグで +5mm / -3mm ずらした結果が current_pose として届く
   machine.onCurrentPose(makePose(0.505, 0.097, 0.0));
   machine.onConfirm(3.0);
-  machine.onBoxCount(1);
   machine.tick(3.4);
 
   ASSERT_EQ(machine.state(), GameState::kTransportLift);
@@ -674,7 +599,6 @@ TEST(GameStateMachine, EveryMoveIsEitherPurelyVerticalOrPurelyHorizontal)
   // 3. 掴む
   machine.onGoalReached(2.0);
   ASSERT_EQ(machine.state(), GameState::kGrasping);
-  machine.onBoxCount(1);
 
   // 4. 上昇: 掴んだ場所の真上へ (xyは掴んだ位置のまま = 完全な垂直移動)
   machine.tick(2.5);
@@ -728,7 +652,7 @@ TEST(GameStateMachine, ApproachClearanceMatchesRetractClearanceSoTraverseIsFlat)
 TEST(GameStateMachine, StaysVerticalThroughRetractAndReturnsFlatOnNextApproach)
 {
   GameStateMachine machine(makeConfig());
-  runOneCycle(machine, 1);
+  runOneCycle(machine);
   ASSERT_EQ(machine.state(), GameState::kWaitingForPick);
   // 1サイクルを通して、最後に出た orient_vertical 指令は ORIENTING の true のみ。
   // RETRACTING では false を出していない (runOneCycle 中に消費済みでないことを確認)
@@ -746,7 +670,7 @@ TEST(GameStateMachine, ToggleManualControlWorksFromComplete)
   GameStateMachine::Config config = makeConfig();
   config.placement_order = {0};
   GameStateMachine machine(config);
-  runOneCycle(machine, 1);
+  runOneCycle(machine);
   ASSERT_EQ(machine.state(), GameState::kComplete);
 
   machine.toggleManualControl(4.0);
@@ -981,13 +905,13 @@ TEST(GameStateMachine, InitFallsBackToWaitingForPickWhenGoalRejected)
   EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
 }
 
-// **配置の進み具合は消さない。** 正本は VR 側の box_count なので、
-// こちらだけ巻き戻すと既に置いたスロットへもう一度置きに行くことになる
+// **配置の進み具合は消さない。** 巻き戻すと、既に缶が入っているスロットへ
+// もう一度置きに行くことになる
 TEST(GameStateMachine, ResetKeepsPlacementProgress)
 {
   GameStateMachine machine(makeConfig());
   machine.onMotionEnabled(true, 0.0);
-  runOneCycle(machine, 1);
+  runOneCycle(machine);
   ASSERT_EQ(machine.currentSlotId(), 1);  // 1個目を消化済み
 
   machine.requestInit(5.0);
@@ -996,9 +920,144 @@ TEST(GameStateMachine, ResetKeepsPlacementProgress)
   machine.onGoalReached(9.0);
   ASSERT_EQ(machine.state(), GameState::kWaitingForPick);
 
-  // キューも消化済み個数もそのまま (次に置くのは2個目のスロット)
+  // 消化済み個数はそのまま (次に置くのは2個目のスロット)
   EXPECT_EQ(machine.currentSlotId(), 1);
-  EXPECT_FALSE(machine.hasQueuedSlot());
+}
+
+// placement_order を使い切った後 (COMPLETE → reset → 掴み直し) は、置き場所が
+// 無いので**掴みに行く前に**却下する。掴んでから GRASPING で待つと、缶を持ったまま
+// 身動きが取れなくなる (2026-09-13 の box_count 廃止で露出した経路の回帰テスト)
+TEST(GameStateMachine, PickRequestRejectedWhenNoSlotRemains)
+{
+  GameStateMachine::Config config = makeConfig();
+  config.placement_order = {0};
+  GameStateMachine machine(config);
+  machine.onMotionEnabled(true, 0.0);
+  runOneCycle(machine);
+  ASSERT_EQ(machine.state(), GameState::kComplete);
+
+  machine.requestInit(10.0);          // reset で待機状態へ戻す
+  machine.tick(13.0);
+  machine.consumePendingGoal();
+  machine.onGoalReached(14.0);
+  ASSERT_EQ(machine.state(), GameState::kWaitingForPick);
+  ASSERT_FALSE(machine.currentSlotId().has_value());
+
+  machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);   // 掴みに行かない
+  EXPECT_FALSE(machine.hasPendingGoal());
+}
+
+// 二重の安全: **実行中の setConfig で placement_order が縮んだ**場合は、既に GRASPING に
+// 入っている。進ませると運搬先が pick_pose_ にフォールバックし、掴んだ場所へ缶を
+// 持ち帰って落とすので、置き場所ができるまで掴んだ位置で待つ
+TEST(GameStateMachine, GraspingWaitsWhenNoSlotRemains)
+{
+  GameStateMachine machine(makeConfig());
+  advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
+  machine.consumePendingGripper();
+
+  GameStateMachine::Config shrunk = makeConfig();
+  shrunk.placement_order = {};        // 運搬中に行き先が無くなった
+  machine.setConfig(shrunk);
+  ASSERT_FALSE(machine.currentSlotId().has_value());
+
+  machine.tick(100.0);                // dwell を大きく超えても進まない
+  EXPECT_EQ(machine.state(), GameState::kGrasping);
+  EXPECT_FALSE(machine.hasPendingGoal());
+}
+
+// --- 配置の進み具合のリセット (/catchrobo/game/reset_progress) ----------------------
+// VR の「置き直す」で ROS2 側の order_index_ も 0 に戻す。**アームは動かさない**
+
+// COMPLETE から受けると待機へ戻り、次に置くのは placement_order の先頭に戻る
+TEST(GameStateMachine, ResetProgressRestartsFromFirstSlot)
+{
+  GameStateMachine::Config config = makeConfig();
+  config.placement_order = {0};
+  GameStateMachine machine(config);
+  runOneCycle(machine);
+  ASSERT_EQ(machine.state(), GameState::kComplete);
+  machine.consumePendingGripper();            // RETRACTING で出た指令を捨てておく
+  machine.consumePendingWorkspaceClamp();
+
+  EXPECT_TRUE(machine.resetProgress());
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+  ASSERT_EQ(machine.currentSlotId(), 0);
+  // **アームは動かさない**
+  EXPECT_FALSE(machine.hasPendingGoal());
+  EXPECT_FALSE(machine.hasPendingGripper());
+  EXPECT_FALSE(machine.hasPendingWorkspaceClamp());
+
+  // もう1サイクル回すと、運搬先は先頭のスロットに戻っている
+  advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
+  machine.tick(1.0);
+  machine.consumePendingGoal();
+  machine.onGoalReached(1.5);
+  ASSERT_EQ(machine.state(), GameState::kTransporting);
+  const auto goal = machine.consumePendingGoal();
+  EXPECT_DOUBLE_EQ(goal.x, config.slots[0].x);
+  EXPECT_DOUBLE_EQ(goal.y, config.slots[0].y);
+}
+
+// 運搬中は無視する。途中で行き先スロットが変わると、絞ったクランプと
+// PLACING/RETRACTING のゴールが食い違う
+TEST(GameStateMachine, ResetProgressIgnoredDuringSequence)
+{
+  GameStateMachine::Config config = makeConfig();
+  config.placement_order = {1, 0};
+  GameStateMachine machine(config);
+  runOneCycle(machine);
+  ASSERT_EQ(machine.currentSlotId(), 0);      // 1個目 (スロット1) を消化済み
+
+  advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
+  ASSERT_EQ(machine.state(), GameState::kGrasping);
+  EXPECT_FALSE(machine.resetProgress());
+  EXPECT_EQ(machine.state(), GameState::kGrasping);
+  EXPECT_EQ(machine.currentSlotId(), 0);
+
+  machine.tick(1.0);
+  machine.consumePendingGoal();
+  machine.onGoalReached(1.5);
+  ASSERT_EQ(machine.state(), GameState::kTransporting);
+  EXPECT_FALSE(machine.resetProgress());
+  EXPECT_EQ(machine.state(), GameState::kTransporting);
+  EXPECT_EQ(machine.currentSlotId(), 0);
+}
+
+// WAITING_FOR_PICK (まだ全部置き終わっていない) で受けても先頭へ巻き戻す
+TEST(GameStateMachine, ResetProgressInWaitingForPickRewindsOrder)
+{
+  GameStateMachine::Config config = makeConfig();
+  config.placement_order = {1, 0};
+  GameStateMachine machine(config);
+  runOneCycle(machine);
+  ASSERT_EQ(machine.state(), GameState::kWaitingForPick);
+  ASSERT_EQ(machine.currentSlotId(), 0);
+
+  EXPECT_TRUE(machine.resetProgress());
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+  EXPECT_EQ(machine.currentSlotId(), 1);      // placement_order の先頭へ
+}
+
+// 自由操作中に受けたら、状態は MANUAL_CONTROL のままで復帰先だけ直す
+// (COMPLETE へ戻すと、行き先ができているのに pick_request を受けられない)
+TEST(GameStateMachine, ResetProgressFromManualControlFixesReturnState)
+{
+  GameStateMachine::Config config = makeConfig();
+  config.placement_order = {0};
+  GameStateMachine machine(config);
+  runOneCycle(machine);
+  ASSERT_EQ(machine.state(), GameState::kComplete);
+
+  machine.toggleManualControl(5.0);
+  ASSERT_EQ(machine.state(), GameState::kManualControl);
+  EXPECT_TRUE(machine.resetProgress());
+  EXPECT_EQ(machine.state(), GameState::kManualControl);
+
+  machine.toggleManualControl(6.0);
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+  EXPECT_EQ(machine.currentSlotId(), 0);
 }
 
 // 状態名の文字列は /catchrobo/game/state の契約そのもの (VR側が色分けに使う)
@@ -1128,7 +1187,7 @@ TEST(GameStateMachine, FinishPullsOutOfManualControlAndComplete)
   {
     GameStateMachine machine(makeConfig());
     machine.onMotionEnabled(true, 0.0);
-    for (int i = 1; i <= 4; ++i) {runOneCycle(machine, i);}
+    for (int i = 0; i < 4; ++i) {runOneCycle(machine);}
     ASSERT_EQ(machine.state(), GameState::kComplete);
 
     machine.requestFinish();
@@ -1210,7 +1269,7 @@ TEST(GameStateMachine, FinishKeepsPlacementProgress)
 {
   GameStateMachine machine(makeConfig());
   machine.onMotionEnabled(true, 0.0);
-  runOneCycle(machine, 1);
+  runOneCycle(machine);
   ASSERT_EQ(machine.currentSlotId(), 1);
 
   machine.requestFinish();
@@ -1219,7 +1278,6 @@ TEST(GameStateMachine, FinishKeepsPlacementProgress)
   ASSERT_EQ(machine.state(), GameState::kFinish);
 
   EXPECT_EQ(machine.currentSlotId(), 1);
-  EXPECT_FALSE(machine.hasQueuedSlot());
 }
 
 // 状態名の文字列は /catchrobo/game/state の契約そのもの (VR側が色分けと案内に使う)

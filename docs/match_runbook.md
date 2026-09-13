@@ -171,17 +171,19 @@ ros2 topic pub --once /catchrobo/arm/target_pose geometry_msgs/msg/PoseStamped \
 # グリッパ (true = 閉)
 ros2 topic pub --once /catchrobo/arm/gripper std_msgs/msg/Bool '{data: true}'
 
-# 自動シーケンスを手で起動: 掴みに行く (缶の姿勢を渡す) / 置きに行く (指定箱に離した通算個数)
+# 自動シーケンスを手で起動: 掴みに行く (缶の姿勢を渡す)。
+# 置き先は placement_order の順に自動で決まるので、別の指示は要らない (2026-09-13〜)
 ros2 topic pub --once /catchrobo/game/pick_request geometry_msgs/msg/PoseStamped \
   '{header: {frame_id: field}, pose: {position: {x: 0.50, y: 0.20, z: 0.05}, orientation: {w: 1.0}}}'
-ros2 topic pub --once /catchrobo/game/box_count std_msgs/msg/Int32 '{data: 1}'
 ```
 
 PS4 の既定ボタン: × = グリッパ開閉、△ = ホーム、R3 = 確定、L1 = デッドマン (押しながらスティック)、
 L1+R1+L3+R3 同時 = 自由操作トグル (`docs/joy_teleop_node.md`)。
 **PS5 だけで操作するときは最初に自由操作トグルで `MANUAL_CONTROL` に入る**
-(`pick_request` / `box_count` / `reset` は VR にしか無く、PS5 単独では自動シーケンスを
+(`pick_request` / `reset` は VR にしか無く、PS5 単独では自動シーケンスを
 始められない。`WAITING_FOR_PICK` のままだと VR の `pick_request` でジョグが遮断される)。
+ただし**一度 `pick_request` さえ入れば、そのあとの確定は PS5 の R3 だけで最後まで進む**
+(2026-09-13 に `box_count` 待ちを廃止したため)。
 入っている間は **コントローラのライトバーとプレイヤー LED が白で点滅**する (2.5 の udev ルールが前提)。
 
 ## 7. 当日の調整 (再起動なしで即反映。正本にも同じ値を書くこと)

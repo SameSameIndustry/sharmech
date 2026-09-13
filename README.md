@@ -138,12 +138,13 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 | `/catchrobo/field/cylinders` | `geometry_msgs/PoseArray` | `cylinder_detector_node` → WebXR。**latched**、`scan_interval_sec`毎+手動トリガー | ○ |
 | `/catchrobo/field/rescan_request` | `std_msgs/Empty` | WebXR → `cylinder_detector_node`。手動即時再スキャン | ○ |
 | `/catchrobo/game/pick_request` | `geometry_msgs/PoseStamped` | WebXR → `game_state_manager_node`。選択したワーク姿勢 | ○ |
-| `/catchrobo/game/box_count` | `std_msgs/Int32` | WebXR → `game_state_manager_node`。指定箱に置いた通算個数。`N` → `placement_order[N-1]` のスロットへ置きに行く | ○ |
+| ~~`/catchrobo/game/box_count`~~ | `std_msgs/Int32` | **2026-09-13 廃止。購読するノードは無い** (WebXR は今も publish しているが無害)。置く順番は `placement_order` だけで決まる (`sharmech_core/docs/game_state_manager_node.md`「配置の順番」) | — |
 | `/catchrobo/game/state` | `std_msgs/String` | `game_state_manager_node` → WebXR / `joy_teleop_node` (`MANUAL_CONTROL` 中の LED 表示のみ)。**latched** | ○ |
 | `/catchrobo/game/toggle_manual_control` | `std_msgs/Empty` | `joy_teleop_node` (4ボタン同時押し) / WebXR → `game_state_manager_node`。自由操作 (`MANUAL_CONTROL`) のトグル | ○ |
 | `/catchrobo/game/confirm` | `std_msgs/Empty` | `joy_teleop_node` (確定ボタン) / WebXR (サムズアップ) → `game_state_manager_node`。微調整 (`ADJUSTING_PICK`/`ADJUSTING_PLACE`) の確定 | ○ |
 | `/catchrobo/game/reset` | `std_msgs/Empty` | WebXR → `game_state_manager_node`。状態のリセット要求。どの状態からでも `INIT` へ入り、**初期位置** (`robot_geometry.yaml` の `init_pose`。2026-09-11〜 ROS2 側が正本) へ直線 1 本で戻ってから `WAITING_FOR_PICK` に復帰する | ○ |
 | `/catchrobo/game/finish` | `std_msgs/Empty` | WebXR (メニュー「本番」タブの「終了位置へ」) → `game_state_manager_node`。**競技終了時の終了位置** (`robot_geometry.yaml` の `finish_pose`。r=0.15・θ=0、z は要求時のまま) への移動要求。**導線は `reset` と同じ**でどの状態からでも `FINISH` へ入り、着いても `FINISH` に留まる (2026-09-13)。着いた後はジョグ (`cmd_twist`) が効く (自由操作へ入らなくてよい)。座標は ROS2 側が持ち、VR は合図を送るだけ | ○ |
+| `/catchrobo/game/reset_progress` | `std_msgs/Empty` | WebXR (メニューの「置き直す」) → `game_state_manager_node`。**配置の進み具合のリセット** (次に置くスロットを `placement_order` の先頭へ戻す)。**アームは動かさない** —— 姿勢を戻すのは `reset`、進み具合を戻すのがこちら。運搬中は無視する (2026-09-13 追加。**VR 側は未対応**で、修正プロンプトを別途渡す) | ○ |
 | `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | `game_state_manager_node` → `motion_generator_node`。PLACING/RETRACTING 中にスロット周辺へ作業領域を絞る | |
 | `/catchrobo/game/jog_limit` | `sharmech_msgs/JogLimit` | `game_state_manager_node` → `motion_generator_node`。場面ごとのジョグ速度上限 (微調整中は減速、自動シーケンス中は遮断)。2026-09-10 追加 | |
 | `/catchrobo/debug/change_state` | `std_msgs/String` | デバッグ用 → `game_state_manager_node`。ステートを強制遷移させる (その状態の目標姿勢は配信しない) | ○ |

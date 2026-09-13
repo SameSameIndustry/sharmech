@@ -137,12 +137,18 @@ struct WorkspaceClampCommand
 // 経由点を持つ軌道は作らない、という既存方針 (sharmech/README.md) に合わせ、
 // 各状態のゴールは直線1本のみ (待避点や中間点を挟まない)。
 //
-// **どのスロットへ何個目を置くかは VR の box_count が決める。** VRクライアントは
-// 仮想フィールドの指定箱にワークを離すたびに「通算何個目か」を
-// /catchrobo/game/box_count で送ってくる。本クラスはそれを「置きに行くべき
-// スロット座標のキュー」として保持し (onBoxCount)、キューが空でない間だけ
-// 運搬→設置→退避を自動で進める。**count-1 が常に最新スロットIDの正本**
-// (キュー長 = box_count - 消化済み個数)。
+// **どのスロットへ置くかは placement_order の順番だけで決まる。** 掴んだら
+// そのまま次のスロット (placement_order[order_index_]) へ運び、設置を終えるたびに
+// order_index_ が 1 つ進む。**外部からの「送り出してよい」の合図は要らない**
+// (2026-09-13 ユーザー決定。それまでは VR の /catchrobo/game/box_count が
+// キューを兼ねていたが、ブラウザ再起動や「置き直す」で VR 側のカウントだけが 0 に
+// 戻ると GRASPING から進めなくなる事故が起きたため廃止した。PS5 単独でも
+// 最後まで進められるようになる)。操縦者の関門は ADJUSTING_PICK /
+// ADJUSTING_PLACE の確定 (require_manual_confirm) が担う。
+//
+// **進捗 (order_index_) を 0 に戻す手段は /catchrobo/game/reset_progress
+// (resetProgress。VR の「置き直す」) だけ。** 行き先スロットが無いときの
+// pick_request は掴みに行かず kWaitingForPick で却下する。
 //
 // 仕様の正本: sharmech_core/docs/game_state_manager_node.md
 class GameStateMachine
@@ -244,11 +250,9 @@ public:
   // ノードがこれを呼ぶ (onMotionEnabled の立ち下がり)。ワークを保持していても
   // グリッパは開ける (ユーザー決定 2026-09-11)
   //
-  // **配置の進み具合 (order_index_ / authorized_count_) は消さない。**
-  // 消してしまうと、VR側が持っている通算カウント (box_count) と食い違い、
-  // 次に届いた box_count で既に置いたスロットへもう一度置きに行くことになる。
-  // 「何個目まで置いたか」の正本はあくまで VR の box_count 側にある
-  // (docs/game_state_manager_node.md の「box_count のキュー」参照)。
+  // **配置の進み具合 (order_index_) は消さない。**
+  // 消すと既に缶が入っているスロットへもう一度置きに行くことになる。
+  // 全部やり直したいときは /catchrobo/game/reset_progress (resetProgress)
   void requestInit(double now_sec)
   {
     state_ = GameState::kInit;
@@ -291,7 +295,7 @@ public:
   // reset (→ kInit → kWaitingForPick)、MANUAL_CONTROL (戻りは kFinish)、却下・中断
   // (→ kWaitingForPick。INIT と同じ #9 の扱い)。
   //
-  // **配置の進み具合 (order_index_ / authorized_count_) は消さない** (requestInit と同じ理由)
+  // **配置の進み具合 (order_index_) は消さない** (requestInit と同じ理由)
   void requestFinish()
   {
     state_ = GameState::kFinish;
@@ -309,6 +313,36 @@ public:
     reset_clamp.reset = true;          // PLACING中の絞り込みが残っていても解除する
     pending_clamp_ = reset_clamp;
     // 動作許可待ちの予約は onMotionEnabled の立ち上がりでだけ行う (時刻はそこで貰う)
+  }
+
+  // 配置の進み具合 (order_index_) を 0 に戻す (/catchrobo/game/reset_progress)。
+  // VR の「置き直す」から届く。**アームは動かさない** (pending 出力は一切セットしない)。
+  // 受け付けるのは運搬中でない状態だけ: kWaitingForPick / kComplete / kInit / kFinish /
+  // kManualControl。運搬中 (kApproaching〜kRetracting) に行き先スロットが変わると
+  // enterOrienting のクランプと enterPlacing/enterRetracting のゴールが食い違うため無視する。
+  // kComplete で受けたら kWaitingForPick へ戻す (行き先ができたので掴める)。
+  // kManualControl で受けて復帰先が kComplete なら復帰先も kWaitingForPick にする。
+  // 戻り値: 受け付けたか (ノードがログに出す)
+  bool resetProgress()
+  {
+    switch (state_) {
+      case GameState::kWaitingForPick:
+      case GameState::kInit:
+      case GameState::kFinish:
+        break;
+      case GameState::kComplete:
+        state_ = GameState::kWaitingForPick;
+        break;
+      case GameState::kManualControl:
+        if (pre_manual_state_ == GameState::kComplete) {
+          pre_manual_state_ = GameState::kWaitingForPick;
+        }
+        break;
+      default:
+        return false;   // 運搬中 (kApproaching〜kRetracting)
+    }
+    order_index_ = 0;
+    return true;
   }
 
   // motion_generator_node の動作許可 (/catchrobo/command/cartesian の enable)。
@@ -340,6 +374,10 @@ public:
   void onPickPoseReceived(const CartesianState & pose)
   {
     if (state_ != GameState::kWaitingForPick) {return;}
+    // **行き先スロットが無い (placement_order を使い切った) なら掴みに行かない。**
+    // GRASPING に入ってから待つのではなく、ここで止める。再開は resetProgress()
+    // (/catchrobo/game/reset_progress)
+    if (!currentSlotId()) {return;}
     pick_pose_ = pose;
     pick_pose_.z = config_.pick_z;    // 要求の z は信用しない (上記 Config::pick_z)
     state_ = GameState::kApproaching;
@@ -348,38 +386,6 @@ public:
     pending_goal_ = above;
     pending_gripper_ = false;         // 掴む前は開いている
     pending_orient_vertical_ = false;
-  }
-
-  // VRクライアントが指定箱にワークを離すたびに送ってくる「通算何個目か」(1始まり)。
-  // 受け取った値そのものを正本として扱い、「置きに行くべきスロット」のキューを
-  // 更新する (キュー長 = count - 消化済み個数)。**このイベント自体は動き出しの
-  // 契機ではない**。実際に動くのは kGrasping の dwell 経過後、キューが空でない
-  // ときに kTransporting へ進むところから。
-  //
-  // 飛び・減少・0リセットも一律「その値が正本」として追従する
-  // (VRの再接続やフィールド再設置でカウントが0に戻る実装になっているため)。
-  // **ただし宛先を確定済みのサイクル (kTransportLift/kTransporting/kOrienting/
-  // kPlacing/kRetracting) は中断しない。** 途中でスロットが差し替わると、既に
-  // publish 済みのゴールと退避先の xy がずれて、ワークを保持したまま別の箱の上へ
-  // 動くことになるため。減少がこの5状態中に届いた場合は、そのサイクルを
-  // 最後まで終えてから効く
-  void onBoxCount(int count)
-  {
-    const std::size_t capacity = config_.placement_order.size();
-    authorized_count_ = count <= 0 ? 0 :
-      std::min(static_cast<std::size_t>(count), capacity);
-
-    const bool destination_committed =
-      state_ == GameState::kTransportLift || state_ == GameState::kTransporting ||
-      state_ == GameState::kOrienting ||
-      state_ == GameState::kPlacing || state_ == GameState::kRetracting;
-    if (destination_committed) {return;}
-
-    if (order_index_ > authorized_count_) {order_index_ = authorized_count_;}
-    // 巻き戻しでスロットが復活したら、終了状態から待機へ戻す
-    if (state_ == GameState::kComplete && order_index_ < capacity) {
-      state_ = GameState::kWaitingForPick;
-    }
   }
 
   // 操縦者の「これでよい」。/catchrobo/game/confirm (PS4の確定ボタン、VRのサムズアップ)
@@ -399,12 +405,6 @@ public:
   // 直後の垂直移動 (kTransportLift / kRetracting) の xy にこれを使うことで、
   // 微調整した分だけ横にずれた斜め移動になるのを防ぐ
   void onCurrentPose(const CartesianState & pose) {current_pose_ = pose;}
-
-  // 置きに行くべきスロットがキューに残っているか (box_count が消化済み個数より先行しているか)
-  bool hasQueuedSlot() const {return order_index_ < authorized_count_;}
-
-  // placement_order の長さ。box_count の範囲チェック用にノードから読む
-  std::size_t placementCount() const {return config_.placement_order.size();}
 
   // motion_generator_node の /catchrobo/arm/status で現在のゴールが
   // 到達したことを検知したら呼ぶ
@@ -447,7 +447,6 @@ public:
         break;
       case GameState::kTransporting:
         // スロットの上空へ着いた。降下の前に、その場で縦にする時間を取る。
-        // 「置け」の指示は box_count が既に兼ねている (onBoxCount 参照)
         enterOrienting(now_sec);
         break;
       case GameState::kRetracting:
@@ -492,9 +491,9 @@ public:
     }
   }
 
-  // 経過時間 (grasp dwell / orient dwell) と box_count キューによる遷移を進める。
-  // 定期的に (control loop相当で) 呼ぶ。grasp dwell が経過していても**キューが空の
-  // 間は kGrasping のまま待つ** (掴んだ位置で宛先の指示待ちになる)
+  // 経過時間 (grasp dwell / orient dwell) による遷移を進める。
+  // 定期的に (control loop相当で) 呼ぶ。grasp dwell が経過したら、外部からの合図を
+  // 待たずに kTransportLift へ進む (クラス冒頭のコメント参照)
   void tick(double now_sec)
   {
     // kInit: 動作許可が出てから init_delay_sec 待って初期位置へのゴールを出す
@@ -509,7 +508,12 @@ public:
       sendFinishGoal();
       return;
     }
-    if (state_ == GameState::kGrasping && hasQueuedSlot() &&
+    // **行き先のスロットが残っているときだけ動き出す。** 行き先無しの pick_request は
+    // onPickPoseReceived で却下済みなので通常ここへは来ないが、**実行中の setConfig で
+    // placement_order が縮んだ場合**の二重の安全として残す。進ませると currentSlotId()
+    // が空なので運搬先が pick_pose_ にフォールバックし、**掴んだ場所へ缶を持ち帰って
+    // 落とす**ことになる。置き場所が無いときは掴んだ位置で待つのが正しい
+    if (state_ == GameState::kGrasping && currentSlotId().has_value() &&
       now_sec - grasp_start_sec_ >= config_.grasp_dwell_sec)
     {
       // 斜めに持ち上げると缶を引きずるので、まず掴んだ場所で真上に上げる。
@@ -772,7 +776,6 @@ private:
   GameState state_{GameState::kWaitingForPick};
   GameState pre_manual_state_{GameState::kWaitingForPick};  // toggleManualControl の復帰先
   std::size_t order_index_{0};       // 消化済み個数 = 次に置くスロットのキュー先頭
-  std::size_t authorized_count_{0};  // 直近の box_count (キュー末尾。count-1 が最新スロットID)
   CartesianState pick_pose_{};
   double grasp_start_sec_{0.0};
   double orient_start_sec_{0.0};   // kOrienting に入った時刻。orient dwell 判定に使う

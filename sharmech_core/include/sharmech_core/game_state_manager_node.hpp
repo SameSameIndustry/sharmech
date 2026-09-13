@@ -12,7 +12,6 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
-#include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <sharmech_msgs/msg/cartesian_command.hpp>
 #include <sharmech_msgs/msg/motion_status.hpp>
@@ -37,8 +36,6 @@ namespace sharmech_core
 // 仕様の正本: sharmech_core/docs/game_state_manager_node.md
 //
 // Sub: /catchrobo/game/pick_request   (geometry_msgs/PoseStamped) VRで選択したワーク姿勢
-// Sub: /catchrobo/game/box_count      (std_msgs/Int32) VRの指定箱にワークを離した通算個数。
-//      置きに行くべきスロット座標のキューになる (count-1 が最新スロットIDの正本)
 // Sub: /catchrobo/arm/status          (sharmech_msgs/MotionStatus) ゴール到達/却下の検知
 // Pub: /catchrobo/arm/target_pose     自動シーケンスのゴール
 // Pub: /catchrobo/arm/gripper         自動シーケンスのグリッパ指令
@@ -52,6 +49,8 @@ namespace sharmech_core
 //      どの状態からでも INIT へ入り、初期位置 (init_pose_*) へ戻ってから WAITING_FOR_PICK に復帰する
 // Sub: /catchrobo/game/finish         (std_msgs/Empty) 競技終了時の終了位置 (finish_pose_*) への
 //      移動要求。reset と同じ導線でどの状態からでも FINISH へ入り、着いても FINISH に留まる
+// Sub: /catchrobo/game/reset_progress (std_msgs/Empty) 配置の進み具合のリセット。
+//      VR の「置き直す」から届く。**アームは動かさない** (次に置くスロットを先頭へ戻すだけ)
 // Sub: /catchrobo/command/cartesian   現在の目標姿勢 (微調整の起点) と動作許可 enable。
 //      enable の立ち上がりで INIT が初期位置へ動き出し、立ち下がり (MCU 未初期化・
 //      フィードバック途絶) でどの状態からでも INIT へ入る
@@ -62,7 +61,6 @@ public:
 
 private:
   void onPickRequest(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
-  void onBoxCount(const std_msgs::msg::Int32::SharedPtr msg);
   void onArmStatus(const sharmech_msgs::msg::MotionStatus::SharedPtr msg);
   // デバッグ用。任意のステートへ強制遷移する (目標姿勢は配信しない)
   void onChangeStateRequest(const std_msgs::msg::String::SharedPtr msg);
@@ -75,6 +73,9 @@ private:
   // 競技終了時の終了位置への移動要求。reset と同じくどの状態からでも FINISH へ入り、
   // 終了位置へのゴールを 1 本出す (詳細は GameStateMachine::requestFinish() のコメント参照)
   void onFinishRequest(const std_msgs::msg::Empty::SharedPtr msg);
+  // 配置の進み具合のリセット。VR の「置き直す」から届く。アームは動かさない
+  // (詳細は GameStateMachine::resetProgress() のコメント参照)
+  void onResetProgress(const std_msgs::msg::Empty::SharedPtr msg);
   // 操縦者の確定 (微調整の完了)。ADJUSTING_PICK / ADJUSTING_PLACE でのみ効く
   void onConfirm(const std_msgs::msg::Empty::SharedPtr msg);
   // motion_generator の現在の目標姿勢と動作許可 (enable)。姿勢は微調整でジョグした
@@ -99,7 +100,6 @@ private:
   // パラメータ (等長の配列) からスロット姿勢の一覧を組み立てる
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pick_sub_;
-  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr box_count_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr confirm_sub_;
   rclcpp::Subscription<sharmech_msgs::msg::CartesianCommand>::SharedPtr command_cartesian_sub_;
   rclcpp::Subscription<sharmech_msgs::msg::MotionStatus>::SharedPtr status_sub_;
@@ -118,6 +118,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr toggle_manual_control_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr finish_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_progress_sub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
@@ -158,9 +159,6 @@ private:
   // /catchrobo/arm/status は status_rate で常時流れてくるため、
   // last_result が変化した瞬間だけをイベントとして扱うための直近値
   uint8_t prev_last_result_{sharmech_msgs::msg::MotionStatus::RESULT_NONE};
-  // 直近の box_count。+1 以外の変化 (飛び・減少・0リセット) を警告するためだけに持つ。
-  // 追従自体は GameStateMachine::onBoxCount が受け取った値をそのまま正本として行う
-  int prev_box_count_{0};
 };
 
 }  // namespace sharmech_core
