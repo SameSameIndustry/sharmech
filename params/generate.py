@@ -191,6 +191,12 @@ def ros_sections(p: Params):
             ("init_pose_r_blue", p.get("init_pose.r_blue")),
             ("init_pose_theta_blue", p.get("init_pose.theta_blue")),
             ("init_pose_z_blue", p.get("init_pose.z_blue")),
+            # 終了位置 (/catchrobo/game/finish の行き先。どの状態からでも。2026-09-13)。
+            # init_pose と同じ極座標。z は持たない (要求時点の目標姿勢の z を保つ)
+            ("finish_pose_r_red", p.get("finish_pose.r_red")),
+            ("finish_pose_theta_red", p.get("finish_pose.theta_red")),
+            ("finish_pose_r_blue", p.get("finish_pose.r_blue")),
+            ("finish_pose_theta_blue", p.get("finish_pose.theta_blue")),
             # 上の極座標の原点。hardware_bridge_node へ渡すのと同じ値
             ("turntable_axis_x_m", p.get("kinematics.turntable_axis_x_m")),
             ("turntable_axis_y_m", p.get("kinematics.turntable_axis_y_m")),

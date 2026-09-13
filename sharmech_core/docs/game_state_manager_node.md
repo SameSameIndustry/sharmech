@@ -57,6 +57,7 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 | `/catchrobo/arm/status` | `sharmech_msgs/MotionStatus` | `motion_generator_node` の状態。`last_result` の変化でゴール到達/却下を検知する |
 | `/catchrobo/game/toggle_manual_control` | `std_msgs/Empty` | `joy_teleop_node` が DualSense の4ボタン同時押しを検知して publish。**どの状態からでもトグルできる** (下記「自由操作」節) |
 | `/catchrobo/game/reset` | `std_msgs/Empty` | 状態のリセット要求(VRメニューの「ステートリセット」)。**どの状態からでも** `kInit` へ入り、**初期位置 (`init_pose_*`) へ直線 1 本のゴールを出す** (2026-09-11〜。それ以前は MCU 側の初期関節角へ UDP bit2 で戻していた)。到達したら `kWaitingForPick` へ復帰する(下記「初期位置と状態のリセット」) |
+| `/catchrobo/game/finish` | `std_msgs/Empty` | **競技終了時の終了位置への移動要求** (VRメニュー「本番」タブの「終了位置へ」。2026-09-13)。**導線は `reset` と同じ**: どの状態からでも `kFinish` へ入り、終了位置 (`finish_pose_*` の xy。**z は要求時点の目標姿勢のまま**) へ直線 1 本のゴールを出す。グリッパ開 + 縦解除 + クランプ解除も同時発行。動作許可が出ていれば**即**出し (`init_delay_sec` は待たない)、まだなら立ち上がり + `init_delay_sec` で出す。**着いても `kFinish` に留まる** (`kWaitingForPick` へは戻さない。下記「終了位置」節) |
 | `/catchrobo/game/confirm` | `std_msgs/Empty` | **微調整の確定。** `kAdjustingPick` / `kAdjustingPlace` でのみ有効で、それ以外の状態では無視する。`joy_teleop_node` の確定ボタン (既定R3) と VR のサムズアップが、どちらもここへ publish する契約 |
 | `/catchrobo/command/cartesian` | `sharmech_msgs/CartesianCommand` | `motion_generator_node` が `control_rate` (既定10Hz) で出す現在の目標姿勢と**動作許可 (`enable`)**。姿勢は**微調整でジョグした結果を知るために**購読し (publish はしない)、直後の垂直移動の起点に使う。`enable` の **false → true の立ち上がり**は「`motion_generator_node` が MCU の実姿勢へ同期し終えた = 動かしてよい」の合図で、`kInit` はこれを待ってから動き出す (2026-09-11 追加) |
 | `/catchrobo/debug/change_state` | `std_msgs/String` | デバッグ専用。状態名 (`"APPROACHING"` 等) を受けて `forceState()` で強制的にその状態へ飛ばす。ゴール・グリッパ・クランプは一切 publish しない (その状態の見た目だけを確認したいとき用)。未知の状態名は無視して警告ログを出す |
@@ -108,6 +109,8 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 | `turntable_axis_x_m` / `_y_m` | 0.0 / 0.0 (未実測) | 上の極座標の原点 = ターンテーブル回転軸の位置 [m]。`hardware_bridge_node` と同じ値が `robot_geometry.yaml` の `kinematics` から生成される |
 | `init_on_startup` | true | true: 起動直後に `kInit` から始まり、動作許可が出て `init_delay_sec` 後に初期位置へ動く (**起動しただけでアームが動く**) / false: 従来どおり `kWaitingForPick` から始まる。**起動時にだけ読む** (`ros2 param set` では変えられない) |
 | `init_delay_sec` | 3.0 | `kInit` で動作許可 (`enable`) が出てから、実際に初期位置へのゴールを出すまでの待ち [s] (2026-09-11 ユーザー指示。同期した瞬間に動き出さず一呼吸置く)。`reset` でも同じ。0 以上。実行中に変えられる (次の `INIT` から) |
+| `finish_pose_r_red` / `_blue` | 0.15 (コード上の `declare_parameter` 既定は 0.0 で、これは起動時に弾かれる) | **終了位置の r [m]** (2026-09-13)。ターンテーブル軸からの距離。**正本は `robot_geometry.yaml` の `finish_pose` セクション** (生成物経由)。実行中に `ros2 param set` で変えられる (次の `finish` から効く) |
+| `finish_pose_theta_red` / `_blue` | 0.0 | 終了位置の θ [rad]。`init_pose_theta_*` と同じ向き (+X から時計回りが正)。**z のパラメータは無い** (要求時点の目標姿勢の z を保つ。ユーザー指示 2026-09-12) |
 | `field_origin_offset_x_m` / `_y_m` | 0.0 / 0.0 | 本番設置での原点ズレ補正 [m]。読み込んだスロット座標全体をこの分だけ平行移動する。`motion_generator_node` と同じ値を使う想定 |
 
 > **名前について。** 本ドキュメントの状態遷移の説明に出てくる
@@ -216,9 +219,13 @@ stateDiagram-v2
   INIT --> WAITING_FOR_PICK: ゴール到達 (初期位置)
   INIT --> MANUAL_CONTROL: 4ボタン同時押し (戻りは WAITING_FOR_PICK)
   WAITING_FOR_PICK --> INIT: enable の立ち下がり (MCU 未初期化・フィードバック途絶)
+  WAITING_FOR_PICK --> FINISH: finish 受信 (競技終了。どの状態からでも)
+  FINISH --> FINISH: ゴール到達 (終了位置。そのまま留まる)
+  FINISH --> INIT: reset 受信
+  FINISH --> MANUAL_CONTROL: 4ボタン同時押し (戻りは FINISH)
 ```
 
-**簡略化の注記:** `MANUAL_CONTROL` と `INIT` は図では `WAITING_FOR_PICK` からのみ
+**簡略化の注記:** `MANUAL_CONTROL`・`INIT`・`FINISH` は図では `WAITING_FOR_PICK` からのみ
 描いているが、実際は `APPROACHING`/`GRASPING`/`TRANSPORTING`/`PLACING`/`RETRACTING`/
 `COMPLETE` を含む**どの状態からでも**入れる。`MANUAL_CONTROL` はトグルし直すと
 退避していたその状態へ戻る (`GRASPING` 中に入った場合は dwell タイマーも入れ直す)。
@@ -248,12 +255,15 @@ stateDiagram-v2
 | 6 | `kPlacing` → `kRetracting` | `last_result = SUCCEEDED` | グリッパ open・クランプ解除を同時発行 |
 | 7 | `kRetracting` → `kWaitingForPick` | `last_result = SUCCEEDED` かつ 未処理のスロットが残っている | 次のスロットへ進む |
 | 8 | `kRetracting` → `kComplete` | `last_result = SUCCEEDED` かつ `placement_order` を使い切った | 全24箇所完了 |
-| 9 | `kApproaching`/`kApproachDescend`/`kGrasping`/`kTransportLift`/`kTransporting`/`kOrienting`/`kPlacing`/`kRetracting`/`kInit` → `kWaitingForPick` | `last_result = REJECTED`/`ABORTED` | 安全側フォールバック。`kWaitingForPick`/`kComplete`/`kManualControl` 中は対象外。グリッパを開き直す処理・ピッチを横へ戻す処理は無い (「既知の未対応」参照) |
+| 9 | `kApproaching`/`kApproachDescend`/`kGrasping`/`kTransportLift`/`kTransporting`/`kOrienting`/`kPlacing`/`kRetracting`/`kInit`/`kFinish` → `kWaitingForPick` | `last_result = REJECTED`/`ABORTED` | 安全側フォールバック。`kWaitingForPick`/`kComplete`/`kManualControl` 中は対象外。グリッパを開き直す処理・ピッチを横へ戻す処理は無い (「既知の未対応」参照) |
 | 10 | 任意の状態 ⇄ `kManualControl` | `/catchrobo/game/toggle_manual_control` | `kComplete` からも可。復帰時は退避先の状態へ。クランプは必ずデフォルトへ |
 | 11 | 任意の状態 → 任意の状態 (デバッグ専用) | `/catchrobo/debug/change_state` | ゴール/グリッパ/クランプは一切publishしない。未知の状態名は無視+警告 |
 | 12 | 任意の状態 → `kInit` | `/catchrobo/game/reset`、`init_on_startup=true` での起動、**`enable` の立ち下がり** (MCU 未初期化 bit3・フィードバック途絶 500ms) | `kManualControl`/`kComplete` からも可。グリッパ開 + 縦解除 + クランプ解除を同時発行する (起動時は初期状態なので何も出さない)。初期位置 (`init_pose_*`) へ**直線 1 本**のゴールを、動作許可 (`enable`) が出てから **`init_delay_sec` 後**に出す。**まだ出ていなければ出さずに待ち**、立ち上がり + `init_delay_sec` で出す。**配置の進み具合(`box_count` のキュー)は消さない** |
 | 13 | `kInit` → `kWaitingForPick` | `last_result = SUCCEEDED` (ゴールを出した後のもの) | 初期位置に着くと、通常どおり `pick_request` を受けられる。却下・中断 (cancel) は #9 と同じ扱い。ゴールを出す前に届いた到達・却下 (途絶で中断された直前のゴールの結果、latched の古い status 等) は無視する |
 | 14 | `kManualControl` → `kWaitingForPick` | トグル解除時に退避先が `kInit` だった | 自由操作は `INIT` の出口の 1 つ。戻ったときに途中だった初期位置への移動を再開しない |
+| 15 | 任意の状態 → `kFinish` | `/catchrobo/game/finish` (2026-09-13) | **#12 と同じ導線。** `kManualControl`/`kComplete`/`kInit` からも可。グリッパ開 + 縦解除 + クランプ解除を同時発行し、終了位置 (`finish_pose_*` の xy + 要求時点の目標姿勢の z、pitch/yaw = 0) へ**直線 1 本**のゴールを出す。動作許可が出ていれば**即** (`init_delay_sec` を待たない)、まだなら立ち上がり + `init_delay_sec` で出す。**配置の進み具合は消さない** |
+| 16 | `kFinish` → `kFinish` | `last_result = SUCCEEDED` (ゴールを出した後のもの) | 終了位置に着いた。**待機へは戻さず留まる** (競技は終わっているので `pick_request` を受ける状態にしない)。ゴールを出す前・着いた後に届いた到達・却下は無視する (#13 と同じ) |
+| 17 | `kManualControl` → `kFinish` | トグル解除時に退避先が `kFinish` だった | `INIT` (#14) と違い**そのまま戻す** (着いた後の状態でもあるため)。戻ってもゴールは出さず、走っていたゴールの結果も無視する。却下・中断は #9 で `kWaitingForPick` へ |
 
 **状態遷移の条件が変わったら、上の図と表を書き直すこと。** 正本は
 [`game_state_machine.hpp`](../include/sharmech_core/utility/game_state_machine.hpp) と
@@ -275,6 +285,7 @@ stateDiagram-v2
 | `kComplete` | `placement_order` を使い切った。以降 `pick_request` は無視される(実質的な終了状態)。ただし `box_count` が巻き戻ると `kWaitingForPick` へ復帰する |
 | `kManualControl` | 自動シーケンス停止。**どの状態からでもトグルで入り、再度トグルで元の状態に戻る**(下記「自由操作」節) |
 | `kInit` | 初期位置 (`init_pose_*`) へ **直線 1 本で動かしている最中**。グリッパは開・縦は解除・作業領域クランプはデフォルト。動作許可 (`enable`) が出るまでは動かずに待つ。到達したら `kWaitingForPick` へ(下記「初期位置と状態のリセット」節) |
+| `kFinish` | 競技終了時の終了位置 (`finish_pose_*` の xy。z は要求時のまま) へ **直線 1 本で動かしている最中、および着いた後**。グリッパは開・縦は解除・クランプはデフォルト (`kInit` と同じ)。着いてもここに留まり、`pick_request` は受けない。**ジョグは許可** (`jog_limit` は `reset`。着いた後は自由操作へ入らなくても `cmd_twist` で動かせる。移動中は `goal_priority` がゴールを優先する)。出口は `reset`・`MANUAL_CONTROL`・却下/中断 (下記「終了位置」節) |
 
 **すべての状態遷移のゴールは直線1本のみ。** 経由点を持つ軌道は作らない、という
 `sharmech/README.md` の既存方針をこの自動シーケンスにもそのまま適用している。
@@ -469,6 +480,46 @@ Z方向の寸法が実測できたら、`kTransporting` 中に回して dwell �
 把握していたスロット割付のまま自動シーケンスが再開される。これは既知の制限であり、
 VR復旧後に不整合が疑われる場合は運用側で判断すること。
 
+## 終了位置 (`FINISH`、2026-09-13)
+
+ルールの「競技終了」(競技時間 3 分経過: 動作を停止し、審判の許可のもと**非常停止を
+入れても安全な位置までロボットを移動させる**) に備え、アームを決まった位置へボタン 1 つで
+寄せるための状態。VR のメニュー「本番」タブの「終了位置へ」が `/catchrobo/game/finish`
+(`std_msgs/Empty`) を送り、本ノードが `GameStateMachine::requestFinish()` を呼ぶ。
+
+**導線は `INIT` (`/catchrobo/game/reset`) の写し**で、違いは 2 点だけ。
+
+| | `INIT` (`reset`) | `FINISH` (`finish`) |
+|---|---|---|
+| 入れる状態 | どこからでも | どこからでも (同じ) |
+| 同時発行 | グリッパ開・縦解除・クランプ解除 | 同じ |
+| ゴール | `init_pose` (r/θ/z)、pitch/yaw = 0 | `finish_pose` の xy + **要求時点の目標姿勢の z**、pitch/yaw = 0 |
+| 出すタイミング | 動作許可の立ち上がり + `init_delay_sec` | 許可が出ていれば**即**。まだなら立ち上がり + `init_delay_sec` (同じ間) |
+| 到達後 | `WAITING_FOR_PICK` へ | **`FINISH` のまま** |
+| `MANUAL_CONTROL` からの戻り | `WAITING_FOR_PICK` | **`FINISH`** (ゴールは出さない) |
+| 却下・中断 | `WAITING_FOR_PICK` (#9) | 同じ |
+| z 速度の絞り (`init_v_max_z`) | 掛ける | 掛けない (z が動かない) |
+| ジョグ (`jog_limit`) | 遮断 (`block`) | **許可** (`reset`。着いてから効く) |
+
+- **行き先は `robot_geometry.yaml` の `finish_pose`** (`init_pose` と同じ極座標 r/θ、赤・青別。
+  既定 r=0.15, θ=0 はユーザー指示 2026-09-12)。ノードが `PolarUtils` で直交座標へ直し、
+  `field_origin_offset` は掛けない。**z は持たない** (ユーザー指示「z はまずは変えなくていい」。
+  `/catchrobo/command/cartesian` で追っている現在の目標姿勢の z をそのまま使う。目標姿勢が
+  未受信なら `init_pose` の z だが、動作許可と目標姿勢は同じメッセージで届くのでノード経由では起きない)
+- **座標は VR に持たせない。** VR は「その状態へ遷移しろ」という空メッセージを送るだけで、
+  `reset` と同じく `game/state` が `FINISH` に変わったことで届いたと判断し、変わらなければ再送する
+- **着いても `WAITING_FOR_PICK` へ戻さない。** 競技は終わっているので `pick_request` を受ける
+  状態にしない。次の試合・練習は `reset` (→ `INIT` → `WAITING_FOR_PICK`) から
+- **ジョグは許可する** (`jog_limit` は待機・自由操作・完了と同じ `reset`。ユーザー指示
+  2026-09-13)。着いた後、自由操作へ入らなくても VR / PS5 の `cmd_twist` でそのまま動かせる
+  (審判の指示で位置を直す等)。**終了位置へ移動している最中は効かない** ——
+  `motion_generator_node` の `goal_priority` がゴール実行中の Twist を捨てるため。
+  移動を途中で止めたければ従来どおり `MANUAL_CONTROL` へ入る
+- 掴んでいたワークは離す (`INIT` と同じ同時発行)。競技終了後なので得点には響かず、
+  掴んだまま・縦のまま・クランプが絞られたままだと終了位置へ動けない/危ない方を避けた
+- `enable` の立ち下がり (途絶) は `FINISH` からでも `INIT` へ (#12)。`/catchrobo/debug/change_state`
+  で `FINISH` へ飛ばしても動かない (`forceState` はゴールを出さない)
+
 ## 初期位置と状態のリセット (`INIT`)
 
 **初期位置は 2026-09-11 に ROS2 側へ移った。** それ以前 (2026-09-10) は MCU 側の
@@ -621,6 +672,8 @@ ROS に依存しない純粋ロジックとして `utility/game_state_machine.hp
 | `motion_enabled_` | 直近の動作許可 (`enable`)。未受信なら false。**false → true の立ち上がり**で `kInit` のゴールを出し、**true → false の立ち下がり**で `kInit` へ入る (2026-09-11 追加) |
 | `init_goal_sent_` | `kInit` で初期位置へのゴールを出したか。出す前に届いた到達・却下は無視する (同上) |
 | `init_goal_due_sec_` | `kInit` でゴールを出す予定時刻 (動作許可が出た時刻 + `init_delay_sec`)。予約が無ければ `nullopt` |
+| `finish_goal_sent_` | `kFinish` で終了位置へのゴールを出したか (着いたら false)。出す前・着いた後に届いた到達・却下は無視する (2026-09-13) |
+| `finish_goal_due_sec_` | `kFinish` で動作許可待ちのままゴールを出す予定時刻。予約が無ければ `nullopt` |
 | `pending_*` | 状態遷移の直後にのみセットされる「まだ publish していない指令」。ノード側が読んで publish したら消費(consume)する (edge-triggered) |
 
 `pending_*` を edge-triggered にしているのは、**同じゴールを毎周期 publish すると
@@ -638,6 +691,7 @@ ROS に依存しない純粋ロジックとして `utility/game_state_machine.hp
 | `field_color` が `red`/`blue` 以外、または未指定 | 起動時に例外を投げてノード起動失敗 (fail-fast) |
 | `slot_x/y/z_<color>` が空または長さ不一致 | 同上 |
 | `placement_order` が空、または範囲外のIDを含む | 同上 |
+| `finish_pose_r_<color>` が 0 以下 / 非有限、`theta` が非有限 | 同上 (2026-09-13 追加)。既定の 0.0 のまま = 生成物が古い |
 | `init_pose_r_<color>` が 0 以下 / 非有限、`theta`/`z` が非有限 | 同上 (2026-09-11 追加)。既定の 0.0 のまま = `robot_geometry.generated.yaml` が古いか読まれていない。メッセージに `generate.py` の実行を促す一文が入る |
 | `kInit` で動作許可 (`enable`) がいつまでも立たない | **`INIT` のまま待ち続ける** (ゴールを出さないのでアームは動かない)。MCU が 0x81 を返していないか、bit3 (未初期化) が落ちていない。`ros2 topic echo /catchrobo/arm/mcu_status` で確認する |
 | 動作許可 (`enable`) が true → false に落ちた (MCU 未初期化・フィードバック途絶 500ms) | **どの状態からでも `kInit` へ** (グリッパ開・縦解除・クランプ解除)。復帰して `enable` が立ち上がると初期位置へ動く (2026-09-11) |
@@ -696,6 +750,13 @@ ROS トピックとの薄い橋渡し層に徹する。
 グリッパを開くこと・その前後に届く古い到達/却下を無視すること**・到達で
 `kWaitingForPick` へ戻ること・`kManualControl` へ入って戻ると `kWaitingForPick` に
 なること・`forceState(kInit)` では動かないこと・却下時の復帰・配置の進み具合を消さないこと。
+**2026-09-13 に `FINISH` の一式を追加した**: どの状態からでも入り即ゴールが出ること
+(xy = `finish_pose`・z = 現在の目標姿勢・pitch/yaw = 0、グリッパ開・縦解除・クランプ解除)・
+着いても `kFinish` に留まり `pick_request` を無視すること・動作許可待ちなら立ち上がり +
+`init_delay_sec` で出ること・目標姿勢未受信時の z のフォールバック・`kManualControl`/`kComplete`
+からも入れること・却下で `kWaitingForPick` へ落ちること・`reset` で `kInit` へ抜けること・
+`kManualControl` の往復で `kFinish` へ戻り動かないこと・`forceState(kFinish)` では動かないこと・
+配置の進み具合を消さないこと・状態名の往復。
 `test_motion_generator_node.cpp` には `/catchrobo/game/workspace_clamp` の上書き・reset・
 **フィードバック途絶での同期取消 (enable=0・ゴール ABORTED・復帰後の再同期)**・
 長さ 0 のゴールで NONE → SUCCEEDED の両方が届くことの回帰テストがある。

@@ -150,6 +150,11 @@ soon as motion is enabled` (WARN)、同期した瞬間に `INIT: motion enabled;
 #   箱の中など周囲に当たりそうな位置からは、先に MANUAL_CONTROL のジョグで抜いてから)
 ros2 topic pub --once /catchrobo/game/reset std_msgs/msg/Empty '{}'
 
+# 競技終了時に終了位置へ寄せる (robot_geometry.yaml の finish_pose。r=0.15, θ=0、z はそのまま)。
+#   reset と同じ導線で、どの状態からでも可。掴んでいたワークは離す。着いても FINISH のまま
+#   (着いた後は自由操作へ入らなくてもジョグで動かせる。次の試合は reset で INIT → WAITING_FOR_PICK へ)
+ros2 topic pub --once /catchrobo/game/finish std_msgs/msg/Empty '{}'
+
 # 微調整 (ADJUSTING_PICK / ADJUSTING_PLACE) の確定
 ros2 topic pub --once /catchrobo/game/confirm std_msgs/msg/Empty '{}'
 

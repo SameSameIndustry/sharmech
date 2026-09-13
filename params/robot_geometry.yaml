@@ -406,11 +406,11 @@ field_origin_offset:
 #   (決まるまで動かしたくなければ config.yaml の game_state_manager_node.init_on_startup: false)。
 init_pose:
   r_red:
-    value: 0.20
+    value: 0.30
     unit: m
     status: estimate
-    source: "実機で調整 (ユーザー指示 2026-09-12。0.02 → 0.20。機構の最小 r は 0.02 と実測)"
-    date: 2026-09-12
+    source: "実機で調整 (ユーザー指示 2026-09-13。0.02 → 0.20 → 0.30。機構の最小 r は 0.02 と実測)"
+    date: 2026-09-13
     note: "ターンテーブル軸からの距離。起動直後にここへ動く"
   theta_red:
     value: 2.356194   # = 135 deg (3π/4)
@@ -426,11 +426,11 @@ init_pose:
     source: "実機で調整 (ユーザー指示、0.15 → 0.20)"
     date: 2026-09-12
   r_blue:
-    value: 0.20
+    value: 0.30
     unit: m
     status: estimate
-    source: "実機で調整 (ユーザー指示 2026-09-12。0.02 → 0.20。機構の最小 r は 0.02 と実測)"
-    date: 2026-09-12
+    source: "実機で調整 (ユーザー指示 2026-09-13。0.02 → 0.20 → 0.30。機構の最小 r は 0.02 と実測)"
+    date: 2026-09-13
   theta_blue:
     value: -2.356194   # = -135 deg (赤 +135° の鏡映)
     unit: rad
@@ -442,4 +442,44 @@ init_pose:
     unit: m
     status: estimate
     source: "赤と同じ (ユーザー指示、0.15 → 0.20)"
+    date: 2026-09-12
+
+# -----------------------------------------------------------------------------
+# 終了位置 (/catchrobo/game/finish で ROS2 が動かす先。2026-09-13〜)
+# -----------------------------------------------------------------------------
+# 競技終了時 (ルール V「競技終了」: 動作を停止し、審判の許可のもと非常停止を入れても
+# 安全な位置へ移動) にアームを寄せる姿勢。init_pose と同じ極座標 (原点 = ターンテーブル軸、
+# θ は +X から時計回り正 [rad])。**z は持たない** —— 要求時点の目標姿勢の z をそのまま保つ
+# (ユーザー指示 2026-09-12「z はまずは変えなくていい」。必要になったら init_pose と同じ
+# z_red / z_blue を足し、generate.py と game_state_manager_node の finish_pose_z_* を追従させる)。
+# game_state_manager_node が直交座標 (xy) へ直し、FINISH で直線 1 本のゴールを出す。
+# 導線は /catchrobo/game/reset (INIT) と同じで、VR のメニュー「本番」タブの「終了位置へ」
+# → /catchrobo/game/finish を**どの状態からでも**受け付ける。
+# 実行中は ros2 param set /game_state_manager_node finish_pose_*。
+finish_pose:
+  r_red:
+    value: 0.15
+    unit: m
+    status: decision
+    source: "ユーザー指示 2026-09-12 (r=0.15, θ=0)"
+    date: 2026-09-12
+    note: "ターンテーブル軸からの距離。競技終了時にここへ寄せる"
+  theta_red:
+    value: 0.0
+    unit: rad
+    status: decision
+    source: "ユーザー指示 2026-09-12 (r=0.15, θ=0)"
+    date: 2026-09-12
+    note: "+X から時計回りが正 (0.0 = +X 方向)"
+  r_blue:
+    value: 0.15
+    unit: m
+    status: decision
+    source: "赤と同じ (ユーザー指示 2026-09-12)"
+    date: 2026-09-12
+  theta_blue:
+    value: 0.0
+    unit: rad
+    status: decision
+    source: "赤の鏡映 (θ_blue = −θ_red)。θ=0 なので同値"
     date: 2026-09-12

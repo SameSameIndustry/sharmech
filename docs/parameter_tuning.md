@@ -277,6 +277,7 @@ init pose (red): r=0.300 theta=0.785 z=0.150 (axis=(0.000, 0.000)) -> base (0.21
 | 6 | 運搬中に何かに当たる | `shooting_box.transport_clearance_above_top_m` (approach / retract も同じ値に) | ○ |
 | 7 | ワークが想定位置に無い | perception が検出するので通常は不要。初期配置の外形 (VR の表示範囲) は `work_placement.*` | — (要再生成) |
 | 8 | 起動直後 / リセットで戻る姿勢を変えたい | `init_pose.r_red / theta_red / z_red` (青は `*_blue`)。極座標 (原点 = ターンテーブル軸、θ は時計回り正)。決め方は §4.5 | ○ (次の `INIT` から) |
+| 9 | 競技終了時に寄せる位置 (VR「本番」タブの「終了位置へ」) を変えたい | `finish_pose.r_red / theta_red` (青は `*_blue`)。`init_pose` と同じ極座標。**z は無い** (要求時の高さのまま) | ○ (次の `finish` から) |
 
 1 を先にやる理由: 2 以降は 1 で決めた原点の上に乗るため、後から 1 を変えると 2〜6 を
 やり直すことになる。
@@ -295,6 +296,7 @@ init pose (red): r=0.300 theta=0.785 z=0.150 (axis=(0.000, 0.000)) -> base (0.21
 | `kinematics.shoulder_*` / `knee_*` / `knee_base_height_m` | `kinematics_node.<同名>` | `PARALLEL_ARM.shoulder.{pivotHalfSeparation, proximalLinkLength, distalLinkLength}` 等 | × (再起動) |
 | `kinematics.turntable_axis_x_m / y_m` | `hardware_bridge_node.<同名>` (UDP 極座標の原点)・`kinematics_node.<同名>` (パターンB)・`game_state_manager_node.<同名>` (`init_pose` の極座標の原点。2026-09-11〜) の**3つ**へ同じ値 | `PARALLEL_ARM.turntableAxisX / Y` | ○ `hardware_bridge_node` (停止中に)・`game_state_manager_node` / × `kinematics_node` |
 | `init_pose.r_red / theta_red / z_red`、`*_blue` | `game_state_manager_node.init_pose_r_red / init_pose_theta_red / init_pose_z_red`、`*_blue` (2026-09-11〜) | (生成しない。sim の `actuator.initPosePolar` は MCU 代役の**電源投入位置**であって、ROS2 の `init_pose` とは別物) | ○ (次の `INIT` から) |
+| `finish_pose.r_red / theta_red`、`*_blue` | `game_state_manager_node.finish_pose_r_red / finish_pose_theta_red`、`*_blue` (2026-09-13〜。競技終了時の `FINISH` の行き先。z は持たない) | (生成しない。VR は `/catchrobo/game/finish` の合図を送るだけで座標を持たない) | ○ (次の `finish` から) |
 | `workspace.x_min_m` … `z_max_m` | `motion_generator_node.workspace_x_min` … | `WORKSPACE.{xMin … zMax}` | ○ |
 | `cylinder.radius_m` / `length_m` | `game_state_manager_node.cylinder_diameter_m` (= 2 × radius) | `CYLINDER.{radius, length}`、`REAL_FIELD` (派生) | ○ |
 | `shooting_box.center_x_red` 等 | `game_state_manager_node.box_center_x_red` 等 | `SHOOTING_BOX.centerXRed` 等 | ○ |

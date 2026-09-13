@@ -50,6 +50,8 @@ namespace sharmech_core
 //      (L1+R1+L3+R3) で joy_teleop_node が publish する、自由操作の入/切トグル
 // Sub: /catchrobo/game/reset          (std_msgs/Empty) 状態のリセット要求。
 //      どの状態からでも INIT へ入り、初期位置 (init_pose_*) へ戻ってから WAITING_FOR_PICK に復帰する
+// Sub: /catchrobo/game/finish         (std_msgs/Empty) 競技終了時の終了位置 (finish_pose_*) への
+//      移動要求。reset と同じ導線でどの状態からでも FINISH へ入り、着いても FINISH に留まる
 // Sub: /catchrobo/command/cartesian   現在の目標姿勢 (微調整の起点) と動作許可 enable。
 //      enable の立ち上がりで INIT が初期位置へ動き出し、立ち下がり (MCU 未初期化・
 //      フィードバック途絶) でどの状態からでも INIT へ入る
@@ -70,6 +72,9 @@ private:
   // 状態のリセット要求。どの状態からでも INIT へ入り、初期位置へのゴールを 1 本出す
   // (詳細は GameStateMachine::requestInit() のコメント参照)
   void onResetRequest(const std_msgs::msg::Empty::SharedPtr msg);
+  // 競技終了時の終了位置への移動要求。reset と同じくどの状態からでも FINISH へ入り、
+  // 終了位置へのゴールを 1 本出す (詳細は GameStateMachine::requestFinish() のコメント参照)
+  void onFinishRequest(const std_msgs::msg::Empty::SharedPtr msg);
   // 操縦者の確定 (微調整の完了)。ADJUSTING_PICK / ADJUSTING_PLACE でのみ効く
   void onConfirm(const std_msgs::msg::Empty::SharedPtr msg);
   // motion_generator の現在の目標姿勢と動作許可 (enable)。姿勢は微調整でジョグした
@@ -112,6 +117,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr change_state_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr toggle_manual_control_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr finish_sub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 

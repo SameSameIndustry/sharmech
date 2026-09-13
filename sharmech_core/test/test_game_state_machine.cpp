@@ -34,6 +34,8 @@ GameStateMachine::Config makeConfig()
   config.init_pose.y = 0.0;
   config.init_pose.z = 0.15;
   config.init_delay_sec = 3.0;
+  config.finish_pose.x = 0.15;   // 終了位置 (r=0.15, θ=0 → xy=(0.15, 0))。z は使わない
+  config.finish_pose.y = 0.0;
   return config;
 }
 
@@ -1006,6 +1008,227 @@ TEST(GameStateMachine, InitStateNameRoundTrips)
   const auto parsed = sharmech_core::gameStateFromString("INIT");
   ASSERT_TRUE(parsed.has_value());
   EXPECT_EQ(*parsed, GameState::kInit);
+}
+
+// --- 終了位置 (FINISH): 競技終了時に /catchrobo/game/finish で終了位置へ ------------
+// 導線は INIT (reset) と同じ: どの状態からでも入り、グリッパ開・縦解除・クランプ解除を
+// 同時発行し、終了位置へ直線 1 本のゴールを出す。INIT と違うのは 2 点 —— 動作許可が
+// 出ていれば **即** 出す (init_delay_sec を待たない) こと、**着いても kFinish に留まる**
+// (kWaitingForPick へ戻さない) こと。xy は Config::finish_pose、**z は要求時点の
+// 目標姿勢のまま** (ユーザー指示 2026-09-12)、pitch/yaw は 0
+
+// どの状態からでも FINISH に入り、動作許可が出ていれば即ゴールを出す。
+// グリッパは開き、縦は解除し、作業領域クランプはデフォルトへ戻す (reset と同じ)
+TEST(GameStateMachine, FinishEntersFromAnyStateAndSendsGoalImmediately)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true, 0.0);
+  machine.onCurrentPose(makePose(0.5, 0.1, 0.18));
+  advanceToGrasping(machine, makePose(0.5, 0.1, 0.0));
+  machine.consumePendingGripper();
+  ASSERT_EQ(machine.state(), GameState::kGrasping);
+
+  machine.requestFinish();
+  EXPECT_EQ(machine.state(), GameState::kFinish);
+  ASSERT_TRUE(machine.hasPendingGoal());   // INIT と違い待たずに出す
+  const auto goal = machine.consumePendingGoal();
+  EXPECT_DOUBLE_EQ(goal.x, 0.15);
+  EXPECT_DOUBLE_EQ(goal.y, 0.0);
+  EXPECT_DOUBLE_EQ(goal.z, 0.18);          // z は現在の目標姿勢のまま
+  EXPECT_DOUBLE_EQ(goal.pitch, 0.0);
+  EXPECT_DOUBLE_EQ(goal.yaw, 0.0);
+
+  ASSERT_TRUE(machine.hasPendingGripper());
+  EXPECT_FALSE(machine.consumePendingGripper());          // 開く
+  ASSERT_TRUE(machine.hasPendingOrientVertical());
+  EXPECT_FALSE(machine.consumePendingOrientVertical());    // 横へ戻す
+  ASSERT_TRUE(machine.hasPendingWorkspaceClamp());
+  EXPECT_TRUE(machine.consumePendingWorkspaceClamp().reset);
+
+  machine.tick(10.0);
+  EXPECT_FALSE(machine.hasPendingGoal());   // 2 本目は出ない
+}
+
+// 着いても待機へは戻らず FINISH のまま。競技は終わっているので pick_request は受けない
+TEST(GameStateMachine, FinishStaysAfterArrivalAndIgnoresPickRequest)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true, 0.0);
+  machine.onCurrentPose(makePose(0.3, 0.0, 0.15));
+  machine.requestFinish();
+  machine.consumePendingGoal();
+
+  machine.onGoalReached(2.0);
+  EXPECT_EQ(machine.state(), GameState::kFinish);
+  EXPECT_FALSE(machine.hasPendingGoal());
+
+  machine.onPickPoseReceived(makePose(0.4, 0.1, 0.0));
+  EXPECT_EQ(machine.state(), GameState::kFinish);
+  EXPECT_FALSE(machine.hasPendingGoal());
+
+  // 着いた後に届く却下・中断 (他のゴールのもの) でも待機へ落ちない
+  machine.onGoalRejectedOrAborted();
+  EXPECT_EQ(machine.state(), GameState::kFinish);
+}
+
+// 動作許可がまだ無いときは (reset と同じく) ゴールを出さずに待ち、
+// 立ち上がり + init_delay_sec で出す。その前に届く到達・却下は無視する
+TEST(GameStateMachine, FinishBeforeMotionEnableWaitsForRisingEdge)
+{
+  GameStateMachine machine(makeConfig());
+  machine.requestFinish();
+  EXPECT_EQ(machine.state(), GameState::kFinish);
+  EXPECT_FALSE(machine.hasPendingGoal());
+  machine.tick(100.0);              // 許可が無い間はいくら経っても出さない
+  EXPECT_FALSE(machine.hasPendingGoal());
+
+  machine.onGoalReached(50.0);      // 古い到達・却下は自分のものではない
+  machine.onGoalRejectedOrAborted();
+  EXPECT_EQ(machine.state(), GameState::kFinish);
+
+  machine.onCurrentPose(makePose(0.3, 0.0, 0.12));
+  machine.onMotionEnabled(true, 100.0);
+  machine.tick(102.0);
+  EXPECT_FALSE(machine.hasPendingGoal());
+  machine.tick(103.0);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  const auto goal = machine.consumePendingGoal();
+  EXPECT_DOUBLE_EQ(goal.x, 0.15);
+  EXPECT_DOUBLE_EQ(goal.z, 0.12);
+}
+
+// 現在の目標姿勢が未受信 (ノード経由では起きない) なら init_pose の z で出す
+TEST(GameStateMachine, FinishFallsBackToInitPoseZWithoutCurrentPose)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true, 0.0);
+  machine.requestFinish();
+  ASSERT_TRUE(machine.hasPendingGoal());
+  const auto goal = machine.consumePendingGoal();
+  EXPECT_DOUBLE_EQ(goal.x, 0.15);
+  EXPECT_DOUBLE_EQ(goal.y, 0.0);
+  EXPECT_DOUBLE_EQ(goal.z, 0.15);   // makeConfig() の init_pose.z
+}
+
+// 自由操作中・完了後からも入れる (reset と同じ)
+TEST(GameStateMachine, FinishPullsOutOfManualControlAndComplete)
+{
+  {
+    GameStateMachine machine(makeConfig());
+    machine.onMotionEnabled(true, 0.0);
+    machine.onPickPoseReceived(makePose(0.5, 0.1, 0.0));
+    machine.consumePendingGoal();
+    machine.toggleManualControl(1.0);
+    ASSERT_EQ(machine.state(), GameState::kManualControl);
+
+    machine.requestFinish();
+    EXPECT_EQ(machine.state(), GameState::kFinish);
+    EXPECT_TRUE(machine.hasPendingGoal());
+  }
+  {
+    GameStateMachine machine(makeConfig());
+    machine.onMotionEnabled(true, 0.0);
+    for (int i = 1; i <= 4; ++i) {runOneCycle(machine, i);}
+    ASSERT_EQ(machine.state(), GameState::kComplete);
+
+    machine.requestFinish();
+    EXPECT_EQ(machine.state(), GameState::kFinish);
+    EXPECT_TRUE(machine.hasPendingGoal());
+  }
+}
+
+// 終了位置へのゴールが却下・中断されたら INIT と同じ扱いで待機へ落ちる
+TEST(GameStateMachine, FinishFallsBackToWaitingForPickWhenGoalRejected)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true, 0.0);
+  machine.requestFinish();
+  ASSERT_TRUE(machine.hasPendingGoal());
+  machine.consumePendingGoal();
+
+  machine.onGoalRejectedOrAborted();
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+}
+
+// reset は FINISH からでも INIT へ (他の状態と同じ)。FINISH のゴールの結果はもう待たない
+TEST(GameStateMachine, ResetPullsOutOfFinish)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true, 0.0);
+  machine.requestFinish();
+  machine.consumePendingGoal();
+  ASSERT_EQ(machine.state(), GameState::kFinish);
+
+  machine.requestInit(5.0);
+  EXPECT_EQ(machine.state(), GameState::kInit);
+  machine.tick(8.0);
+  ASSERT_TRUE(machine.hasPendingGoal());
+  EXPECT_DOUBLE_EQ(machine.consumePendingGoal().x, 0.30);
+  machine.onGoalReached(9.0);
+  EXPECT_EQ(machine.state(), GameState::kWaitingForPick);
+}
+
+// FINISH から自由操作へ入って戻ると FINISH へ (INIT のように待機へは落とさない)。
+// 戻ってもゴールは出さず、走っていたゴールの結果も無視する
+TEST(GameStateMachine, ManualControlRoundTripReturnsToFinishWithoutMoving)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true, 0.0);
+  machine.requestFinish();
+  machine.consumePendingGoal();
+  ASSERT_EQ(machine.state(), GameState::kFinish);
+
+  machine.toggleManualControl(4.0);
+  EXPECT_EQ(machine.state(), GameState::kManualControl);
+  machine.onGoalReached(4.5);   // 中断された FINISH ゴールの結果が届いても無視
+  EXPECT_EQ(machine.state(), GameState::kManualControl);
+
+  machine.toggleManualControl(5.0);
+  EXPECT_EQ(machine.state(), GameState::kFinish);
+  EXPECT_FALSE(machine.hasPendingGoal());
+  machine.tick(10.0);
+  EXPECT_FALSE(machine.hasPendingGoal());
+  machine.onGoalRejectedOrAborted();   // 出していないゴールの却下も無視
+  EXPECT_EQ(machine.state(), GameState::kFinish);
+}
+
+// forceState(kFinish) は状態を変えるだけで動かない (動かすのは finish)
+TEST(GameStateMachine, ForceStateToFinishDoesNotMove)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true, 0.0);
+  machine.forceState(GameState::kFinish, 0.0);
+  EXPECT_EQ(machine.state(), GameState::kFinish);
+  machine.tick(10.0);
+  EXPECT_FALSE(machine.hasPendingGoal());
+  machine.onGoalReached(11.0);
+  EXPECT_EQ(machine.state(), GameState::kFinish);
+}
+
+// 配置の進み具合は消さない (reset と同じ理由)
+TEST(GameStateMachine, FinishKeepsPlacementProgress)
+{
+  GameStateMachine machine(makeConfig());
+  machine.onMotionEnabled(true, 0.0);
+  runOneCycle(machine, 1);
+  ASSERT_EQ(machine.currentSlotId(), 1);
+
+  machine.requestFinish();
+  machine.consumePendingGoal();
+  machine.onGoalReached(9.0);
+  ASSERT_EQ(machine.state(), GameState::kFinish);
+
+  EXPECT_EQ(machine.currentSlotId(), 1);
+  EXPECT_FALSE(machine.hasQueuedSlot());
+}
+
+// 状態名の文字列は /catchrobo/game/state の契約そのもの (VR側が色分けと案内に使う)
+TEST(GameStateMachine, FinishStateNameRoundTrips)
+{
+  EXPECT_EQ(sharmech_core::toString(GameState::kFinish), "FINISH");
+  const auto parsed = sharmech_core::gameStateFromString("FINISH");
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(*parsed, GameState::kFinish);
 }
 
 int main(int argc, char ** argv)

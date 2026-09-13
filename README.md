@@ -143,6 +143,7 @@ Cartesianストリーム)は既存経路をそのまま通る。詳細は
 | `/catchrobo/game/toggle_manual_control` | `std_msgs/Empty` | `joy_teleop_node` (4ボタン同時押し) / WebXR → `game_state_manager_node`。自由操作 (`MANUAL_CONTROL`) のトグル | ○ |
 | `/catchrobo/game/confirm` | `std_msgs/Empty` | `joy_teleop_node` (確定ボタン) / WebXR (サムズアップ) → `game_state_manager_node`。微調整 (`ADJUSTING_PICK`/`ADJUSTING_PLACE`) の確定 | ○ |
 | `/catchrobo/game/reset` | `std_msgs/Empty` | WebXR → `game_state_manager_node`。状態のリセット要求。どの状態からでも `INIT` へ入り、**初期位置** (`robot_geometry.yaml` の `init_pose`。2026-09-11〜 ROS2 側が正本) へ直線 1 本で戻ってから `WAITING_FOR_PICK` に復帰する | ○ |
+| `/catchrobo/game/finish` | `std_msgs/Empty` | WebXR (メニュー「本番」タブの「終了位置へ」) → `game_state_manager_node`。**競技終了時の終了位置** (`robot_geometry.yaml` の `finish_pose`。r=0.15・θ=0、z は要求時のまま) への移動要求。**導線は `reset` と同じ**でどの状態からでも `FINISH` へ入り、着いても `FINISH` に留まる (2026-09-13)。着いた後はジョグ (`cmd_twist`) が効く (自由操作へ入らなくてよい)。座標は ROS2 側が持ち、VR は合図を送るだけ | ○ |
 | `/catchrobo/game/workspace_clamp` | `sharmech_msgs/WorkspaceClamp` | `game_state_manager_node` → `motion_generator_node`。PLACING/RETRACTING 中にスロット周辺へ作業領域を絞る | |
 | `/catchrobo/game/jog_limit` | `sharmech_msgs/JogLimit` | `game_state_manager_node` → `motion_generator_node`。場面ごとのジョグ速度上限 (微調整中は減速、自動シーケンス中は遮断)。2026-09-10 追加 | |
 | `/catchrobo/debug/change_state` | `std_msgs/String` | デバッグ用 → `game_state_manager_node`。ステートを強制遷移させる (その状態の目標姿勢は配信しない) | ○ |

@@ -50,6 +50,14 @@ namespace sharmech_core
 //                   どの状態からでも入れ、自動シーケンスを完全に止めて
 //                   ジョグ操作(cmd_twist)だけで試合を進められるようにする。
 //                   詳細は toggleManualControl() のコメント参照
+//   kFinish         競技終了時の終了位置 (Config::finish_pose の xy。z は要求時点の目標姿勢
+//                   のまま) へ動かしている最中、および着いた後。**導線は kInit と同じ**
+//                   (/catchrobo/game/finish でどの状態からでも入り、グリッパは開・縦は
+//                   解除・クランプはデフォルトへ。動作許可が出ていれば直線 1 本のゴールを
+//                   即出し、まだなら立ち上がりを待つ)。**着いても kWaitingForPick には
+//                   戻らず kFinish に留まる** (競技は終わっているので pick_request を受ける
+//                   状態にしない)。出口は reset (→ kInit)・MANUAL_CONTROL・却下/中断
+//                   (→ kWaitingForPick。kInit と同じ)。requestFinish() のコメント参照
 // 値は /catchrobo/game/state の文字列が正本なので、数値の並びに意味は無い
 // (kOrienting は後から追加したため末尾に置いてある)
 enum class GameState : uint8_t
@@ -68,6 +76,7 @@ enum class GameState : uint8_t
   kTransportLift = 11,
   kAdjustingPick = 12,
   kAdjustingPlace = 13,
+  kFinish = 14,
 };
 
 inline std::string toString(GameState state)
@@ -87,6 +96,7 @@ inline std::string toString(GameState state)
     case GameState::kComplete: return "COMPLETE";
     case GameState::kManualControl: return "MANUAL_CONTROL";
     case GameState::kInit: return "INIT";
+    case GameState::kFinish: return "FINISH";
   }
   return "UNKNOWN";
 }
@@ -101,7 +111,7 @@ inline std::optional<GameState> gameStateFromString(const std::string & name)
       GameState::kAdjustingPlace, GameState::kGrasping, GameState::kTransportLift,
       GameState::kTransporting, GameState::kOrienting, GameState::kPlacing,
       GameState::kRetracting, GameState::kComplete, GameState::kManualControl,
-      GameState::kInit
+      GameState::kInit, GameState::kFinish
     })
   {
     if (toString(state) == name) {return state;}
@@ -173,6 +183,13 @@ public:
     // kInit で動作許可が出てから実際に初期位置へのゴールを出すまでの待ち時間 [s]
     // (ユーザー指示 2026-09-11。同期直後に即動き出さず、一呼吸置く)
     double init_delay_sec{3.0};
+    // 終了位置 (kFinish の行き先)。**x, y だけを使う** —— z は requestFinish() でゴールを
+    // 出す時点の現在の目標姿勢 (onCurrentPose) をそのまま保つ (ユーザー指示 2026-09-12
+    // 「z はまずは変えなくていい」)。pitch/yaw は init_pose と同じく 0。正本は
+    // robot_geometry.yaml の finish_pose (極座標 r/θ、赤・青別。既定 r=0.15, θ=0) で、
+    // game_state_manager_node が直交座標へ直して渡す。init_pose と同じく
+    // field_origin_offset は掛からない
+    CartesianState finish_pose{};
   };
 
   explicit GameStateMachine(Config config)
@@ -238,6 +255,8 @@ public:
     pending_goal_.reset();
     init_goal_sent_ = false;
     init_goal_due_sec_.reset();
+    finish_goal_sent_ = false;         // kFinish から入った場合、その結果はもう待たない
+    finish_goal_due_sec_.reset();
     if (motion_enabled_) {scheduleInitGoal(now_sec);}
     pending_gripper_ = false;          // 掴んだままにしない
     pending_orient_vertical_ = false;  // 縦にしていたら横へ戻す
@@ -251,11 +270,53 @@ public:
     // 入るときに、そのときの状態で上書きされるため
   }
 
+  // 競技終了時に終了位置 (Config::finish_pose) へ動かす (/catchrobo/game/finish。
+  // VR のメニュー「本番」タブの「終了位置へ」)。**導線は requestInit() と同じ**で、
+  // **どの状態からでも受け付ける** (kManualControl・kComplete・kInit を含む)。
+  // ルールの「競技終了: 動作を停止し、審判の許可のもと非常停止を入れても安全な位置まで
+  // 移動させる」の「安全な位置」へ、ボタン 1 つで寄せるためのもの。
+  //
+  // requestInit() と同じく、状態と一緒にグリッパ開・縦の解除・作業領域クランプの解除を
+  // 同時発行する (ワークを掴んだまま・縦のまま・クランプが絞られたままだと終了位置へ
+  // 動けない/危ない。競技は終わっているので、掴んでいたワークを離しても得点には響かない)。
+  //
+  // ゴールは Config::finish_pose の xy + **現在の目標姿勢 (onCurrentPose) の z** の直線 1 本
+  // (pitch/yaw は 0)。z を変えないので、INIT のような z 速度の絞り (init_v_max_z) は掛けない。
+  // 動作許可が出ていれば**即**出す (INIT の init_delay_sec は「同期した瞬間に動き出さない」
+  // ための間で、ボタンで押した要求には要らない)。まだ出ていなければ onMotionEnabled の
+  // 立ち上がりから init_delay_sec 後に出す (同期直後の一呼吸は INIT と同じ理由で置く)。
+  //
+  // **到達しても kWaitingForPick へは戻らず kFinish に留まる** (INIT との唯一の違い)。
+  // 競技は終わっているので、次の pick_request を受ける状態にはしない。出口は
+  // reset (→ kInit → kWaitingForPick)、MANUAL_CONTROL (戻りは kFinish)、却下・中断
+  // (→ kWaitingForPick。INIT と同じ #9 の扱い)。
+  //
+  // **配置の進み具合 (order_index_ / authorized_count_) は消さない** (requestInit と同じ理由)
+  void requestFinish()
+  {
+    state_ = GameState::kFinish;
+    pending_goal_.reset();
+    init_goal_sent_ = false;
+    init_goal_due_sec_.reset();
+    finish_goal_sent_ = false;
+    finish_goal_due_sec_.reset();
+    if (motion_enabled_) {
+      sendFinishGoal();
+    }
+    pending_gripper_ = false;          // 掴んだままにしない
+    pending_orient_vertical_ = false;  // 縦にしていたら横へ戻す
+    WorkspaceClampCommand reset_clamp;
+    reset_clamp.reset = true;          // PLACING中の絞り込みが残っていても解除する
+    pending_clamp_ = reset_clamp;
+    // 動作許可待ちの予約は onMotionEnabled の立ち上がりでだけ行う (時刻はそこで貰う)
+  }
+
   // motion_generator_node の動作許可 (/catchrobo/command/cartesian の enable)。
   // MCU の実姿勢へ同期し終えると false → true、MCU 未初期化 (bit3) やフィードバックの
   // 途絶で true → false になる。
   //   立ち上がり: kInit で待っていれば、init_delay_sec 後に初期位置へのゴールを出す
   //               (起動時・reset 直後・途絶からの復帰。実際に出すのは tick)。
+  //               kFinish で待っていれば同じ間を置いて終了位置へのゴールを出す。
   //               それ以外の状態では何もしない
   //   立ち下がり: どの状態からでも kInit へ (途絶 → 強制 INIT。ユーザー決定 2026-09-11)。
   //               ゴールは復帰後の立ち上がりで出る
@@ -265,6 +326,8 @@ public:
     motion_enabled_ = enabled;
     if (enabled && !was_enabled && state_ == GameState::kInit) {
       scheduleInitGoal(now_sec);
+    } else if (enabled && !was_enabled && state_ == GameState::kFinish) {
+      scheduleFinishGoal(now_sec);
     } else if (!enabled && was_enabled) {
       requestInit(now_sec);
     }
@@ -398,6 +461,12 @@ public:
         init_goal_sent_ = false;
         state_ = GameState::kWaitingForPick;
         break;
+      case GameState::kFinish:
+        // 終了位置に着いた。**待機へは戻さず kFinish のまま** (競技は終わっている)。
+        // ゴールを出す前に届いた到達は他人のもの (kInit と同じ)
+        if (!finish_goal_sent_) {break;}
+        finish_goal_sent_ = false;
+        break;
       default:
         break;
     }
@@ -412,7 +481,10 @@ public:
     // kInit でゴールを出す前 (動作許可待ち) の却下・中断は自分のものではない
     // (途絶で中断された直前のゴールの ABORTED が enable の立ち下がりの後に届く等)
     if (state_ == GameState::kInit && !init_goal_sent_) {return;}
+    // kFinish も同じ。ゴールを出す前 (動作許可待ち) や着いた後の却下・中断は自分のものではない
+    if (state_ == GameState::kFinish && !finish_goal_sent_) {return;}
     init_goal_sent_ = false;
+    finish_goal_sent_ = false;
     if (state_ != GameState::kWaitingForPick && state_ != GameState::kComplete &&
       state_ != GameState::kManualControl)
     {
@@ -429,6 +501,12 @@ public:
     if (state_ == GameState::kInit && init_goal_due_sec_ && now_sec >= *init_goal_due_sec_) {
       init_goal_due_sec_.reset();
       sendInitGoal();
+      return;
+    }
+    // kFinish: 動作許可待ちで入っていた場合、立ち上がりから init_delay_sec 後に終了位置へ
+    if (state_ == GameState::kFinish && finish_goal_due_sec_ && now_sec >= *finish_goal_due_sec_) {
+      finish_goal_due_sec_.reset();
+      sendFinishGoal();
       return;
     }
     if (state_ == GameState::kGrasping && hasQueuedSlot() &&
@@ -463,6 +541,8 @@ public:
     pending_goal_.reset();
     init_goal_sent_ = false;   // forceState(kInit) では動かない (動かすのは reset)
     init_goal_due_sec_.reset();
+    finish_goal_sent_ = false;  // forceState(kFinish) も同じ (動かすのは finish)
+    finish_goal_due_sec_.reset();
     pending_gripper_.reset();
     pending_orient_vertical_.reset();
     pending_clamp_.reset();
@@ -491,7 +571,9 @@ public:
   {
     if (state_ == GameState::kManualControl) {
       // kInit から自由操作に入っていた場合は kInit へ戻さず待機へ (自由操作で動かした
-      // 後に、途中だった初期位置への移動を再開しない)。自由操作は INIT の出口の 1 つ
+      // 後に、途中だった初期位置への移動を再開しない)。自由操作は INIT の出口の 1 つ。
+      // **kFinish はそのまま kFinish へ戻す** —— 着いた後の状態でもあり、戻っても
+      // ゴールは出さない (finish_goal_sent_ を落とすので、走っていたゴールの結果も無視する)
       state_ = pre_manual_state_ == GameState::kInit ?
         GameState::kWaitingForPick : pre_manual_state_;
     } else {
@@ -501,6 +583,8 @@ public:
     pending_goal_.reset();
     init_goal_sent_ = false;
     init_goal_due_sec_.reset();
+    finish_goal_sent_ = false;
+    finish_goal_due_sec_.reset();
     pending_gripper_.reset();
     pending_orient_vertical_.reset();
     WorkspaceClampCommand reset_clamp;
@@ -560,6 +644,27 @@ private:
     goal.yaw = 0.0;
     pending_goal_ = goal;
     init_goal_sent_ = true;
+  }
+
+  // 動作許可の立ち上がりから init_delay_sec 後に終了位置へのゴールを出すよう予約する (tick が出す)
+  void scheduleFinishGoal(double now_sec)
+  {
+    finish_goal_due_sec_ = now_sec + config_.init_delay_sec;
+  }
+
+  // 終了位置へのゴール (直線 1 本) を出す。xy は Config::finish_pose、**z は現在の目標姿勢
+  // のまま**、pitch/yaw は 0。現在の目標姿勢が未受信なら init_pose の z を使う
+  // (ノード経由では起きない —— 動作許可 (enable) と目標姿勢は同じメッセージで届き、
+  // 許可が出ていなければここまで来ないため。純粋ロジックの安全側のフォールバック)
+  void sendFinishGoal()
+  {
+    CartesianState goal = current_pose_ ? *current_pose_ : config_.init_pose;
+    goal.x = config_.finish_pose.x;
+    goal.y = config_.finish_pose.y;
+    goal.pitch = 0.0;
+    goal.yaw = 0.0;
+    pending_goal_ = goal;
+    finish_goal_sent_ = true;
   }
 
   void enterGrasping(double now_sec)
@@ -680,6 +785,11 @@ private:
   bool init_goal_sent_{false};
   // kInit でゴールを出す予定時刻 [s] (動作許可が出た時刻 + init_delay_sec)。予約が無ければ nullopt
   std::optional<double> init_goal_due_sec_;
+  // kFinish で終了位置へのゴールを出したか (着いたら false に戻す)。出す前・着いた後に
+  // 届いた到達・却下は無視する (init_goal_sent_ と同じ役割)
+  bool finish_goal_sent_{false};
+  // kFinish で動作許可待ちのままゴールを出す予定時刻 [s]。予約が無ければ nullopt
+  std::optional<double> finish_goal_due_sec_;
 
   std::optional<CartesianState> pending_goal_;
   std::optional<bool> pending_gripper_;

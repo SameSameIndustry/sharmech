@@ -52,12 +52,16 @@ game_state_manager_node:
     transport_clearance_above_box_top_m: 0.044
     retract_clearance_above_box_top_m: 0.044
     pick_z_m: 0.05
-    init_pose_r_red: 0.2
+    init_pose_r_red: 0.3
     init_pose_theta_red: 2.356194
     init_pose_z_red: 0.2
-    init_pose_r_blue: 0.2
+    init_pose_r_blue: 0.3
     init_pose_theta_blue: -2.356194
     init_pose_z_blue: 0.2
+    finish_pose_r_red: 0.15
+    finish_pose_theta_red: 0.0
+    finish_pose_r_blue: 0.15
+    finish_pose_theta_blue: 0.0
     turntable_axis_x_m: 0.0
     turntable_axis_y_m: 0.0
     field_origin_offset_x_m: 0.0

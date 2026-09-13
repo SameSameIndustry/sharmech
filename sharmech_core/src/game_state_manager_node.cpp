@@ -103,6 +103,12 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
     "/catchrobo/game/reset", 10,
     std::bind(&GameStateManagerNode::onResetRequest, this, std::placeholders::_1));
 
+  // 競技終了時の終了位置への移動要求。VR (メニュー「本番」タブのボタン) から届く。
+  // reset と同じ導線で、どの状態からでも FINISH へ入り終了位置へ動く (着いても FINISH のまま)
+  finish_sub_ = create_subscription<std_msgs::msg::Empty>(
+    "/catchrobo/game/finish", 10,
+    std::bind(&GameStateManagerNode::onFinishRequest, this, std::placeholders::_1));
+
   target_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
     "/catchrobo/arm/target_pose", 10);
   gripper_pub_ = create_publisher<std_msgs::msg::Bool>(
@@ -129,9 +135,10 @@ GameStateManagerNode::GameStateManagerNode(const rclcpp::NodeOptions & options)
   RCLCPP_INFO(
     get_logger(),
     "game_state_manager_node started (field_color=%s, %zu slots, %zu-step placement_order, "
-    "init_pose=(%.3f, %.3f, %.3f), init_on_startup=%s)",
+    "init_pose=(%.3f, %.3f, %.3f), finish_pose xy=(%.3f, %.3f), init_on_startup=%s)",
     field_color.c_str(), config.slots.size(), config.placement_order.size(),
     config.init_pose.x, config.init_pose.y, config.init_pose.z,
+    config.finish_pose.x, config.finish_pose.y,
     config.init_on_startup ? "true" : "false");
   logSlotGeometry(config, {});
 }
@@ -214,6 +221,13 @@ void GameStateManagerNode::declareParameters(const std::string & color_suffix)
   // 初期位置へ戻るときだけ z をゆっくりにする (ユーザー指示 2026-09-12)。r/θ はそのまま。
   // 0 なら z の別上限なし。INIT を抜けたら motion_generator_node 側を 0 に戻す
   declare_parameter("init_v_max_z", 0.02);
+
+  // --- 終了位置 (競技終了時に /catchrobo/game/finish で動く先。2026-09-13) ---
+  // robot_geometry.yaml の finish_pose から生成される。init_pose と同じ極座標 (r/θ) で
+  // 赤・青別に持ち、buildConfig() が直交座標へ直す。**z は持たない** —— 要求時点の目標姿勢の
+  // z をそのまま保つ (ユーザー指示 2026-09-12「z はまずは変えなくていい」)
+  declare_parameter("finish_pose_r_" + color_suffix, 0.0);
+  declare_parameter("finish_pose_theta_" + color_suffix, 0.0);
 }
 
 // overrides に載っているものはそ担ってるよねの値を、載っていないものは現在値を使って設定を組む。
@@ -304,6 +318,18 @@ GameStateMachine::Config GameStateManagerNode::buildConfig(
   if (config.init_delay_sec < 0.0) {
     throw std::invalid_argument("init_delay_sec must be >= 0");
   }
+
+  // 終了位置: 極座標 → 直交座標 (xy のみ。z は要求時の目標姿勢を保つ)。
+  // init_pose と同じく field_origin_offset は掛けない
+  const double finish_r = dbl("finish_pose_r_" + field_color_);
+  const double finish_theta = dbl("finish_pose_theta_" + field_color_);
+  if (!(finish_r > 0.0) || !std::isfinite(finish_theta)) {
+    throw std::invalid_argument(
+            "finish_pose_r_" + field_color_ + " must be positive (got " +
+            std::to_string(finish_r) + "); robot_geometry.generated.yaml が古いか未生成");
+  }
+  config.finish_pose.x = PolarUtils::toX(finish_r, finish_theta, dbl("turntable_axis_x_m"));
+  config.finish_pose.y = PolarUtils::toY(finish_r, finish_theta, dbl("turntable_axis_y_m"));
 
   if (config.slots.empty()) {
     throw std::invalid_argument(
@@ -489,7 +515,8 @@ void GameStateManagerNode::onArmStatus(const sharmech_msgs::msg::MotionStatus::S
   {
     RCLCPP_WARN(
       get_logger(),
-      "Automated goal was not accepted (last_result=%u, %s); returning to WAITING_FOR_PICK",
+      "Automated goal was not accepted (last_result=%u, %s); returning to WAITING_FOR_PICK "
+      "(unless in WAITING_FOR_PICK / COMPLETE / MANUAL_CONTROL, or INIT/FINISH before its goal)",
       msg->last_result, msg->message.c_str());
     machine_->onGoalRejectedOrAborted();
   }
@@ -548,6 +575,26 @@ void GameStateManagerNode::onResetRequest(const std_msgs::msg::Empty::SharedPtr)
     get_logger(),
     "Game state reset requested: %s -> INIT (moving to init_pose)",
     toString(previous).c_str());
+  publishPendingOutputs();
+  publishState();
+}
+
+// 競技終了時の終了位置への移動要求 (/catchrobo/game/finish)。reset と同じ導線で、
+// どの状態からでも FINISH へ入り、終了位置 (finish_pose の xy、z は現在の目標姿勢のまま)
+// へのゴールを出す (動作許可がまだなら立ち上がり + init_delay_sec で出す)。
+// **着いても FINISH に留まる** (競技は終わっているので WAITING_FOR_PICK には戻さない)。
+// グリッパ開・縦の解除・クランプ解除も reset と同じく同時発行する
+// (GameStateMachine::requestFinish() のコメント参照)
+void GameStateManagerNode::onFinishRequest(const std_msgs::msg::Empty::SharedPtr)
+{
+  const auto previous = machine_->state();
+  machine_->requestFinish();
+  const auto & finish = machine_->config().finish_pose;
+  RCLCPP_WARN(
+    get_logger(),
+    "Finish requested: %s -> FINISH (moving to finish_pose xy=(%.3f, %.3f), z kept%s)",
+    toString(previous).c_str(), finish.x, finish.y,
+    machine_->motionEnabled() ? "" : "; waiting for motion enable");
   publishPendingOutputs();
   publishState();
 }
@@ -680,7 +727,7 @@ void GameStateManagerNode::syncInitSpeedLimit()
 //
 //   自動シーケンス動作中        → block (操縦者は触らない)
 //   微調整待ち (ADJUSTING_*)    → 上限を adjusting_jog_v_max まで絞る
-//   待機・自由操作・完了        → reset (起動時の jog_v_max)
+//   待機・自由操作・完了・終了  → reset (起動時の jog_v_max)
 //
 // **GRASPING / ORIENTING も block に含める。** ゴールを持たない待機状態
 // (グリッパを閉じる/缶を縦にする時間を待つだけ) なので、goal_priority による
@@ -697,6 +744,10 @@ void GameStateManagerNode::publishJogLimitIfChanged()
     case GameState::kWaitingForPick:
     case GameState::kManualControl:
     case GameState::kComplete:
+    // kFinish もジョグを許す (ユーザー指示 2026-09-13。競技終了後に自由操作へ入らずに
+    // そのまま手動で動かせるように)。終了位置へ移動している最中は goal_priority が
+    // ゴールを優先して Twist を捨てるので、効くのは**着いてから**
+    case GameState::kFinish:
       policy.reset = true;
       break;
     default:
