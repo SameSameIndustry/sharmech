@@ -128,6 +128,25 @@ VR の仮想フィールドでオペレータがワークを「掴んで」「�
 
 **変化した瞬間だけ publish する** (状態は `state_publish_rate` で回っているので毎回送ると無駄)。
 
+状態ごとの扱い (`publishJogLimitIfChanged()` が正本):
+
+| 状態 | ジョグ |
+|---|---|
+| `ADJUSTING_PICK` / `ADJUSTING_PLACE` | 上限を `adjusting_jog_v_max` (既定 0.05 m/s) へ絞る |
+| `WAITING_FOR_PICK` / `MANUAL_CONTROL` / `COMPLETE` / `FINISH` / **`INIT`** | 許可 (`reset` = 起動時の `jog_v_max`) |
+| 自動シーケンス中 (`APPROACHING`〜`RETRACTING`) | 遮断 (`block`) |
+
+**`INIT` は 2026-09-13 に遮断から許可へ変えた** (ユーザー指示。`FINISH` と同じ扱いにする)。
+自動シーケンスではなく「操縦者が居る場面」なので塞ぐ理由が無い。ただし実際に効く時間帯は
+`goal_mode: goal_priority` の都合で限られる:
+
+- **効く**: 動作許可が出てから `init_delay_sec` (既定 3s) 待っている間 (初期位置へ動き出す前に
+  手で寄せられる)
+- **効かない**: 初期位置へ動いている最中 (ゴール実行中は Twist が捨てられる。`FINISH` も同じ)。
+  動作許可が出る前 (MCU 未同期・0x81 途絶中) は `motion_generator_node` が同期前の Twist を
+  捨てるので、`reset` を送っても動かないことは変わらない
+- 到達後は `WAITING_FOR_PICK` なので、そこから先は元々ジョグが効く
+
 なぜこのノードがやるのか:
 
 - **ゲームの状態を知っているのはこのノードだけ**だから。`motion_generator_node` は
@@ -499,7 +518,7 @@ VR復旧後に不整合が疑われる場合は運用側で判断すること。
 | `MANUAL_CONTROL` からの戻り | `WAITING_FOR_PICK` | **`FINISH`** (ゴールは出さない) |
 | 却下・中断 | `WAITING_FOR_PICK` (#9) | 同じ |
 | z 速度の絞り (`init_v_max_z`) | 掛ける | 掛けない (z が動かない) |
-| ジョグ (`jog_limit`) | 遮断 (`block`) | **許可** (`reset`。着いてから効く) |
+| ジョグ (`jog_limit`) | **許可** (`reset`。2026-09-13〜。動作許可 + `init_delay_sec` の待ちの間に効く) | **許可** (`reset`。着いてから効く) |
 
 - **行き先は `robot_geometry.yaml` の `finish_pose`** (`init_pose` と同じ極座標 r/θ、赤・青別。
   既定 r=0.15, θ=0 はユーザー指示 2026-09-12)。ノードが `PolarUtils` で直交座標へ直し、

@@ -725,9 +725,9 @@ void GameStateManagerNode::syncInitSpeedLimit()
 // 実際に ADJUSTING_* が漏れて微調整が効かなくなる事故が起きた (2026-09-08)。
 // ここで一元化したことで、VR も PS4 もシミュレータも同じ挙動になる。
 //
-//   自動シーケンス動作中        → block (操縦者は触らない)
-//   微調整待ち (ADJUSTING_*)    → 上限を adjusting_jog_v_max まで絞る
-//   待機・自由操作・完了・終了  → reset (起動時の jog_v_max)
+//   自動シーケンス動作中            → block (操縦者は触らない)
+//   微調整待ち (ADJUSTING_*)        → 上限を adjusting_jog_v_max まで絞る
+//   待機・自由操作・完了・終了・初期 → reset (起動時の jog_v_max)
 //
 // **GRASPING / ORIENTING も block に含める。** ゴールを持たない待機状態
 // (グリッパを閉じる/缶を縦にする時間を待つだけ) なので、goal_priority による
@@ -748,11 +748,19 @@ void GameStateManagerNode::publishJogLimitIfChanged()
     // そのまま手動で動かせるように)。終了位置へ移動している最中は goal_priority が
     // ゴールを優先して Twist を捨てるので、効くのは**着いてから**
     case GameState::kFinish:
+    // kInit も kFinish と同じ扱い (ユーザー指示 2026-09-13)。**自動シーケンスではなく
+    // 「操縦者が居る場面」**なので塞ぐ理由が無い。効くのは goal_priority がゴールを
+    // 優先しない時間帯、つまり**動作許可が出てから init_delay_sec 待っている間**
+    // (初期位置へ動き出す前に手で寄せられる)。初期位置へ動いている最中は Twist は
+    // 捨てられ、着いたら kWaitingForPick なので、そこから先は元々ジョグが効く。
+    // 動作許可が出る前 (MCU 未同期・0x81 途絶中) は motion_generator_node 側が
+    // 同期前の Twist を捨てるので、ここを reset にしても動かないことは変わらない
+    case GameState::kInit:
       policy.reset = true;
       break;
     default:
       // kApproaching / kApproachDescend / kGrasping / kTransportLift /
-      // kTransporting / kOrienting / kPlacing / kRetracting / kInit
+      // kTransporting / kOrienting / kPlacing / kRetracting
       policy.block = true;
       break;
   }
